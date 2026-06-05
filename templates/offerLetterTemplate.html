@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #111;
+    }
+
+    .header {
+      text-align: center;
+      font-weight: bold;
+      margin-bottom: 25px;
+    }
+
+    .title {
+      text-align: center;
+      font-size: 20px;
+      font-weight: bold;
+      margin: 25px 0;
+      text-decoration: underline;
+    }
+
+    .section-title {
+      font-weight: bold;
+      margin-top: 18px;
+    }
+
+    .signature {
+      margin-top: 50px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+ {{BRANCH_ADDRESS}}
+  </div>
+
+  <div class="title">OFFER LETTER</div>
+
+  <p><b>Reference No:</b> {{REFERENCE_NUMBER}}</p>
+  <p><b>Date:</b> {{OFFER_DATE}}</p>
+
+  <p>Dear {{CANDIDATE_NAME}},</p>
+
+  <p>Greetings from VJC Overseas!</p>
+
+  <p>
+    With reference to the rounds of interview, we are glad to offer you the position of
+    <b>{{DESIGNATION}}</b> in the <b>{{DEPARTMENT}}</b> department at our
+    <b>{{BRANCH}}</b> branch, <b>{{LOCATION}}</b>.
+  </p>
+
+  <p>
+    Your starting date will be on <b>{{JOINING_DATE}}</b>.
+  </p>
+
+  <p>
+    You will be reporting to <b>{{REPORTING_MANAGER}}</b>.
+  </p>
+
+  <div class="section-title">Salary Details</div>
+
+  <p>
+    Your monthly salary will be Rs. <b>{{SALARY}}</b>.
+  </p>
+
+  <p>
+    Your annual CTC will be Rs. <b>{{CTC}}</b>.
+  </p>
+
+  <div class="section-title">Documents Required</div>
+
+  <ol>
+    <li>Proof of Date of Birth and Proof of residence.</li>
+    <li>Two passport size photographs.</li>
+    <li>Last salary slip, if applicable.</li>
+    <li>Educational documents.</li>
+    <li>Relieving letter from previous employer.</li>
+    <li>Experience letter.</li>
+    <li>PAN card.</li>
+  </ol>
+
+  <div class="section-title">Terms and Conditions</div>
+
+  <p>
+    Your employment will be subject to company policies, probation rules,
+    attendance policy, confidentiality policy, and code of conduct.
+  </p>
+
+  <p>
+    Kindly acknowledge and accept the offer.
+  </p>
+
+  <div class="signature">
+    <p>Best Wishes,</p>
+    <p><b>Mani Vuttaradi</b><br />Managing Director<br />VJC Overseas</p>
+  </div>
+
+  <br />
+
+  <p>
+    I, {{CANDIDATE_NAME}}, accept the terms and conditions of this offer letter.
+  </p>
+
+  <p>Signature: ____________________</p>
+  <p>Date: ____________________</p>
+
+</body>
+</html>
