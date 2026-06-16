@@ -29,11 +29,31 @@ const router = express.Router();
 
 // ── Helper: parse year/month from "YYYY-MM" or "YYYY-MM-DD" ──
 function parseYearMonth(monthStr) {
-  if (!monthStr) throw new Error("month is required");
-  const [y, m] = monthStr.slice(0, 7).split("-").map(Number);
-  if (!y || !m || m < 1 || m > 12) throw new Error("Invalid month format (use YYYY-MM)");
-  return { year: y, month: m };
+  if (!monthStr) {
+    throw new Error("month is required");
+  }
+
+  const clean = String(monthStr).trim();
+
+  const match = clean.match(/^(\d{4})-(\d{1,2})(?:-\d{1,2})?$/);
+
+  if (!match) {
+    throw new Error("Invalid month format. Use YYYY-MM, example: 2026-03");
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+
+  if (!year || month < 1 || month > 12) {
+    throw new Error("Invalid month value. Month must be 01 to 12");
+  }
+
+  return { year, month };
 }
+
+
+
+
 
 // ── Helper: safe JSON parse for breakdown column ──────────────
 function parseBreakdown(row) {
@@ -346,7 +366,7 @@ router.put(
 router.get(
   "/payroll/payslip/:id/download",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "MANAGER","EMPLOYEE"),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -365,8 +385,14 @@ router.get(
       if (!result.rows.length)
         return res.status(404).json({ message: "Payslip not found" });
 
-      const p          = parseBreakdown(result.rows[0]);
-     
+      const p = parseBreakdown(result.rows[0]);
+      if (
+        ["EMPLOYEE", "MANAGER"].includes(req.user.role) &&
+        Number(p.user_id) !== Number(req.user.id)
+      ) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
       // Safe breakdown extraction (handles DB string OR already-parsed object)
       let bd = {};
       if (p.breakdown) {
@@ -386,18 +412,28 @@ router.get(
       });
 
       const doc = new PDFDocument({ margin: 50, size: "A4" });
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="payslip_${id}_${monthLabel.replace(" ", "_")}.pdf"`
-      );
-      doc.pipe(res);
+
+const isPreview = req.query.preview === "true";
+const safeMonthLabel = monthLabel.replace(/\s+/g, "_");
+
+res.setHeader("Content-Type", "application/pdf");
+res.setHeader("Cache-Control", "no-store");
+
+res.setHeader(
+  "Content-Disposition",
+  isPreview
+    ? `inline; filename="payslip_${id}_${safeMonthLabel}.pdf"`
+    : `attachment; filename="payslip_${id}_${safeMonthLabel}.pdf"`
+);
+
+doc.pipe(res);
+
 
       // ── Header bar ──────────────────────────────────────────
-      doc.rect(0, 0, doc.page.width, 90).fill("#0a0a0a");
-      doc.fontSize(26).fillColor("#d4af37").font("Helvetica-Bold")
+doc.rect(0, 0, doc.page.width, 100).fill("#ff8c00");
+      doc.fontSize(26).fillColor("#000000").font("Helvetica-Bold")
          .text("VJC OVERSEAS", 50, 22, { align: "left" });
-      doc.fontSize(10).fillColor("#c9a23d").font("Helvetica")
+      doc.fontSize(10).fillColor("#000000").font("Helvetica")
          .text("IMMIGRATION & VISA CONSULTANTS", 50, 52);
       doc.fontSize(12).fillColor("#ffffff")
          .text(`SALARY SLIP — ${monthLabel.toUpperCase()}`, 50, 68);
@@ -418,11 +454,11 @@ router.get(
       const valueColor = "#111827";
       const tblW = doc.page.width - 100;
 
-      doc.fontSize(11).fillColor("#d4af37").font("Helvetica-Bold")
+      doc.fontSize(11).fillColor("#000000").font("Helvetica-Bold")
          .text("EMPLOYEE DETAILS", 50, doc.y);
       doc.moveDown(0.3);
       doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y)
-         .strokeColor("#d4af37").lineWidth(1).stroke();
+         .strokeColor("#FF8C00").lineWidth(1).stroke();
       doc.moveDown(0.5);
 
       const dStart = doc.y;
@@ -448,11 +484,11 @@ router.get(
       doc.y = dStart + 160;
 
       // ── Attendance table ─────────────────────────────────────
-      doc.fontSize(11).fillColor("#d4af37").font("Helvetica-Bold")
+      doc.fontSize(11).fillColor("#000000").font("Helvetica-Bold")
          .text("ATTENDANCE SUMMARY", 50, doc.y);
       doc.moveDown(0.3);
       doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y)
-         .strokeColor("#d4af37").stroke();
+         .strokeColor("#FF8C00").stroke();
       doc.moveDown(0.5);
 
       const attHeaders = ["Description", "Days", "Description", "Days"];
@@ -469,10 +505,10 @@ router.get(
       let tblY   = doc.y;
       const rowH = 22;
 
-      doc.rect(50, tblY, tblW, rowH).fill("#1a1a1a");
+      doc.rect(50, tblY, tblW, rowH).fill("#FF8C00");
       let cx = 58;
       attHeaders.forEach((h, i) => {
-        doc.fontSize(8).fillColor("#d4af37").font("Helvetica-Bold")
+        doc.fontSize(8).fillColor("#000000").font("Helvetica-Bold")
            .text(h, cx, tblY + 7, { width: colW[i] });
         cx += colW[i];
       });
@@ -495,11 +531,11 @@ router.get(
       doc.y = tblY + 16;
 
       // ── Salary breakdown ─────────────────────────────────────
-      doc.fontSize(11).fillColor("#d4af37").font("Helvetica-Bold")
+      doc.fontSize(11).fillColor("#000000").font("Helvetica-Bold")
          .text("SALARY BREAKDOWN", 50, doc.y);
       doc.moveDown(0.3);
       doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y)
-         .strokeColor("#d4af37").stroke();
+         .strokeColor("#000000").stroke();
       doc.moveDown(0.5);
 
 const salaryRows = [
@@ -522,14 +558,14 @@ const salaryRows = [
       salaryRows.forEach((row, ri) => {
         const [label, value, type] = row;
         if (type === "section") {
-          doc.rect(50, sY, tblW, 18).fill("#111827");
-          doc.fontSize(8).fillColor("#9ca3af").font("Helvetica-Bold")
+          doc.rect(50, sY, tblW, 18).fill("#FF8C00");
+          doc.fontSize(8).fillColor("#000000").font("Helvetica-Bold")
              .text(label, 58, sY + 5);
           sY += 18;
           return;
         }
         doc.rect(50, sY, tblW, 20).fill(ri % 2 === 0 ? "#f9fafb" : "#ffffff");
-        const vColor = type === "earning" ? "#15803d"
+        const vColor = type === "earning" ? "#000000"
                      : type === "deduction" ? "#dc2626"
                      : type === "gross" ? "#92400e"
                      : "#111827";
@@ -542,10 +578,10 @@ const salaryRows = [
 
       // Net pay box
       sY += 8;
-      doc.rect(50, sY, tblW, 40).fill("#0a0a0a");
-      doc.fontSize(12).fillColor("#d4af37").font("Helvetica-Bold")
+      doc.rect(50, sY, tblW, 40).fill("#FF8C00");
+      doc.fontSize(12).fillColor("#000000").font("Helvetica-Bold")
          .text("NET SALARY (TAKE HOME)", 62, sY + 13);
-      doc.fontSize(16).fillColor("#4ade80").font("Helvetica-Bold")
+      doc.fontSize(16).fillColor("#000000").font("Helvetica-Bold")
          .text(`₹ ${fmtINR(p.net_pay)}`, 62, sY + 10,
            { width: tblW - 24, align: "right" });
 

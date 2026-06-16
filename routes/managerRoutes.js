@@ -169,6 +169,8 @@ router.get("/manager/my-payslip", verifyToken, authorizeRoles("MANAGER"), async 
   try {
     const { month } = req.query;
     const userId = req.user.id;
+    if (!month) return res.status(400).json({ message: "month required" });
+
     const result = await pool.query(
       `SELECT p.*, u.full_name, u.department, u.branch, u.employee_code, u.salary as base_salary
        FROM payslip_records p
@@ -178,6 +180,23 @@ router.get("/manager/my-payslip", verifyToken, authorizeRoles("MANAGER"), async 
     );
     if (result.rows.length === 0) return res.json(null);
     res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/manager/my-payslips
+router.get("/manager/my-payslips", verifyToken, authorizeRoles("MANAGER"), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT p.*, u.full_name, u.department, u.branch, u.employee_code, u.salary as base_salary
+       FROM payslip_records p
+       JOIN users u ON p.user_id = u.id
+       WHERE p.user_id = $1
+       ORDER BY p.month DESC`,
+      [req.user.id]
+    );
+    res.json(result.rows);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
