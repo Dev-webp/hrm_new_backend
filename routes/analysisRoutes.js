@@ -56,6 +56,51 @@ function monthRange(yearMonth) {
   return { start, end, year: y, month: m };
 }
 
+function normalizedAttendanceStatusSql(alias = "a") {
+  return `CASE
+    WHEN ${alias}.status = 'half_day'
+     AND COALESCE(${alias}.production_hours, 0) >= 4
+     AND COALESCE(${alias}.production_hours, 0) < 8
+     AND NOT (
+       (${alias}.check_in_time <= '10:00:00'::time AND ${alias}.check_out_time >= '14:30:00'::time)
+       OR
+       (${alias}.check_in_time >= '14:30:00'::time AND ${alias}.check_out_time >= '19:00:00'::time)
+     )
+    THEN 'absent'
+    ELSE COALESCE(${alias}.status, 'absent')
+  END`;
+}
+
+function timeToMinutes(timeStr) {
+  if (!timeStr) return null;
+  const [h, m] = String(timeStr).slice(0, 5).split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+function normalizeAttendanceStatus(att) {
+  const status = att?.status || "absent";
+  const productionHours = parseFloat(att?.production_hours) || 0;
+  const checkIn = timeToMinutes(att?.check_in_time);
+  const checkOut = timeToMinutes(att?.check_out_time);
+  const validHalfDaySlot =
+    checkIn !== null &&
+    checkOut !== null &&
+    ((checkIn <= 10 * 60 && checkOut >= 14 * 60 + 30) ||
+      (checkIn >= 14 * 60 + 30 && checkOut >= 19 * 60));
+
+  if (
+    status === "half_day" &&
+    productionHours >= 4 &&
+    productionHours < 8 &&
+    !validHalfDaySlot
+  ) {
+    return "absent";
+  }
+
+  return status;
+}
+
 // ══════════════════════════════════════════════════════════════
 // GET /api/attendance-analysis/summary
 // Returns branch-level KPIs + per-employee stats for one month
@@ -105,11 +150,11 @@ router.get(
   SELECT
     a.user_id,
     COUNT(*) FILTER (
-      WHERE a.status = 'full_day' OR a.status = 'present'
+      WHERE ${normalizedAttendanceStatusSql("a")} = 'full_day' OR ${normalizedAttendanceStatusSql("a")} = 'present'
     ) AS full_days,
 
     COUNT(*) FILTER (
-      WHERE a.status = 'half_day'
+      WHERE ${normalizedAttendanceStatusSql("a")} = 'half_day'
     ) AS half_days,
 
     COUNT(*) FILTER (
@@ -322,7 +367,7 @@ router.get(
           date:      dateStr,
           checkIn,
           checkOut,
-          status:    att?.status       || "absent",
+          status:    normalizeAttendanceStatus(att),
           lateMinutes: att?.late_minutes  || 0,
           workHours,
           breaks:    totalBreak,

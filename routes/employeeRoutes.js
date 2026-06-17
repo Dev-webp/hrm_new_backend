@@ -2,6 +2,7 @@ import express from "express";
 import bcrypt from "bcrypt";
 import { pool } from "../middleware/db.js";
 import { verifyToken, authorizeRoles } from "../middleware/auth.js";
+import { getClientIp, logActivity } from "../utils/activityLogger.js";
 
 const router = express.Router();
 
@@ -26,7 +27,7 @@ router.get(
   authorizeRoles("SUPER_ADMIN", "MANAGER"),
   async (req, res) => {
     try {
-      const { branch, department, search } = req.query;
+      const { branch, department, search, status = "active" } = req.query;
       let query = `
         SELECT id, full_name, email, role, department, branch,
                employee_code, salary, joining_date, status, profile_initials,
@@ -51,6 +52,10 @@ router.get(
       if (department && department !== "all") {
         conditions.push(`department = $${params.length + 1}`);
         params.push(department);
+      }
+      if (status && status !== "all") {
+        conditions.push(`COALESCE(status, 'active') = $${params.length + 1}`);
+        params.push(status);
       }
       if (search) {
         conditions.push(`(full_name ILIKE $${params.length + 1} OR email ILIKE $${params.length + 1} OR department ILIKE $${params.length + 1})`);
@@ -186,7 +191,7 @@ router.put(
       if (empCheck.rows.length === 0) return res.status(404).json({ message: "Employee not found" });
 
       if (req.user.role === "MANAGER") {
-        if (empCheck.rows[0].branch !== req.user.branch) {
+        if (employee.branch !== req.user.branch) {
           return res.status(403).json({ message: "Access denied – different branch" });
         }
         branch = req.user.branch;
@@ -227,7 +232,7 @@ router.put(
 );
 
 // ─────────────────────────────────────────────────────────────
-// 5. DELETE employee (unchanged)
+// 5. Mark employee inactive (soft delete)
 // ─────────────────────────────────────────────────────────────
 router.delete(
   "/admin/employees/:id",
@@ -236,26 +241,74 @@ router.delete(
   async (req, res) => {
     try {
       const { id } = req.params;
-      const empCheck = await pool.query("SELECT branch, role FROM users WHERE id = $1", [id]);
+      const empCheck = await pool.query(
+        "SELECT id, full_name, email, branch, department, role, status FROM users WHERE id = $1",
+        [id]
+      );
       if (empCheck.rows.length === 0) return res.status(404).json({ message: "Employee not found" });
+      const employee = empCheck.rows[0];
 
       if (req.user.role === "MANAGER") {
         if (empCheck.rows[0].branch !== req.user.branch) {
           return res.status(403).json({ message: "Access denied – different branch" });
         }
-        if (empCheck.rows[0].role !== "EMPLOYEE") {
-          return res.status(400).json({ message: "Managers cannot delete other managers or admins" });
+        if (employee.role !== "EMPLOYEE") {
+          return res.status(400).json({ message: "Managers cannot mark other managers or admins inactive" });
         }
       }
 
       const result = await pool.query(
-        "DELETE FROM users WHERE id = $1 AND role != 'SUPER_ADMIN' RETURNING id",
+        `UPDATE users
+         SET status = 'inactive', updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND role != 'SUPER_ADMIN'
+         RETURNING id, full_name, email, branch, department, role, status`,
         [id]
       );
-      if (result.rows.length === 0) return res.status(404).json({ message: "Employee not found or cannot delete super admin" });
-      res.json({ message: "Employee deleted" });
+      if (result.rows.length === 0) return res.status(404).json({ message: "Employee not found or cannot mark super admin inactive" });
+
+      const editorResult = await pool.query(
+        "SELECT id, full_name, email, role, branch FROM users WHERE id = $1",
+        [req.user.id]
+      );
+      const editor = editorResult.rows[0] || {
+        id: req.user.id,
+        full_name: req.user.full_name || req.user.email || "Unknown user",
+        email: req.user.email || null,
+        role: req.user.role,
+        branch: req.user.branch || "all",
+      };
+
+      await logActivity({
+        userId: editor.id,
+        userName: editor.full_name || editor.email || "Unknown user",
+        role: editor.role || req.user.role,
+        action: "EMPLOYEE_MARKED_INACTIVE",
+        actionType: "UPDATE",
+        moduleName: "Employee",
+        details: `${editor.full_name || editor.email || "Unknown user"} marked ${employee.full_name} (${employee.email}) inactive.`,
+        ip: getClientIp(req),
+        branch: employee.branch || editor.branch || "all",
+        department: employee.department || null,
+        metadata: {
+          editedBy: {
+            id: editor.id,
+            name: editor.full_name || editor.email || "Unknown user",
+            email: editor.email || null,
+            role: editor.role || req.user.role,
+          },
+          editedFor: {
+            id: employee.id,
+            name: employee.full_name,
+            email: employee.email,
+          },
+          oldValues: { status: employee.status || "active" },
+          newValues: { status: "inactive" },
+        },
+      });
+
+      res.json({ message: "Employee marked as inactive", employee: result.rows[0] });
     } catch (error) {
-      res.status(500).json({ message: "Delete failed" });
+      res.status(500).json({ message: "Failed to mark employee inactive" });
     }
   }
 );

@@ -77,6 +77,39 @@ function fmtINR(n) {
   });
 }
 
+function timeToMinutes(timeStr) {
+  if (!timeStr) return null;
+  const [h, m] = String(timeStr).slice(0, 5).split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+function isValidHalfDaySlot(rec) {
+  const checkIn = timeToMinutes(rec?.check_in_time);
+  const checkOut = timeToMinutes(rec?.check_out_time);
+  if (checkIn === null || checkOut === null) return false;
+
+  const slotA = checkIn <= 10 * 60 && checkOut >= 14 * 60 + 30;
+  const slotB = checkIn >= 14 * 60 + 30 && checkOut >= 19 * 60;
+  return slotA || slotB;
+}
+
+function normalizeAttendanceStatus(rec) {
+  const status = rec?.status || "absent";
+  const productionHours = Number(rec?.production_hours || 0);
+
+  if (
+    status === "half_day" &&
+    productionHours >= 4 &&
+    productionHours < 8 &&
+    !isValidHalfDaySlot(rec)
+  ) {
+    return "absent";
+  }
+
+  return status;
+}
+
 // ============================================================
 // STEP 1: Fetch raw data
 // ============================================================
@@ -213,7 +246,7 @@ function tallyAttendance(workingDays, attMap, approvedLeaveSet) {
       lateDates.push({ date: ds, minutes: rec.late_minutes });
     }
 
-    const status = rec.status;
+    const status = normalizeAttendanceStatus(rec);
     if (status === "full_day" || status === "present") {
       fullDays++;
     } else if (status === "half_day") {

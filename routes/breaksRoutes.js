@@ -2,6 +2,7 @@ import express from "express";
 import { pool } from "../middleware/db.js";
 import { verifyToken, authorizeRoles } from "../middleware/auth.js";
 import { recalcAttendanceForUserDate } from "./attendanceRoutes.js";
+import { getClientIp, logActivity } from "../utils/activityLogger.js";
 
 const router = express.Router();
 
@@ -222,6 +223,7 @@ router.put(
             const { userId } = req.params;
 
             const { date, breaks } = req.body;
+            const reason = String(req.body.reason || "").trim();
 
             // ==========================================
             // VALIDATION
@@ -234,29 +236,53 @@ router.put(
                 });
             }
 
+            if (reason.length < 5) {
+
+                return res.status(400).json({
+                    message: "Please enter a reason of at least 5 characters."
+                });
+            }
+
+            const employeeResult = await pool.query(
+                `
+                SELECT id, full_name, email, branch, department
+                FROM users
+                WHERE id = $1
+                `,
+                [userId]
+            );
+
+            if (employeeResult.rows.length === 0) {
+
+                return res.status(404).json({
+                    message: "User not found"
+                });
+            }
+
+            const employee = employeeResult.rows[0];
+
+            const editorResult = await pool.query(
+                `
+                SELECT id, full_name, email, role
+                FROM users
+                WHERE id = $1
+                `,
+                [req.user.id]
+            );
+            const editor = editorResult.rows[0] || {
+                id: req.user.id,
+                full_name: req.user.full_name || req.user.email || "Unknown user",
+                email: req.user.email || null,
+                role: req.user.role
+            };
+
             // ==========================================
             // MANAGER SECURITY CHECK
             // ==========================================
 
             if (req.user.role === "MANAGER") {
 
-                const userCheck = await pool.query(
-                    `
-                    SELECT branch
-                    FROM users
-                    WHERE id = $1
-                    `,
-                    [userId]
-                );
-
-                if (userCheck.rows.length === 0) {
-
-                    return res.status(404).json({
-                        message: "User not found"
-                    });
-                }
-
-                if (userCheck.rows[0].branch !== req.user.branch) {
+                if (employee.branch !== req.user.branch) {
 
                     return res.status(403).json({
                         message:
@@ -264,6 +290,26 @@ router.put(
                     });
                 }
             }
+
+            const oldBreaksResult = await pool.query(
+                `
+                SELECT id, break_type, start_time, end_time, duration_minutes
+                FROM employee_breaks
+                WHERE user_id = $1
+                AND date = $2::date
+                ORDER BY break_type
+                `,
+                [userId, date]
+            );
+
+            const oldValues = oldBreaksResult.rows.reduce((acc, row) => {
+                acc[row.break_type] = {
+                    start_time: row.start_time || null,
+                    end_time: row.end_time || null,
+                    duration_minutes: row.duration_minutes || 0
+                };
+                return acc;
+            }, {});
 
             // ==========================================
             // UPSERT BREAKS
@@ -290,9 +336,10 @@ router.put(
                         break_type,
                         start_time,
                         end_time,
-                        duration_minutes
+                        duration_minutes,
+                        last_edit_reason
                     )
-                    VALUES ($1,$2,$3,$4,$5,$6)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7)
 
                     ON CONFLICT
                     (user_id, date, break_type)
@@ -300,7 +347,8 @@ router.put(
                     DO UPDATE SET
                         start_time = EXCLUDED.start_time,
                         end_time = EXCLUDED.end_time,
-                        duration_minutes = EXCLUDED.duration_minutes
+                        duration_minutes = EXCLUDED.duration_minutes,
+                        last_edit_reason = EXCLUDED.last_edit_reason
                     `,
                     [
                         userId,
@@ -314,10 +362,31 @@ router.put(
                             ? convertTo24Hour(end)
                             : null,
 
-                        duration
+                        duration,
+                        reason
                     ]
                 );
             }
+
+            const updatedBreaksResult = await pool.query(
+                `
+                SELECT id, break_type, start_time, end_time, duration_minutes
+                FROM employee_breaks
+                WHERE user_id = $1
+                AND date = $2::date
+                ORDER BY break_type
+                `,
+                [userId, date]
+            );
+
+            const newValues = updatedBreaksResult.rows.reduce((acc, row) => {
+                acc[row.break_type] = {
+                    start_time: row.start_time || null,
+                    end_time: row.end_time || null,
+                    duration_minutes: row.duration_minutes || 0
+                };
+                return acc;
+            }, {});
 
             // ==========================================
             // RECALCULATE ATTENDANCE
@@ -334,6 +403,37 @@ router.put(
                     recalcErr.message
                 );
             }
+
+            await logActivity({
+                userId: editor.id,
+                userName: editor.full_name || editor.email || "Unknown user",
+                role: editor.role || req.user.role,
+                action: "BREAK_EDITED",
+                actionType: "UPDATE",
+                moduleName: "Breaks",
+                details: `Breaks edited for ${employee.full_name} (${employee.email}) on ${date}. Reason: ${reason}.`,
+                ip: getClientIp(req),
+                branch: employee.branch || req.user.branch || "all",
+                department: employee.department || null,
+                metadata: {
+                    editedBy: {
+                        id: editor.id,
+                        name: editor.full_name || editor.email || "Unknown user",
+                        email: editor.email || null,
+                        role: editor.role || req.user.role
+                    },
+                    editedFor: {
+                        id: Number(userId),
+                        name: employee.full_name,
+                        email: employee.email
+                    },
+                    date,
+                    reason,
+                    oldValues,
+                    newValues,
+                    editedRecordId: updatedBreaksResult.rows.map((row) => row.id)
+                }
+            });
 
             res.json({
                 message: "Breaks updated successfully"

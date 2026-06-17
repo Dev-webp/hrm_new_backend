@@ -2,6 +2,7 @@ import express from "express";
 import bcrypt from "bcrypt";                 // ✅ ADD THIS – was missing
 import { pool } from "../middleware/db.js";
 import { verifyToken, authorizeRoles } from "../middleware/auth.js";
+import { getClientIp, logActivity } from "../utils/activityLogger.js";
 
 const router = express.Router();
 
@@ -24,7 +25,7 @@ function getInitials(fullName) {
 router.get("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async (req, res) => {
   try {
     const branch = req.user.branch;
-    const { department, search } = req.query;
+    const { department, search, status = "active" } = req.query;
 
     let query = `
       SELECT id, full_name, email, role, department, branch, employee_code,
@@ -38,6 +39,11 @@ router.get("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async (
     if (department && department !== 'all') {
       query += ` AND department = $${idx}`;
       params.push(department);
+      idx++;
+    }
+    if (status && status !== "all") {
+      query += ` AND COALESCE(status, 'active') = $${idx}`;
+      params.push(status);
       idx++;
     }
     if (search) {
@@ -146,7 +152,10 @@ router.delete("/manager/employees/:id", verifyToken, authorizeRoles("MANAGER"), 
     const { id } = req.params;
     const branch = req.user.branch;
 
-    const check = await pool.query("SELECT branch, role FROM users WHERE id = $1", [id]);
+    const check = await pool.query(
+      "SELECT id, full_name, email, branch, department, role, status FROM users WHERE id = $1",
+      [id]
+    );
     if (check.rows.length === 0) {
       return res.status(404).json({ message: "Employee not found" });
     }
@@ -154,14 +163,62 @@ router.delete("/manager/employees/:id", verifyToken, authorizeRoles("MANAGER"), 
       return res.status(403).json({ message: "Access denied – different branch" });
     }
     if (check.rows[0].role !== 'EMPLOYEE') {
-      return res.status(400).json({ message: "Cannot delete managers or admins" });
+      return res.status(400).json({ message: "Cannot mark managers or admins inactive" });
     }
 
-    await pool.query("DELETE FROM users WHERE id = $1", [id]);
-    res.json({ message: "Employee deleted" });
+    const result = await pool.query(
+      `UPDATE users
+       SET status = 'inactive', updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 AND role = 'EMPLOYEE'
+       RETURNING id, full_name, email, branch, department, role, status`,
+      [id]
+    );
+
+    const employee = check.rows[0];
+    const editorResult = await pool.query(
+      "SELECT id, full_name, email, role, branch FROM users WHERE id = $1",
+      [req.user.id]
+    );
+    const editor = editorResult.rows[0] || {
+      id: req.user.id,
+      full_name: req.user.full_name || req.user.email || "Unknown user",
+      email: req.user.email || null,
+      role: req.user.role,
+      branch: req.user.branch || "all",
+    };
+
+    await logActivity({
+      userId: editor.id,
+      userName: editor.full_name || editor.email || "Unknown user",
+      role: editor.role || req.user.role,
+      action: "EMPLOYEE_MARKED_INACTIVE",
+      actionType: "UPDATE",
+      moduleName: "Employee",
+      details: `${editor.full_name || editor.email || "Unknown user"} marked ${employee.full_name} (${employee.email}) inactive.`,
+      ip: getClientIp(req),
+      branch: employee.branch || editor.branch || "all",
+      department: employee.department || null,
+      metadata: {
+        editedBy: {
+          id: editor.id,
+          name: editor.full_name || editor.email || "Unknown user",
+          email: editor.email || null,
+          role: editor.role || req.user.role,
+        },
+        editedFor: {
+          id: employee.id,
+          name: employee.full_name,
+          email: employee.email,
+        },
+        oldValues: { status: employee.status || "active" },
+        newValues: { status: "inactive" },
+      },
+    });
+
+    res.json({ message: "Employee marked as inactive", employee: result.rows[0] });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Delete failed" });
+    res.status(500).json({ message: "Failed to mark employee inactive" });
   }
 });
 // GET /api/manager/my-payslip

@@ -21,10 +21,9 @@ function timeToMinutes(timeStr) {
 }
 
 const statusMap = {
-  fullday: "full_day",
-  fullday_and_earned_leave: "full_day",
-  halfday: "half_day",
-  paidleave: "leave",
+  full_day: "full_day",
+  half_day: "half_day",
+  leave: "leave",
   holiday: "holiday",
   absent: "absent",
 };
@@ -46,6 +45,7 @@ export async function persistDayClassification(userId, dateStr, result, extras =
   const lateMinutes = extras.lateMinutes ?? 0;
   const netHours = result.net_hours ?? 0;
   const halfSlot = extras.halfDaySlot ?? null;
+  const totalBreakMinutes = Number(result.total_break_minutes || 0);
 
   await pool.query(
     `UPDATE attendance_records SET
@@ -53,13 +53,15 @@ export async function persistDayClassification(userId, dateStr, result, extras =
        late_minutes = $2,
        production_hours = $3,
        half_day_slot = $4,
+       total_break_minutes = $5,
        updated_at = NOW()
-     WHERE user_id = $5 AND date = $6`,
+     WHERE user_id = $6 AND date = $7`,
     [
       legacyStatus,
       lateMinutes,
       parseFloat(netHours.toFixed(2)),
       halfSlot,
+      totalBreakMinutes,
       userId,
       dateStr,
     ]
@@ -99,7 +101,7 @@ export async function classifyAndPersistUserDate(
 
   if (rowExtras.misuse_of_time) {
     result = {
-      bucket: "halfday",
+      bucket: "half_day",
       reason: "Manager flagged misuse of time",
       net_hours: result.net_hours,
       flags: [...(result.flags || []), "misuse_of_time"],
@@ -114,9 +116,9 @@ export async function classifyAndPersistUserDate(
 
   const halfDaySlot = log ? resolveHalfDaySlot(log) : null;
   const slotForDb =
-    result.bucket === "halfday" && halfDaySlot !== "INVALID"
+    result.bucket === "half_day" && halfDaySlot !== "INVALID"
       ? halfDaySlot
-      : result.bucket === "halfday"
+      : result.bucket === "half_day"
       ? "INVALID"
       : null;
 
@@ -182,24 +184,22 @@ export async function handleProxyAttempt({
   recordedBy,
   ipAddress,
 }) {
-  const markAbsent = async (uid) => {
+  const markProxyAttempt = async (uid) => {
     await pool.query(
       `INSERT INTO attendance_records
-         (user_id, date, status, branch, department, extra_break_ins, extra_break_outs, proxy_attempt)
-       SELECT id, $2, 'absent', branch, department, '[]', '[]', TRUE
+         (user_id, date, branch, department, extra_break_ins, extra_break_outs, proxy_attempt)
+       SELECT id, $2, branch, department, '[]', '[]', TRUE
        FROM users WHERE id = $1
        ON CONFLICT (user_id, date) DO UPDATE SET
-         status = 'absent',
          proxy_attempt = TRUE,
-         production_hours = 0,
-         late_minutes = 0`,
+         updated_at = NOW()`,
       [uid, dateStr]
     );
   };
 
-  await markAbsent(subjectUserId);
+  await markProxyAttempt(subjectUserId);
   if (loggedByUserId !== subjectUserId) {
-    await markAbsent(loggedByUserId);
+    await markProxyAttempt(loggedByUserId);
   }
 
   for (const uid of [subjectUserId, loggedByUserId]) {
@@ -207,7 +207,7 @@ export async function handleProxyAttempt({
     await pool.query(
       `INSERT INTO violation_records
          (user_id, violation_type, violation_date, recorded_by, action_taken, related_user_id, metadata)
-       VALUES ($1, 'PROXY_LOG', $2, $3, 'Both marked full day absent', $4, $5)`,
+       VALUES ($1, 'PROXY_LOG', $2, $3, 'Recorded for HR disciplinary review', $4, $5)`,
       [
         uid,
         dateStr,
@@ -227,7 +227,7 @@ export async function handleProxyAttempt({
     await emitNotification({
       userId: u.id,
       actionType: "proxy_violation",
-      description: `PROXY ATTENDANCE: ${u.full_name} — both parties marked absent on ${dateStr}`,
+      description: `PROXY ATTENDANCE: ${u.full_name} - recorded for HR disciplinary review on ${dateStr}`,
       targetRole: "BOTH",
       branch: u.branch,
     });
@@ -242,17 +242,6 @@ export async function recordDressCodeViolation(employeeId, dateStr, recordedBy, 
     [employeeId, dateStr, recordedBy, reason || "Dress code violation"]
   );
 
-  await pool.query(
-    `INSERT INTO attendance_records
-       (user_id, date, status, paid_leave_reason, branch, department, extra_break_ins, extra_break_outs)
-     SELECT id, $2, 'absent', 'Dress code violation', branch, department, '[]', '[]'
-     FROM users WHERE id = $1
-     ON CONFLICT (user_id, date) DO UPDATE SET
-       status = 'absent',
-       paid_leave_reason = 'Dress code violation',
-       production_hours = 0`,
-    [employeeId, dateStr]
-  );
 }
 
 export async function runDailyAttendanceRecalc(targetDateStr) {

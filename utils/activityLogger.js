@@ -70,7 +70,8 @@ const SEVERITY_MAP = {
   LeaveApprove: "info",  LeaveReject: "warning", BreakStart: "info",
   BreakEnd: "info",      BreakExceeded: "warning", PayslipGen: "info",
   PayslipPaid: "info",   SettingsUpdate: "warning", FailedLogin: "critical",
-  Suspicious: "critical",
+  Suspicious: "critical", ATTENDANCE_EDITED: "warning", BREAK_EDITED: "warning",
+  EMPLOYEE_MARKED_INACTIVE: "warning",
 };
 
 function sanitizeStr(str) {
@@ -105,6 +106,7 @@ function isDuplicate(key) {
 export async function logActivity({
   userId = null, userName = "system", role = "SYSTEM",
   action, details, ip = "0.0.0.0", branch = "all", metadata = {},
+  actionType = null, moduleName = null, department = null,
 }) {
   try {
     const safeUser    = sanitizeStr(userName);
@@ -113,17 +115,22 @@ export async function logActivity({
     const safeDetails = sanitizeStr(details);
     const safeIP      = sanitizeIP(ip);
     const safeBranch  = sanitizeStr(branch).slice(0, 100);
+    const safeActionType = actionType ? sanitizeStr(actionType).slice(0, 100) : null;
+    const safeModuleName = moduleName ? sanitizeStr(moduleName).slice(0, 100) : null;
+    const safeDepartment = department ? sanitizeStr(department).slice(0, 100) : null;
     const severity    = SEVERITY_MAP[safeAction] ?? "info";
 
     if (isDuplicate(`${userId}:${safeAction}:${safeDetails}`)) return;
 
     const result = await pool.query(
       `INSERT INTO activity_logs
-         (user_id, user_name, role, action, details, ip_address, branch, severity, metadata)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         (user_id, user_name, role, action, action_type, module_name, details,
+          ip_address, branch, department, severity, metadata)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        RETURNING *`,
-      [userId, safeUser, safeRole, safeAction, safeDetails,
-       safeIP, safeBranch, severity, JSON.stringify(metadata)]
+      [userId, safeUser, safeRole, safeAction, safeActionType,
+       safeModuleName, safeDetails, safeIP, safeBranch, safeDepartment,
+       severity, JSON.stringify(metadata)]
     );
     const log = result.rows[0];
 

@@ -23,6 +23,40 @@ function fmtTime24(t) {
   return String(t).slice(0, 5);
 }
 
+function timeToMinutes(timeStr) {
+  if (!timeStr) return null;
+  const [h, m] = String(timeStr).slice(0, 5).split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+function isValidHalfDaySlot(att) {
+  const checkIn = timeToMinutes(att?.check_in_time);
+  const checkOut = timeToMinutes(att?.check_out_time);
+  if (checkIn === null || checkOut === null) return false;
+
+  return (
+    (checkIn <= 10 * 60 && checkOut >= 14 * 60 + 30) ||
+    (checkIn >= 14 * 60 + 30 && checkOut >= 19 * 60)
+  );
+}
+
+function normalizeAttendanceStatus(att) {
+  const status = att?.status || "absent";
+  const productionHours = parseFloat(att?.production_hours) || 0;
+
+  if (
+    status === "half_day" &&
+    productionHours >= 4 &&
+    productionHours < 8 &&
+    !isValidHalfDaySlot(att)
+  ) {
+    return "absent";
+  }
+
+  return status;
+}
+
 function expandLeaveDates(leaves, start, end) {
   const map = new Map();
   for (const lv of leaves) {
@@ -190,7 +224,7 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
       Number(att?.total_break_minutes) ||
       0;
 
-    let status = att?.status || "absent";
+    let status = normalizeAttendanceStatus(att);
     let isPaidLeave = att?.is_paid_leave === true;
     let leaveType = null;
 
@@ -296,9 +330,9 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
 
   const mv = mvRes.rows[0] || {};
   const monthlySummary = {
-    fullDays: Number(mv.full_days) || records.filter((r) => r.status === "full_day").length,
-    halfDays: Number(mv.half_days) || records.filter((r) => r.status === "half_day").length,
-    absentDays: Number(mv.absent_days) || records.filter((r) => r.status === "absent").length,
+    fullDays: records.filter((r) => r.status === "full_day").length,
+    halfDays: records.filter((r) => r.status === "half_day").length,
+    absentDays: records.filter((r) => r.status === "absent").length,
     leaveDays: Number(mv.leave_days) || records.filter((r) => r.status === "leave").length,
     paidLeaveDays: records.filter((r) => r.status === "leave" && r.isPaidLeave).length,
     unpaidLeaveDays: records.filter((r) => r.status === "leave" && !r.isPaidLeave).length,

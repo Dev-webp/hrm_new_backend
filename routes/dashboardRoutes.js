@@ -48,6 +48,7 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "MAN
         FROM users u
         LEFT JOIN attendance_records a ON a.user_id = u.id AND a.date = $1
         WHERE u.role != 'SUPER_ADMIN'
+          AND COALESCE(u.status, 'active') = 'active'
         ${branchFilter}
       `, [today]),
 
@@ -83,6 +84,7 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "MAN
         FROM users u
         LEFT JOIN attendance_records a ON a.user_id = u.id AND a.date = $1
         WHERE u.role != 'SUPER_ADMIN' AND u.department IS NOT NULL
+          AND COALESCE(u.status, 'active') = 'active'
         ${branchFilter}
         GROUP BY u.department
         ORDER BY present DESC
