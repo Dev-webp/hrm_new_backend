@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  calculateLateMinutes,
   evaluateLateLogin,
   resolveHalfDaySlot,
   buildMonthlyLateStats,
@@ -11,6 +12,22 @@ import {
   computeOnePlusOnePenalty,
   isSaturdayOrMondayLeaveDay,
 } from "../utils/leavePolicy.js";
+
+describe("late minute calculation", () => {
+  const cases = [
+    ["09:55:00", 0],
+    ["10:00:00", 0],
+    ["10:01:00", 1],
+    ["10:15:00", 15],
+    ["16:10:00", 370],
+  ];
+
+  for (const [checkInTime, expected] of cases) {
+    it(`${checkInTime} returns ${expected}`, () => {
+      assert.equal(calculateLateMinutes(checkInTime), expected);
+    });
+  }
+});
 
 describe("late login detection", () => {
   it("on-time at 10:00 is not late", () => {

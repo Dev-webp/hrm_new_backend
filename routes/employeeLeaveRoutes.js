@@ -1,6 +1,7 @@
 import express from "express";
 import { pool } from "../middleware/db.js";
 import { verifyToken, authorizeRoles } from "../middleware/auth.js";
+import { createValidatedLeaveRequest } from "../services/leaveRequestService.js";
 
 const router = express.Router();
 
@@ -24,6 +25,9 @@ router.get(
           from_date,
           to_date,
           days,
+          requested_days,
+          leave_duration_type,
+          half_day_session,
           reason,
           status
         FROM leave_requests
@@ -55,47 +59,15 @@ router.post(
   authorizeRoles("EMPLOYEE"),
   async (req, res) => {
     try {
-      const {
-        leave_type,
-        from_date,
-        to_date,
-        days,
-        reason
-      } = req.body;
-
-      const result = await pool.query(
-        `
-        INSERT INTO leave_requests
-        (
-          user_id,
-          leave_type,
-          from_date,
-          to_date,
-          days,
-          reason,
-          status
-        )
-        VALUES
-        ($1,$2,$3,$4,$5,$6,'pending')
-        RETURNING *
-        `,
-        [
-          req.user.id,
-          leave_type,
-          from_date,
-          to_date,
-          days,
-          reason
-        ]
-      );
-
-      res.status(201).json(result.rows[0]);
+      const leave = await createValidatedLeaveRequest(req.user.id, req.body);
+      res.status(201).json(leave);
 
     } catch (error) {
       console.error("Apply leave error:", error);
 
-      res.status(500).json({
-        message: "Failed to apply leave",
+      const isValidationError = /required|must|cannot|invalid|Insufficient|no working days/i.test(error.message);
+      res.status(isValidationError ? 400 : 500).json({
+        message: isValidationError ? error.message : "Failed to apply leave",
       });
     }
   }

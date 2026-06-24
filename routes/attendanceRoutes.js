@@ -14,6 +14,7 @@ import {
   notifyCheckout,
   notifyLateLogin,
 } from "./notificationTriggers.js";
+import { createNotification } from "./notificationRoutes.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
 
 // ── Policy engine (pure functions, no DB calls) ──────────────────
@@ -27,6 +28,7 @@ import {
   calculateMonthlySummary,
   formatDateStr,
   parseDateStr,
+  calculateLateMinutes,
 } from "../utils/attendancePolicy.js";
 
 const router = express.Router();
@@ -145,11 +147,83 @@ function normalizedAttendanceStatusSql(alias = "a") {
      AND NOT (
        (${alias}.check_in_time <= '10:00:00'::time AND ${alias}.check_out_time >= '14:30:00'::time)
        OR
-       (${alias}.check_in_time >= '14:30:00'::time AND ${alias}.check_out_time >= '19:00:00'::time)
+       (${alias}.check_in_time <= '14:30:00'::time AND ${alias}.check_out_time >= '19:00:00'::time)
      )
     THEN 'absent'
     ELSE COALESCE(${alias}.status, 'absent')
   END`;
+}
+
+const policyBucketStatusMap = {
+  full_day: "full_day",
+  half_day: "half_day",
+  leave: "leave",
+  holiday: "holiday",
+  absent: "absent",
+};
+
+function mapPolicyBucketToStatus(bucket) {
+  return policyBucketStatusMap[bucket] || "absent";
+}
+
+function shouldLogPolicyDebug(dateStr, fullName) {
+  if (dateStr !== "2026-06-23") return false;
+  return [
+    "hyderabad manager",
+    "arjun mehta",
+    "ramesh kumar",
+    "priyanka vaddi",
+  ].includes(String(fullName || "").toLowerCase());
+}
+
+async function classifyAttendanceForResponse(user, dateStr, att, holidaySet) {
+  const [year, month] = dateStr.split("-").map(Number);
+  const dim = daysInMonth(year, month);
+  const logsByDateExtended = await fetchExtendedLogsByDate(user.user_id, year, month);
+  const monthStart = `${year}-${String(month).padStart(2, "0")}-01`;
+  const monthEnd = `${year}-${String(month).padStart(2, "0")}-${String(dim).padStart(2, "0")}`;
+  const logsByDate = {};
+
+  for (const [day, log] of Object.entries(logsByDateExtended)) {
+    if (day >= monthStart && day <= monthEnd) logsByDate[day] = log;
+  }
+
+  const monthlyLateStats = buildMonthlyLateStats(logsByDate, dim, year, month);
+  const log = logsByDateExtended[dateStr] || null;
+  const policy = classifyDayPolicy({
+    dateStr,
+    log,
+    holidaySet,
+    monthlyLateStats,
+    logsByDate: logsByDateExtended,
+  });
+  const status = mapPolicyBucketToStatus(policy.bucket);
+
+  if (shouldLogPolicyDebug(dateStr, user.full_name)) {
+    console.log(
+      user.full_name,
+      log?.office_in || null,
+      log?.office_out || null,
+      Number(policy.net_hours || 0).toFixed(2),
+      policy.half_day_slot || null,
+      policy.bucket,
+      policy.reason
+    );
+  }
+
+  return {
+    ...user,
+    ...(att || {}),
+    status,
+    policy_bucket: policy.bucket,
+    policy_reason: policy.reason,
+    half_day_slot: policy.half_day_slot || att?.half_day_slot || null,
+    production_hours: Number(policy.net_hours ?? att?.production_hours ?? 0),
+    total_break_minutes: Number(policy.total_break_minutes ?? att?.total_break_minutes ?? 0),
+    late_minutes: att?.late_minutes ?? calculateLateMinutes(log?.office_in),
+    check_in_time: att?.check_in_time ?? log?.office_in ?? null,
+    check_out_time: att?.check_out_time ?? log?.office_out ?? null,
+  };
 }
 
 /**
@@ -187,10 +261,7 @@ async function recalcAttendanceForUserDate(userId, dateStr) {
   const breakMs  = log ? calculateBreakMillis(log) : 0;
   const netHours = netMs / 3_600_000;
   const totalBreakMinutes = Math.round(breakMs / 60000);
-  const lateInfo = log ? evaluateLateLogin(log) : { is_late: false };
-  const lateMinutes = lateInfo.is_late && log?.office_in
-    ? Math.max(0, timeToMinutes(log.office_in) - 10 * 60)
-    : 0;
+  const lateMinutes = calculateLateMinutes(log?.office_in);
 
   // Map policy buckets → legacy status values used by other routes
   const statusMap = {
@@ -528,10 +599,7 @@ router.post("/attendance", verifyToken, async (req, res) => {
         await recalcAttendanceForUserDate(userId, today);
 
         // Notifications
-        const lateInfo = evaluateLateLogin({ office_in: timeStr });
-        const lateMinutes = lateInfo.is_late
-          ? Math.max(0, timeToMinutes(timeStr) - 10 * 60)
-          : 0;
+        const lateMinutes = calculateLateMinutes(timeStr);
         const attRow = await pool.query(
           `SELECT id FROM attendance_records WHERE user_id=$1 AND date=$2`,
           [userId, today]
@@ -775,6 +843,11 @@ router.get("/attendance", verifyToken, async (req, res) => {
           ${normalizedAttendanceStatusSql("ar")} AS status,
           ar.late_minutes,
           ar.production_hours,
+          ar.half_day_slot,
+          ar.leave_type,
+          ar.leave_status,
+          ar.post_login_idle_minutes,
+          ar.misuse_of_time,
           COALESCE((
             SELECT SUM(COALESCE(b.duration_minutes, 0))
             FROM employee_breaks b
@@ -786,15 +859,16 @@ router.get("/attendance", verifyToken, async (req, res) => {
       [date]
     );
     const attMap = new Map(attResult.rows.map((r) => [r.user_id, r]));
+    const [year] = date.split("-").map(Number);
+    const holidaySet = await fetchHolidaySet(year);
 
-    res.json(usersResult.rows.map((user) => {
+    const rows = [];
+    for (const user of usersResult.rows) {
       const att = attMap.get(user.user_id);
-      return att ? { ...user, ...att } : {
-        ...user,
-        check_in_time: null, check_out_time: null, status: "absent",
-        late_minutes: 0, production_hours: 0, total_break_minutes: 0,
-      };
-    }));
+      rows.push(await classifyAttendanceForResponse(user, date, att, holidaySet));
+    }
+
+    res.json(rows);
   } catch (err) {
     console.error("GET /attendance error:", err);
     res.status(500).json({ message: err.message });
@@ -805,40 +879,67 @@ router.get("/attendance", verifyToken, async (req, res) => {
 router.get("/attendance/stats", verifyToken, async (req, res) => {
   try {
     const { date, branch } = req.query;
+    if (!date) return res.status(400).json({ message: "date required" });
     const effectiveBranch = req.user.role === "MANAGER" ? req.user.branch
       : branch && branch !== "all" ? branch : null;
-
-    let totalQ = `SELECT COUNT(*) AS total FROM users WHERE role NOT IN ('SUPER_ADMIN') AND COALESCE(status, 'active') = 'active'`;
-    let totalP = [];
-    if (effectiveBranch) { totalQ += ` AND branch=$1`; totalP.push(effectiveBranch); }
-    const totalRes = await pool.query(totalQ, totalP);
-    const totalEmployees = Number(totalRes.rows[0].total) || 0;
-
-    let presentQ = `SELECT COUNT(DISTINCT a.user_id) AS present
-                    FROM attendance_records a JOIN users u ON a.user_id=u.id
-                    WHERE a.date=$1 AND ${normalizedAttendanceStatusSql("a")} IN ('full_day','half_day','leave')
-                      AND COALESCE(u.status, 'active') = 'active'`;
-    let presentP = [date]; let pIdx = 2;
-    if (effectiveBranch) { presentQ += ` AND u.branch=$${pIdx}`; presentP.push(effectiveBranch); }
-    const presentRes = await pool.query(presentQ, presentP);
-    const present = Number(presentRes.rows[0].present) || 0;
-
-    let lateQ = `SELECT COUNT(*) AS late FROM attendance_records a
-                 JOIN users u ON a.user_id=u.id
-                 WHERE a.date=$1 AND a.late_minutes>0
-                   AND COALESCE(u.status, 'active') = 'active'`;
-    let lateP = [date]; let lIdx = 2;
-    if (effectiveBranch) { lateQ += ` AND u.branch=$${lIdx}`; lateP.push(effectiveBranch); }
-    const lateRes = await pool.query(lateQ, lateP);
-    const lateCount = Number(lateRes.rows[0].late) || 0;
-
-    const attendanceRate = totalEmployees > 0
-      ? Math.round((present / totalEmployees) * 100) : 0;
 
     const [y, m, d] = date.split("-").map(Number);
     const isSunday  = new Date(y, m - 1, d).getDay() === 0;
     const holidaySet = await fetchHolidaySet(y);
     const isHoliday  = !isSunday && holidaySet.has(date);
+
+    let userQuery = `SELECT id AS user_id, full_name, department, branch
+                     FROM users
+                     WHERE role NOT IN ('SUPER_ADMIN')
+                       AND COALESCE(status, 'active') = 'active'`;
+    const userParams = [];
+    if (effectiveBranch) {
+      userQuery += " AND branch=$1";
+      userParams.push(effectiveBranch);
+    }
+    const usersResult = await pool.query(userQuery, userParams);
+    const totalEmployees = usersResult.rows.length;
+
+    const attResult = await pool.query(
+      `SELECT
+          ar.user_id,
+          ar.check_in_time,
+          ar.check_out_time,
+          ${normalizedAttendanceStatusSql("ar")} AS status,
+          ar.late_minutes,
+          ar.production_hours,
+          ar.half_day_slot,
+          ar.leave_type,
+          ar.leave_status,
+          ar.post_login_idle_minutes,
+          ar.misuse_of_time,
+          COALESCE((
+            SELECT SUM(COALESCE(b.duration_minutes, 0))
+            FROM employee_breaks b
+            WHERE b.user_id = ar.user_id
+              AND b.date = $1::date
+          ), ar.total_break_minutes, 0) AS total_break_minutes
+       FROM attendance_records ar
+       WHERE ar.date = $1::date`,
+      [date]
+    );
+    const attMap = new Map(attResult.rows.map((r) => [r.user_id, r]));
+    let present = 0;
+    let lateCount = 0;
+
+    for (const user of usersResult.rows) {
+      const row = await classifyAttendanceForResponse(
+        user,
+        date,
+        attMap.get(user.user_id),
+        holidaySet
+      );
+      if (["full_day", "half_day", "leave"].includes(row.status)) present += 1;
+      if (Number(row.late_minutes || 0) > 0) lateCount += 1;
+    }
+
+    const attendanceRate = totalEmployees > 0
+      ? Math.round((present / totalEmployees) * 100) : 0;
 
     res.json({
       attendanceRate: isSunday || isHoliday ? 100 : attendanceRate,
@@ -887,9 +988,7 @@ router.post("/attendance/checkin", verifyToken, async (req, res) => {
 
     await recalcAttendanceForUserDate(userId, today);
 
-    const lateInfo    = evaluateLateLogin({ office_in: timeStr });
-    const lateMinutes = lateInfo.is_late
-      ? Math.max(0, timeToMinutes(timeStr) - 10 * 60) : 0;
+    const lateMinutes = calculateLateMinutes(timeStr);
 
     const attRow = await pool.query(
       `SELECT id FROM attendance_records WHERE user_id=$1 AND date=$2`, [userId, today]
@@ -1030,7 +1129,7 @@ router.get("/attendance/range", verifyToken, async (req, res) => {
       LEFT JOIN attendance_records a
         ON a.user_id = u.id
        AND a.date = d.day::date
-      WHERE u.role = 'EMPLOYEE'
+      WHERE u.role != 'SUPER_ADMIN'
         AND COALESCE(u.status, 'active') = 'active'
     `;
 
@@ -1221,6 +1320,7 @@ router.put(
       const lunchIn  = toTime(req.body.lunch_in ?? req.body.break3_in);
       const lunchOut = toTime(req.body.lunch_out ?? req.body.break3_out);
       const manualStatus = req.body.status || null;   // null means auto-calculate
+      const editSource = String(req.body.source || "").toLowerCase();
 
       const employeeRes = await client.query(
         `SELECT id, full_name, email, branch, department
@@ -1372,8 +1472,8 @@ router.put(
         userName: editor.full_name || editor.email || "Unknown user",
         role: editor.role || req.user.role,
         action: "ATTENDANCE_EDITED",
-        actionType: "UPDATE",
-        moduleName: "Attendance",
+        actionType: "attendance_changed",
+        moduleName: editSource === "calendar" ? "Calendar Attendance Edit" : "Attendance",
         details: `Attendance edited for ${employee.full_name} (${employee.email}) on ${date}. Reason: ${reason}.`,
         ip: getClientIp(req),
         branch: employee.branch || req.user.branch || "all",
@@ -1396,6 +1496,21 @@ router.put(
           newValues,
           editedRecordId: updatedRecord?.id || oldRecord?.id || null,
         },
+      });
+
+      await createNotification({
+        userId,
+        actionType: "attendance_update",
+        relatedId: updatedRecord?.id || oldRecord?.id || null,
+        targetRole: "EMPLOYEE",
+        relatedDate: date,
+        reason,
+        description:
+          `Attendance updated for ${date}. ` +
+          `Status: ${newValues.status || "--"}, ` +
+          `In: ${newValues.check_in_time ? String(newValues.check_in_time).slice(0, 5) : "--"}, ` +
+          `Out: ${newValues.check_out_time ? String(newValues.check_out_time).slice(0, 5) : "--"}. ` +
+          `Reason: ${reason}`,
       });
 
       res.json({
@@ -1489,6 +1604,7 @@ router.get("/attendance/department-leaderboard", verifyToken, async (req, res) =
     let presentQ = `SELECT u.department, COUNT(DISTINCT a.user_id) AS present
                     FROM attendance_records a JOIN users u ON a.user_id=u.id
                     WHERE a.date=$1 AND ${normalizedAttendanceStatusSql("a")} IN ('full_day','half_day','leave')
+                      AND u.role != 'SUPER_ADMIN'
                       AND COALESCE(u.status, 'active') = 'active'`;
     let presentP = [date]; let pIdx = 2;
     if (effectiveBranch) { presentQ += ` AND u.branch=$${pIdx}`; presentP.push(effectiveBranch); }
@@ -1545,6 +1661,10 @@ router.get("/attendance/employee/:userId", verifyToken, async (req, res) => {
          ar.late_minutes,
          ar.production_hours,
          ar.total_break_minutes,
+         ar.is_paid_leave,
+         lr.leave_type,
+         lr.leave_category,
+         lr.paid_days,
          b1.start_time   AS break1_in,
          b1.end_time     AS break1_out,
          b2.start_time   AS break2_in,
@@ -1552,6 +1672,8 @@ router.get("/attendance/employee/:userId", verifyToken, async (req, res) => {
          ln.start_time   AS lunch_in,
          ln.end_time     AS lunch_out
        FROM attendance_records ar
+       LEFT JOIN leave_requests lr
+         ON lr.id = ar.leave_request_id
        LEFT JOIN employee_breaks b1
          ON b1.user_id = ar.user_id
         AND b1.date = ar.date
@@ -1615,7 +1737,8 @@ router.get("/attendance/late-trend", verifyToken, async (req, res) => {
     let q = `SELECT TO_CHAR(a.date,'YYYY-MM-DD') AS date, COUNT(*) AS late
              FROM attendance_records a
              JOIN users u ON a.user_id=u.id
-             WHERE a.late_minutes>0 AND a.date=ANY($1::date[])`;
+             WHERE a.late_minutes>0 AND a.date=ANY($1::date[])
+               AND u.role != 'SUPER_ADMIN'`;
     const p = [dates]; let idx = 2;
     if (effectiveBranch) { q += ` AND u.branch=$${idx}`; p.push(effectiveBranch); }
     q += ` GROUP BY a.date`;
@@ -1691,6 +1814,7 @@ router.get("/departments", verifyToken, async (req, res) => {
              MAX(CASE WHEN u.role='MANAGER' THEN u.full_name ELSE NULL END) AS head
       FROM users u LEFT JOIN attendance_records a ON u.id=a.user_id AND a.date=$1
       WHERE u.department IS NOT NULL
+        AND u.role != 'SUPER_ADMIN'
         AND COALESCE(u.status, 'active') = 'active'`;
     const params = [date]; let idx = 2;
     if (effectiveBranch) { query += ` AND u.branch=$${idx}`; params.push(effectiveBranch); idx++; }
@@ -1720,7 +1844,7 @@ router.get(
       const { status = "active" } = req.query;
       const effectiveBranch = req.user.role === "MANAGER" ? req.user.branch
         : req.query.branch && req.query.branch !== "all" ? req.query.branch : null;
-      let query = `SELECT id, full_name, department, branch FROM users WHERE role!='SUPER_ADMIN'`;
+      let query = `SELECT id, full_name, role, department, branch FROM users WHERE role!='SUPER_ADMIN'`;
       const params = []; let idx = 1;
       if (effectiveBranch) { query += ` AND branch=$${idx}`; params.push(effectiveBranch); idx++; }
       if (status && status !== "all") { query += ` AND COALESCE(status, 'active')=$${idx}`; params.push(status); idx++; }
@@ -1757,9 +1881,9 @@ router.get(
       const { branch, status = "active" } = req.query;
 
       let query = `
-        SELECT id, full_name, email, branch, department
+        SELECT id, full_name, email, role, branch, department
         FROM users
-        WHERE role = 'EMPLOYEE'
+        WHERE role != 'SUPER_ADMIN'
       `;
 
       const params = [];

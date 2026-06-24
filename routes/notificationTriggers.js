@@ -73,10 +73,11 @@ export async function notifyLateLogin(user, lateMinutes, recordId) {
  * @param {Object} leave - { id, leave_type, from_date, to_date, days }
  */
 export async function notifyLeaveApply(user, leave) {
+  const requestedDays = Number(leave.requested_days ?? leave.days ?? 0);
   await emitNotification({
     userId: user.id,
     actionType: "leave_request",
-    description: `📋 Leave Request: ${user.full_name} applied for ${leave.leave_type} leave (${leave.days} day${leave.days > 1 ? "s" : ""}) — ${leave.from_date} to ${leave.to_date}`,
+    description: `📋 Leave Request: ${user.full_name} applied for ${leave.leave_type} leave (${requestedDays} day${requestedDays > 1 ? "s" : ""}) — ${leave.from_date} to ${leave.to_date}`,
     relatedId: leave.id,
     targetRole: "BOTH",
     branch: user.branch,

@@ -114,9 +114,28 @@ router.post(
   authorizeRoles("SUPER_ADMIN", "MANAGER"),
   async (req, res) => {
     try {
-      let { full_name, email, role, department, branch, salary, password,
-            designation, bank_name, bank_account, bank_ifsc, employee_code,
-            aadhar_number } = req.body;
+    let {
+  full_name,
+  email,
+  role,
+  department,
+  branch,
+  salary,
+  password,
+  designation,
+  bank_name,
+  bank_account,
+  bank_ifsc,
+  employee_code,
+  aadhar_number,
+  joining_date
+} = req.body;
+
+const finalJoiningDate =
+  req.body.joiningDate ||
+  joining_date ||
+  new Date().toISOString().split("T")[0];
+
 
       if (req.user.role === "MANAGER") {
         branch = req.user.branch;
@@ -144,22 +163,36 @@ router.post(
 
       const plainPassword = password && password.trim() !== "" ? password : "Welcome@123";
       const hashedPassword = await bcrypt.hash(plainPassword, 10);
-      const joining_date = new Date().toISOString().split('T')[0];
       const profile_initials = getInitials(full_name);
 
-      const result = await pool.query(
-        `INSERT INTO users
-         (full_name, email, password, role, department, branch, employee_code,
-          salary, joining_date, status, profile_initials,
-          designation, bank_name, bank_account, bank_ifsc,
-          aadhar_number, visible_password)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-         RETURNING id`,
-        [full_name, email, hashedPassword, role.toUpperCase(), department, branch, finalCode,
-         salary, joining_date, 'active', profile_initials,
-         designation || null, bank_name || null, bank_account || null, bank_ifsc || null,
-         aadhar_number || null, plainPassword]
-      );
+     const result = await pool.query(
+  `INSERT INTO users
+   (full_name, email, password, role, department, branch, employee_code,
+    salary, joining_date, status, profile_initials,
+    designation, bank_name, bank_account, bank_ifsc,
+    aadhar_number, visible_password)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+   RETURNING id`,
+  [
+    full_name,
+    email,
+    hashedPassword,
+    role.toUpperCase(),
+    department,
+    branch,
+    finalCode,
+    salary,
+    finalJoiningDate,
+    "active",
+    profile_initials,
+    designation || null,
+    bank_name || null,
+    bank_account || null,
+    bank_ifsc || null,
+    aadhar_number || null,
+    plainPassword,
+  ]
+);
 
       res.status(201).json({
         id: result.rows[0].id,
@@ -186,9 +219,14 @@ router.put(
       const { id } = req.params;
       let { full_name, email, role, department, branch, salary, password,
             designation, bank_name, bank_account, bank_ifsc, aadhar_number } = req.body;
+      const finalJoiningDate =
+        req.body.joiningDate ||
+        req.body.joining_date ||
+        new Date().toISOString().split("T")[0];
 
       const empCheck = await pool.query("SELECT branch, role FROM users WHERE id = $1", [id]);
       if (empCheck.rows.length === 0) return res.status(404).json({ message: "Employee not found" });
+      const employee = empCheck.rows[0];
 
       if (req.user.role === "MANAGER") {
         if (employee.branch !== req.user.branch) {
@@ -203,12 +241,13 @@ router.put(
         SET full_name = $1, email = $2, role = $3, department = $4, branch = $5,
             salary = $6, profile_initials = $7,
             designation = $8, bank_name = $9, bank_account = $10, bank_ifsc = $11,
-            aadhar_number = $12
+            aadhar_number = $12, joining_date = $13
       `;
       let params = [full_name, email, role.toUpperCase(), department, branch, salary,
                     getInitials(full_name), designation || null, bank_name || null,
-                    bank_account || null, bank_ifsc || null, aadhar_number || null];
-      let paramIndex = 13;
+                    bank_account || null, bank_ifsc || null, aadhar_number || null,
+                    finalJoiningDate];
+      let paramIndex = 14;
 
       // If password is provided, update both hashed and visible password
       if (password && password.trim() !== "") {
@@ -234,6 +273,68 @@ router.put(
 // ─────────────────────────────────────────────────────────────
 // 5. Mark employee inactive (soft delete)
 // ─────────────────────────────────────────────────────────────
+// Change status without deleting any employee or related HRMS data.
+router.patch(
+  "/admin/employees/:id/status",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  async (req, res) => {
+    try {
+      const { status } = req.body;
+      const reason = String(req.body.reason || "").trim() || null;
+      if (!["active", "inactive"].includes(status)) {
+        return res.status(400).json({ message: "Status must be active or inactive" });
+      }
+      const employeeResult = await pool.query(
+        "SELECT id, full_name, email, branch, department, role, COALESCE(status, 'active') AS status FROM users WHERE id = $1",
+        [req.params.id]
+      );
+      if (!employeeResult.rows.length) return res.status(404).json({ message: "Employee not found" });
+      const employee = employeeResult.rows[0];
+      if (employee.role === "SUPER_ADMIN") return res.status(403).json({ message: "Super admin status cannot be changed" });
+      if (req.user.role === "MANAGER" && (employee.branch !== req.user.branch || employee.role !== "EMPLOYEE")) {
+        return res.status(403).json({ message: "Managers can only change employees in their branch" });
+      }
+      if (employee.status === status) return res.json({ message: `Employee is already ${status}`, employee });
+
+      const updated = await pool.query(
+        `UPDATE users SET status = $1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2 RETURNING id, full_name, email, branch, department, role, status`,
+        [status, employee.id]
+      );
+      const editorResult = await pool.query(
+        "SELECT id, full_name, email, role, branch FROM users WHERE id = $1",
+        [req.user.id]
+      );
+      const editor = editorResult.rows[0] || req.user;
+      await logActivity({
+        userId: editor.id,
+        userName: editor.full_name || editor.email || "Unknown user",
+        role: editor.role || req.user.role,
+        action: "EMPLOYEE_STATUS_CHANGED",
+        actionType: "employee_status_changed",
+        moduleName: "Employee",
+        details: `${employee.full_name} changed from ${employee.status} to ${status}${reason ? `. Reason: ${reason}` : ""}.`,
+        ip: getClientIp(req),
+        branch: employee.branch || editor.branch || "all",
+        department: employee.department || null,
+        metadata: {
+          changedBy: editor.full_name || editor.email || "Unknown user",
+          changedEmployee: employee.full_name,
+          employeeId: employee.id,
+          oldStatus: employee.status,
+          newStatus: status,
+          reason,
+        },
+      });
+      res.json({ message: `Employee marked as ${status}`, employee: updated.rows[0] });
+    } catch (error) {
+      console.error("Employee status update failed:", error);
+      res.status(500).json({ message: "Failed to update employee status" });
+    }
+  }
+);
+
 router.delete(
   "/admin/employees/:id",
   verifyToken,
@@ -283,7 +384,7 @@ router.delete(
         userName: editor.full_name || editor.email || "Unknown user",
         role: editor.role || req.user.role,
         action: "EMPLOYEE_MARKED_INACTIVE",
-        actionType: "UPDATE",
+        actionType: "employee_status_changed",
         moduleName: "Employee",
         details: `${editor.full_name || editor.email || "Unknown user"} marked ${employee.full_name} (${employee.email}) inactive.`,
         ip: getClientIp(req),
@@ -303,6 +404,7 @@ router.delete(
           },
           oldValues: { status: employee.status || "active" },
           newValues: { status: "inactive" },
+          reason: null,
         },
       });
 

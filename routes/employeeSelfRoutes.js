@@ -1,6 +1,7 @@
 import express from "express";
 import { pool } from "../middleware/db.js";
 import { verifyToken } from "../middleware/auth.js";
+import { calculateLateMinutes } from "../utils/attendancePolicy.js";
 
 const router = express.Router();
 
@@ -112,20 +113,8 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
       });
     }
 
-    // Late logic
-    const officeStart = new Date(`${date}T09:00:00`);
-
-    let lateMinutes = 0;
-    let status = 'present';
-
-    if (now > officeStart) {
-
-      lateMinutes = Math.floor(
-        (now - officeStart) / 60000
-      );
-
-      status = 'late';
-    }
+    const lateMinutes = calculateLateMinutes(currentTime);
+    const status = lateMinutes > 0 ? 'late' : 'present';
 
     const result = await pool.query(
       `

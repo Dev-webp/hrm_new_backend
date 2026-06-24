@@ -14,7 +14,9 @@ router.post("/login", async (req, res) => {
     const { email, password } = req.body;
 
     const userRes = await pool.query(
-      `SELECT * FROM users WHERE email = $1`,
+      `SELECT id, full_name, email, password, role, department, branch, designation
+       FROM users
+       WHERE email = $1`,
       [email]
     );
 
@@ -44,6 +46,7 @@ router.post("/login", async (req, res) => {
         email: user.email,
         branch: user.branch,
         department: user.department,
+        designation: user.designation,
         full_name: user.full_name
       },
       process.env.JWT_SECRET,
@@ -68,6 +71,7 @@ router.post("/login", async (req, res) => {
         email: user.email,
         role: user.role,
         department: user.department,
+        designation: user.designation,
         branch: user.branch
       }
     });

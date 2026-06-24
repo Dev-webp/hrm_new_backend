@@ -72,6 +72,7 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "MAN
         FROM leave_requests l
         JOIN users u ON l.user_id = u.id
         WHERE l.status = 'pending'
+          AND u.role != 'SUPER_ADMIN'
         ${branchFilter}
       `, []),
 

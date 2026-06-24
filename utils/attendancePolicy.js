@@ -13,6 +13,12 @@ export const HALF_SLOT_B_END = "19:00:00";
 
 export const POST_LOGIN_IDLE_THRESHOLD_MINUTES = 15;
 
+export function calculateLateMinutes(checkInTime) {
+  if (!checkInTime) return 0;
+  const [h, m] = String(checkInTime).split(":").map(Number);
+  return Math.max(0, h * 60 + m - 10 * 60);
+}
+
 const MIN_HALF_DAY_HOURS = 4;
 const MIN_FULL_DAY_HOURS = 8;
 
@@ -131,8 +137,16 @@ export function resolveHalfDaySlot(log) {
 
   if (inSec === null || outSec === null) return "INVALID";
 
-  if (inSec <= T_OFFICE_START && outSec >= T_HALF_A_END) return "SLOT_A";
-  if (inSec >= T_HALF_B_START && outSec >= T_OFFICE_END) return "SLOT_B";
+  // Morning half-day: worked 10:00 to 14:30
+  if (inSec <= T_OFFICE_START && outSec >= T_HALF_A_END) {
+    return "SLOT_A";
+  }
+
+  // Afternoon half-day: worked 14:30 to 19:00
+  // Login can be before 14:30 also
+  if (inSec <= T_HALF_B_START && outSec >= T_OFFICE_END) {
+    return "SLOT_B";
+  }
 
   return "INVALID";
 }
@@ -257,7 +271,7 @@ export function classifyDayPolicy({
 
   const leaveType = String(log?.leave_type || "").toLowerCase();
   const leaveStatus = String(log?.leave_status || "").toLowerCase();
-  const isPaidLeave = leaveType.includes("paid") || leaveType.includes("earned");
+  const isPaidLeave = leaveType === "paid" || leaveType === "earned";
 
   if ((leaveStatus === "pending" || leaveStatus === "rejected") && !log?.office_in && !log?.office_out) {
     flags.push(leaveStatus === "pending" ? "leave_pending" : "leave_rejected");
@@ -265,6 +279,17 @@ export function classifyDayPolicy({
       total_break_minutes: 0,
       half_day_slot: null,
     });
+  }
+
+  if (leaveStatus === "approved" && ["SLOT_A", "SLOT_B"].includes(log?.half_day_slot)) {
+    flags.push(isPaidLeave ? "paid_half_day_leave" : "unpaid_half_day_leave");
+    return result(
+      "half_day",
+      `Approved ${isPaidLeave ? "paid" : "unpaid"} half-day leave (${log.half_day_slot})`,
+      netHours,
+      flags,
+      { total_break_minutes: totalBreakMinutes, half_day_slot: log.half_day_slot }
+    );
   }
 
   if (isPaidLeave) {

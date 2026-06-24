@@ -47,6 +47,7 @@ export function initSocket(server) {
     // Join role & branch rooms
     socket.join(`role:${role}`);
     if (branch) socket.join(`branch:${branch}`);
+    if (userId) socket.join(`user:${userId}`);
 
     // Track online
     onlineUsers.set(socket.id, { userId, full_name, branch, role });
@@ -71,14 +72,21 @@ export function initSocket(server) {
           params.push(branch); idx++;
         } else if (role === "SUPER_ADMIN") {
           query += ` AND (n.target_role='SUPER_ADMIN' OR n.target_role='BOTH')`;
+        } else if (role === "EMPLOYEE") {
+          query += ` AND n.target_role='EMPLOYEE' AND n.user_id=$${idx}`;
+          params.push(userId); idx++;
         }
 
+        const countResult = await pool.query(
+          `SELECT COUNT(*) AS count FROM (${query}) scoped_notifications WHERE is_read = false`,
+          params
+        );
         query += ` ORDER BY n.created_at DESC LIMIT $${idx}`;
-        params.push(limit);
+        params.push(Math.min(Math.max(Number(limit) || 100, 1), 500));
 
         const result = await pool.query(query, params);
         socket.emit("notifications_list", result.rows);
-        socket.emit("unread_count", { count: result.rows.filter(n => !n.is_read).length });
+        socket.emit("unread_count", { count: Number(countResult.rows[0]?.count || 0) });
       } catch (err) {
         console.error("❌ fetch_notifications:", err);
       }
@@ -157,6 +165,9 @@ export async function emitNotification({
     }
     if ((targetRole === "MANAGER" || targetRole === "BOTH") && branch) {
       io?.to(`branch:${branch}`).emit("new_notification", notif);
+    }
+    if (targetRole === "EMPLOYEE") {
+      io?.to(`user:${userId}`).emit("new_notification", notif);
     }
   } catch (err) {
     console.error("❌ emitNotification error:", err);

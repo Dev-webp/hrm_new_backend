@@ -48,7 +48,7 @@ export function evaluateLeaveOnApproval(
   const applyPenalty = isSudden || satMonExceeded;
 
   const penalty = applyPenalty
-    ? computeOnePlusOnePenalty(leave.days || 1)
+    ? computeOnePlusOnePenalty(leave.requested_days ?? leave.days ?? 1)
     : { penalty_applied: false, penalty_days: 0 };
 
   return {
@@ -72,6 +72,14 @@ function getYearMonth(date = new Date()) {
   };
 }
 
+function capAtCurrentMonth(date = new Date()) {
+  const requested = new Date(date);
+  const now = new Date();
+  const requestedMonth = new Date(requested.getFullYear(), requested.getMonth(), 1);
+  const currentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  return requestedMonth > currentMonth ? currentMonth : requested;
+}
+
 function monthsCompleted(joiningDate, targetDate = new Date()) {
   if (!joiningDate) return 0;
 
@@ -93,6 +101,7 @@ async function getPolicyNumber(key, fallback) {
 }
 
 export async function ensureMonthlyPaidLeaveCredit(userId, targetDate = new Date()) {
+  targetDate = capAtCurrentMonth(targetDate);
   const { year, month } = getYearMonth(targetDate);
 
   const userRes = await pool.query(
@@ -144,6 +153,7 @@ export async function ensureMonthlyPaidLeaveCredit(userId, targetDate = new Date
 }
 
 export async function getProfessionalLeaveBalance(userId, targetDate = new Date()) {
+  targetDate = capAtCurrentMonth(targetDate);
   const { year, month } = getYearMonth(targetDate);
 
   const creditInfo = await ensureMonthlyPaidLeaveCredit(userId, targetDate);
@@ -186,6 +196,7 @@ export async function getProfessionalLeaveBalance(userId, targetDate = new Date(
 }
 
 export async function deductApprovedLeave(userId, days, leaveType, targetDate = new Date()) {
+  targetDate = capAtCurrentMonth(targetDate);
   const { year, month } = getYearMonth(targetDate);
   const requestedDays = Number(days || 0);
 
@@ -200,18 +211,20 @@ export async function deductApprovedLeave(userId, days, leaveType, targetDate = 
       );
     }
 
+    const remainingBalance = Math.max(0, balance.paid_leave_balance - requestedDays);
+
     await pool.query(
       `
       UPDATE leave_balance
       SET
         paid_leave_used = COALESCE(paid_leave_used, 0) + $1,
-        balance = GREATEST(0, COALESCE(balance, 0) - $1),
+        balance = $5,
         updated_at = NOW()
       WHERE user_id = $2
         AND year = $3
         AND month = $4
       `,
-      [requestedDays, userId, year, month]
+      [requestedDays, userId, year, month, remainingBalance]
     );
 
     return {

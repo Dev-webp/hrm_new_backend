@@ -9,16 +9,10 @@ import {
   evaluateLateLogin,
   buildMonthlyLateStats,
   resolveHalfDaySlot,
-  timeToSeconds,
   formatDateStr,
+  calculateLateMinutes,
 } from "../utils/attendancePolicy.js";
 import { emitNotification } from "../socketManager.js";
-
-function timeToMinutes(timeStr) {
-  const sec = timeToSeconds(timeStr);
-  if (sec === null) return 0;
-  return Math.max(0, Math.floor(sec / 60) - 10 * 60);
-}
 
 const statusMap = {
   full_day: "full_day",
@@ -108,11 +102,7 @@ export async function classifyAndPersistUserDate(
     };
   }
 
-  const lateInfo = log ? evaluateLateLogin(log, cfg) : { is_late: false };
-  const lateMinutes =
-    lateInfo.is_late && log?.office_in
-      ? Math.max(0, timeToMinutes(log.office_in))
-      : 0;
+  const lateMinutes = calculateLateMinutes(log?.office_in);
 
   const halfDaySlot = log ? resolveHalfDaySlot(log) : null;
   const slotForDb =

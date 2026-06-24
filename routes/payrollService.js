@@ -153,6 +153,8 @@ async function fetchPayrollData(pool, userId, year, month) {
   TO_CHAR(from_date,'YYYY-MM-DD') AS from_date,
   TO_CHAR(to_date,'YYYY-MM-DD') AS to_date,
   days,
+  requested_days,
+  leave_duration_type,
   leave_type,
   status,
   COALESCE(paid_days,0) AS paid_days,
@@ -278,7 +280,7 @@ function computeApprovedLeaveSplit(leaves) {
   for (const leave of leaves || []) {
     const type = String(leave.leave_type || "").toLowerCase();
     const category = String(leave.leave_category || "").toLowerCase();
-    const days = Number(leave.days || 0);
+    const days = Number(leave.requested_days ?? leave.days ?? 0);
 
     if (type === "paid" || category === "paid") {
       paidLeaveUsed += Number(leave.paid_days || days || 0);

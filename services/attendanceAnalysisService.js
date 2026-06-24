@@ -142,7 +142,10 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
       [start, end, userId]
     ),
     pool.query(
-      `SELECT leave_type, from_date, to_date, days, reason, is_paid_leave, status
+      `SELECT leave_type, from_date, to_date,
+              COALESCE(requested_days, days::numeric) AS days,
+              leave_duration_type, half_day_session,
+              reason, is_paid_leave, status
        FROM leave_requests
        WHERE user_id = $1 AND status = 'approved'
          AND from_date <= $3 AND to_date >= $2`,
@@ -291,6 +294,8 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
       productionHours: rec.productionHours,
       totalBreakMinutes: rec.breaks,
       lateMinutes: rec.lateMinutes,
+      leaveType: rec.leaveType,
+      isPaidLeave: rec.isPaidLeave,
       label: rec.heatmapStatus,
     });
 
@@ -328,21 +333,49 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     }
   }
 
+  const safeRecords = records.filter(Boolean).map((r) => ({
+    ...r,
+    status: r.status || "absent",
+    checkIn: r.checkIn || "--",
+    checkOut: r.checkOut || "--",
+    lateMinutes: Number(r.lateMinutes) || 0,
+    workHours: Number(r.workHours) || 0,
+    productionHours: Number(r.productionHours) || 0,
+    breaks: Number(r.breaks) || 0,
+    breakMins: {
+      b1: Number(r.breakMins?.b1) || 0,
+      lunch: Number(r.breakMins?.lunch) || 0,
+      b2: Number(r.breakMins?.b2) || 0,
+      b3: Number(r.breakMins?.b3) || 0,
+    },
+    breakDetails: r.breakDetails || {
+      b1: { in: "--", out: "--" },
+      lunch: { in: "--", out: "--" },
+      b2: { in: "--", out: "--" },
+      b3: { in: "--", out: "--" },
+    },
+  }));
+  const safeHeatmap = heatmap.filter(Boolean).map((r) => ({
+    ...r,
+    status: r.status || "absent",
+    label: r.label || r.status || "Absent",
+  }));
+
   const mv = mvRes.rows[0] || {};
   const monthlySummary = {
-    fullDays: records.filter((r) => r.status === "full_day").length,
-    halfDays: records.filter((r) => r.status === "half_day").length,
-    absentDays: records.filter((r) => r.status === "absent").length,
-    leaveDays: Number(mv.leave_days) || records.filter((r) => r.status === "leave").length,
-    paidLeaveDays: records.filter((r) => r.status === "leave" && r.isPaidLeave).length,
-    unpaidLeaveDays: records.filter((r) => r.status === "leave" && !r.isPaidLeave).length,
-    holidayDays: Number(mv.holiday_days) || records.filter((r) => r.status === "holiday").length,
-    lateDays: Number(mv.late_days) || records.filter((r) => r.lateMinutes > 0).length,
-    totalLateMinutes: Number(mv.total_late_minutes) || records.reduce((s, r) => s + r.lateMinutes, 0),
-    totalProductionHours: parseFloat(mv.total_production_hours) || records.reduce((s, r) => s + r.productionHours, 0),
+    fullDays: safeRecords.filter((r) => r.status === "full_day").length,
+    halfDays: safeRecords.filter((r) => r.status === "half_day").length,
+    absentDays: safeRecords.filter((r) => r.status === "absent").length,
+    leaveDays: Number(mv.leave_days) || safeRecords.filter((r) => r.status === "leave").length,
+    paidLeaveDays: safeRecords.filter((r) => r.status === "leave" && r.isPaidLeave).length,
+    unpaidLeaveDays: safeRecords.filter((r) => r.status === "leave" && !r.isPaidLeave).length,
+    holidayDays: Number(mv.holiday_days) || safeRecords.filter((r) => r.status === "holiday").length,
+    lateDays: Number(mv.late_days) || safeRecords.filter((r) => r.lateMinutes > 0).length,
+    totalLateMinutes: Number(mv.total_late_minutes) || safeRecords.reduce((s, r) => s + r.lateMinutes, 0),
+    totalProductionHours: parseFloat(mv.total_production_hours) || safeRecords.reduce((s, r) => s + r.productionHours, 0),
     totalBreakMinutes: Number(mv.total_break_minutes) || totalBreakMins,
     avgBreakMins: Number(mv.avg_break_mins) || (breakWorkDays ? Math.round(totalBreakMins / breakWorkDays) : 0),
-    breakExceededDays: Number(mv.break_exceeded_days) || records.filter((r) => r.breaks > MAX_BREAK_MINS).length,
+    breakExceededDays: Number(mv.break_exceeded_days) || safeRecords.filter((r) => r.breaks > MAX_BREAK_MINS).length,
     avgLoginTime: mv.avg_login_time ? fmtTime(mv.avg_login_time) : "--",
     avgLogoutTime: mv.avg_logout_time ? fmtTime(mv.avg_logout_time) : "--",
   };
@@ -353,10 +386,10 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     longestBreakDay: longestBreakDay.date,
     longestBreakMinutes: longestBreakDay.minutes,
     breakTypeTotals: {
-      break1: records.reduce((s, r) => s + r.breakMins.b1, 0),
-      lunch: records.reduce((s, r) => s + r.breakMins.lunch, 0),
-      break2: records.reduce((s, r) => s + r.breakMins.b2, 0),
-      break3: records.reduce((s, r) => s + r.breakMins.b3, 0),
+      break1: safeRecords.reduce((s, r) => s + r.breakMins.b1, 0),
+      lunch: safeRecords.reduce((s, r) => s + r.breakMins.lunch, 0),
+      break2: safeRecords.reduce((s, r) => s + r.breakMins.b2, 0),
+      break3: safeRecords.reduce((s, r) => s + r.breakMins.b3, 0),
     },
     maxBreakMinutesPolicy: MAX_BREAK_MINS,
   };
@@ -377,9 +410,9 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     dailyLoginLogout,
     dailyBreakAnalysis,
     dailyProductionHours,
-    heatmap,
+    heatmap: safeHeatmap,
     breakAnalysis,
-    records,
+    records: safeRecords,
     approvedLeaves: leaveRes.rows,
   };
 }

@@ -71,7 +71,8 @@ const SEVERITY_MAP = {
   BreakEnd: "info",      BreakExceeded: "warning", PayslipGen: "info",
   PayslipPaid: "info",   SettingsUpdate: "warning", FailedLogin: "critical",
   Suspicious: "critical", ATTENDANCE_EDITED: "warning", BREAK_EDITED: "warning",
-  EMPLOYEE_MARKED_INACTIVE: "warning",
+  EMPLOYEE_MARKED_INACTIVE: "warning", EMPLOYEE_STATUS_CHANGED: "warning",
+  LEAVE_CHANGED: "warning",
 };
 
 function sanitizeStr(str) {
@@ -205,15 +206,24 @@ export const logCheckout = (user, time, productionHours, ip = "0.0.0.0") =>
     details: `${user.full_name} checked out at ${time} — ${productionHours.toFixed(1)}h production`,
     ip, branch: user.branch ?? "all", metadata: { time, productionHours } });
 
-export const logLeaveApply = (user, leave, ip = "0.0.0.0") =>
-  logActivity({ userId: user.id, userName: user.full_name, role: user.role,
+export const logLeaveApply = (user, leave, ip = "0.0.0.0") => {
+  const requestedDays = Number(leave.requested_days ?? leave.days ?? 0);
+  return logActivity({ userId: user.id, userName: user.full_name, role: user.role,
     action: "LeaveApply",
-    details: `${user.full_name} applied ${leave.leave_type} leave (${leave.days} day${leave.days > 1 ? "s" : ""})`,
+    details: `${user.full_name} applied ${leave.leave_type} leave (${requestedDays} day${requestedDays > 1 ? "s" : ""})`,
     ip, branch: user.branch ?? "all",
     metadata: { leaveId: leave.id, leave_type: leave.leave_type } });
+};
 
 export const logPayslip = (admin, payslip, ip = "0.0.0.0") =>
   logActivity({ userId: admin.id, userName: admin.full_name, role: admin.role,
     action: "PayslipGen",
+    actionType: "payslip_generated", moduleName: "Payroll",
     details: `Payslip generated for ${payslip.user_name} — ₹${Number(payslip.net_pay).toLocaleString("en-IN")}`,
-    ip, branch: admin.branch ?? "all", metadata: { payslipId: payslip.id } });
+    ip, branch: admin.branch ?? "all", metadata: {
+      payslipId: payslip.id,
+      employeeName: payslip.user_name,
+      month: payslip.month || null,
+      netPay: Number(payslip.net_pay),
+      generatedBy: admin.full_name || admin.email || "Unknown user",
+    } });

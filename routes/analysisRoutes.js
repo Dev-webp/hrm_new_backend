@@ -64,7 +64,7 @@ function normalizedAttendanceStatusSql(alias = "a") {
      AND NOT (
        (${alias}.check_in_time <= '10:00:00'::time AND ${alias}.check_out_time >= '14:30:00'::time)
        OR
-       (${alias}.check_in_time >= '14:30:00'::time AND ${alias}.check_out_time >= '19:00:00'::time)
+       (${alias}.check_in_time <= '14:30:00'::time AND ${alias}.check_out_time >= '19:00:00'::time)
      )
     THEN 'absent'
     ELSE COALESCE(${alias}.status, 'absent')
@@ -99,6 +99,47 @@ function normalizeAttendanceStatus(att) {
   }
 
   return status;
+}
+
+function safeAnalysisRecord(rec) {
+  return {
+    ...rec,
+    date: rec?.date || "",
+    status: rec?.status || "absent",
+    checkIn: rec?.checkIn ?? rec?.check_in_time ?? "--",
+    checkOut: rec?.checkOut ?? rec?.check_out_time ?? "--",
+    lateMinutes: Number(rec?.lateMinutes ?? rec?.late_minutes ?? 0) || 0,
+    workHours: parseFloat(rec?.workHours ?? rec?.production_hours) || 0,
+    breaks: Number(rec?.breaks ?? rec?.total_break_minutes ?? 0) || 0,
+    breakMins: {
+      b1: Number(rec?.breakMins?.b1) || 0,
+      lunch: Number(rec?.breakMins?.lunch) || 0,
+      b2: Number(rec?.breakMins?.b2) || 0,
+      b3: Number(rec?.breakMins?.b3) || 0,
+    },
+    breakDetails: {
+      b1: {
+        in: rec?.breakDetails?.b1?.in || "--",
+        out: rec?.breakDetails?.b1?.out || "--",
+      },
+      lunch: {
+        in: rec?.breakDetails?.lunch?.in || "--",
+        out: rec?.breakDetails?.lunch?.out || "--",
+      },
+      b2: {
+        in: rec?.breakDetails?.b2?.in || "--",
+        out: rec?.breakDetails?.b2?.out || "--",
+      },
+      b3: {
+        in: rec?.breakDetails?.b3?.in || "--",
+        out: rec?.breakDetails?.b3?.out || "--",
+      },
+    },
+  };
+}
+
+function safeAnalysisRecords(records = []) {
+  return (records || []).filter(Boolean).map(safeAnalysisRecord);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -141,9 +182,9 @@ router.get(
 
       const attAggQ = `
         WITH emp AS (
-          SELECT id, full_name, department, branch
+          SELECT id, full_name, department, branch, role
           FROM users
-          WHERE role = 'EMPLOYEE'
+          WHERE role != 'SUPER_ADMIN'
           ${branchFilter}
         ),
        att AS (
@@ -381,7 +422,7 @@ router.get(
         });
       }
 
-      const result = { records, month };
+      const result = { records: safeAnalysisRecords(records), month };
       setCache(ck, result);
       res.json(result);
     } catch (err) {

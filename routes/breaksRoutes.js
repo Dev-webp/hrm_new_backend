@@ -82,7 +82,7 @@ router.get("/breaks", verifyToken, async (req, res) => {
             FROM employee_breaks b
             JOIN users u
             ON b.user_id = u.id
-            WHERE 1=1
+            WHERE u.role != 'SUPER_ADMIN'
         `;
 
         const params = [];
@@ -409,7 +409,7 @@ router.put(
                 userName: editor.full_name || editor.email || "Unknown user",
                 role: editor.role || req.user.role,
                 action: "BREAK_EDITED",
-                actionType: "UPDATE",
+                actionType: "break_changed",
                 moduleName: "Breaks",
                 details: `Breaks edited for ${employee.full_name} (${employee.email}) on ${date}. Reason: ${reason}.`,
                 ip: getClientIp(req),

@@ -163,6 +163,7 @@ router.post(
             user_name: calc.employee.full_name,
             net_pay: calc.salary.netPay,
             id: saved.id,
+            month: saved.month || month,
           },
           getClientIp(req)
         );
@@ -216,6 +217,7 @@ router.post(
                 user_name: calc.employee.full_name,
                 net_pay: calc.salary.netPay,
                 id: s.id,
+                month: s.month || month,
               },
               getClientIp(req)
             );
