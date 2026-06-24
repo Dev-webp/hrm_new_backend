@@ -200,6 +200,78 @@ router.get(
 
 /* ✅ IMPORTANT: GET all leaves for Admin / Manager */
 router.get(
+  "/leaves/approved-monthly",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  async (req, res) => {
+    try {
+      const { userId, month } = req.query;
+
+      if (!userId || !month || !/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ message: "userId and month=YYYY-MM are required" });
+      }
+
+      const [year, monthNumber] = month.split("-").map(Number);
+      const monthStart = `${month}-01`;
+      const monthEnd = `${month}-${String(new Date(year, monthNumber, 0).getDate()).padStart(2, "0")}`;
+
+      const targetUser = await pool.query(
+        "SELECT id, branch FROM users WHERE id = $1 AND role != 'SUPER_ADMIN'",
+        [userId]
+      );
+
+      if (!targetUser.rows.length) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      if (req.user.role === "MANAGER" && targetUser.rows[0].branch !== req.user.branch) {
+        return res.status(403).json({ message: "Managers can only view leaves in their own branch" });
+      }
+
+      const result = await pool.query(
+        `
+        SELECT
+          l.id,
+          l.user_id,
+          u.full_name,
+          u.branch,
+          l.leave_type,
+          l.from_date,
+          l.to_date,
+          l.days,
+          l.requested_days,
+          l.leave_duration_type,
+          l.half_day_session,
+          l.paid_days,
+          l.unpaid_days,
+          l.reason,
+          l.status,
+          l.created_at,
+          l.approved_by,
+          approver.full_name AS approved_by_name,
+          l.approved_at,
+          l.rejection_reason
+        FROM leave_requests l
+        JOIN users u ON u.id = l.user_id
+        LEFT JOIN users approver ON approver.id = l.approved_by
+        WHERE l.user_id = $1
+          AND l.status = 'approved'
+          AND l.from_date <= $3
+          AND l.to_date >= $2
+        ORDER BY l.from_date ASC, l.created_at DESC
+        `,
+        [userId, monthStart, monthEnd]
+      );
+
+      res.json(result.rows);
+    } catch (error) {
+      console.error("Monthly approved leaves fetch error:", error);
+      res.status(500).json({ message: "Failed to fetch monthly approved leaves" });
+    }
+  }
+);
+
+router.get(
   "/leaves",
   verifyToken,
   authorizeRoles("SUPER_ADMIN", "MANAGER"),
