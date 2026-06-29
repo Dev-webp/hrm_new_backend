@@ -85,29 +85,11 @@ function timeToMinutes(timeStr) {
 }
 
 function isValidHalfDaySlot(rec) {
-  const checkIn = timeToMinutes(rec?.check_in_time);
-  const checkOut = timeToMinutes(rec?.check_out_time);
-  if (checkIn === null || checkOut === null) return false;
-
-  const slotA = checkIn <= 10 * 60 && checkOut >= 14 * 60 + 30;
-  const slotB = checkIn >= 14 * 60 + 30 && checkOut >= 19 * 60;
-  return slotA || slotB;
+  return ["SLOT_A", "SLOT_B"].includes(rec?.half_day_slot);
 }
 
 function normalizeAttendanceStatus(rec) {
-  const status = rec?.status || "absent";
-  const productionHours = Number(rec?.production_hours || 0);
-
-  if (
-    status === "half_day" &&
-    productionHours >= 4 &&
-    productionHours < 8 &&
-    !isValidHalfDaySlot(rec)
-  ) {
-    return "absent";
-  }
-
-  return status;
+  return rec?.status || "absent";
 }
 
 // ============================================================
@@ -142,7 +124,7 @@ async function fetchPayrollData(pool, userId, year, month) {
       `SELECT
          TO_CHAR(date,'YYYY-MM-DD') AS date,
          status, late_minutes, check_in_time, check_out_time,
-         production_hours, total_break_minutes
+         production_hours, total_break_minutes, half_day_slot
        FROM attendance_records
        WHERE user_id = $1 AND date BETWEEN $2 AND $3
        ORDER BY date`,
@@ -219,6 +201,18 @@ function buildCalendarMaps(data) {
 // ============================================================
 // STEP 3: Tally attendance
 // ============================================================
+function minutesFromTime(value) {
+  if (!value) return null;
+  const [h, m] = String(value).split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
+}
+
+function isGraceLateLogin(rec = {}) {
+  const checkInMinutes = minutesFromTime(rec.check_in_time);
+  return checkInMinutes !== null && checkInMinutes > 10 * 60 && checkInMinutes <= 10 * 60 + 15;
+}
+
 function tallyAttendance(workingDays, attMap, approvedLeaveSet) {
   let fullDays           = 0;
   let halfDays           = 0;
@@ -243,7 +237,7 @@ function tallyAttendance(workingDays, attMap, approvedLeaveSet) {
       continue;
     }
 
-    if ((rec.late_minutes || 0) > 0) {
+    if (isGraceLateLogin(rec)) {
       lateLogins++;
       lateDates.push({ date: ds, minutes: rec.late_minutes });
     }

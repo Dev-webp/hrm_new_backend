@@ -16,7 +16,7 @@ export const POST_LOGIN_IDLE_THRESHOLD_MINUTES = 15;
 export function calculateLateMinutes(checkInTime) {
   if (!checkInTime) return 0;
   const [h, m] = String(checkInTime).split(":").map(Number);
-  return Math.max(0, h * 60 + m - 10 * 60);
+  return Math.max(0, h * 60 + m - (10 * 60));
 }
 
 const MIN_HALF_DAY_HOURS = 4;
@@ -36,8 +36,10 @@ export function timeToSeconds(timeStr) {
 const T_OFFICE_START = timeToSeconds(OFFICE_START);
 const T_OFFICE_END = timeToSeconds(OFFICE_END);
 const T_LATE_GRACE_LIMIT = timeToSeconds(LATE_GRACE_LIMIT);
+const T_HALF_A_START = timeToSeconds(HALF_SLOT_A_START);
 const T_HALF_A_END = timeToSeconds(HALF_SLOT_A_END);
 const T_HALF_B_START = timeToSeconds(HALF_SLOT_B_START);
+const T_HALF_B_END = timeToSeconds(HALF_SLOT_B_END);
 
 export function parseDateStr(str) {
   const [y, m, d] = str.slice(0, 10).split("-").map(Number);
@@ -118,7 +120,10 @@ export function evaluateLateLogin(log) {
   };
 
   const inSec = timeToSeconds(log?.office_in);
-  if (inSec === null || inSec <= T_OFFICE_START) return result;
+
+  if (inSec === null || inSec <= T_OFFICE_START) {
+    return result;
+  }
 
   result.is_late = true;
 
@@ -137,27 +142,101 @@ export function resolveHalfDaySlot(log) {
 
   if (inSec === null || outSec === null) return "INVALID";
 
-  // Morning half-day: worked 10:00 to 14:30
-  if (inSec <= T_OFFICE_START && outSec >= T_HALF_A_END) {
+  const morningMinutes = calculateHalfDayEffectiveMinutes(log, "SLOT_A");
+  if (inSec <= T_HALF_A_START && morningMinutes >= MIN_HALF_DAY_HOURS * 60) {
     return "SLOT_A";
   }
 
-  // Afternoon half-day: worked 14:30 to 19:00
-  // Login can be before 14:30 also
-  if (inSec <= T_HALF_B_START && outSec >= T_OFFICE_END) {
+  const afternoonMinutes = calculateHalfDayEffectiveMinutes(log, "SLOT_B");
+  if (inSec <= T_HALF_B_START && afternoonMinutes >= MIN_HALF_DAY_HOURS * 60) {
     return "SLOT_B";
   }
 
   return "INVALID";
 }
 
-export function qualifiesHalfDayBySlot(log, netMillis = calculateNetWorkMillis(log)) {
-  const netHours = netMillis / 3_600_000;
-  return netHours >= MIN_HALF_DAY_HOURS && netHours < MIN_FULL_DAY_HOURS && resolveHalfDaySlot(log) !== "INVALID";
+export function getHalfDaySlotDetails(log) {
+  const inSec = timeToSeconds(log?.office_in);
+  const outSec = timeToSeconds(log?.office_out);
+  const morningMinutes = calculateHalfDayEffectiveMinutes(log, "SLOT_A");
+  const afternoonMinutes = calculateHalfDayEffectiveMinutes(log, "SLOT_B");
+  const slot = resolveHalfDaySlot(log);
+
+  let slotChecked = "INVALID";
+  let effectiveMinutes = Math.max(morningMinutes, afternoonMinutes);
+  let invalidReason = "";
+
+  if (slot === "SLOT_A") {
+    slotChecked = "MORNING";
+    effectiveMinutes = morningMinutes;
+  } else if (slot === "SLOT_B") {
+    slotChecked = "AFTERNOON";
+    effectiveMinutes = afternoonMinutes;
+  } else if (inSec === null || outSec === null) {
+    invalidReason = "Missing login or logout";
+  } else if (inSec > T_HALF_B_START) {
+    slotChecked = "AFTERNOON";
+    invalidReason = "Afternoon half-day login must be on or before 2:30 PM";
+  } else if (inSec > T_HALF_A_START && outSec <= T_HALF_B_START) {
+    slotChecked = "MORNING";
+    invalidReason = "Morning half-day login must be on or before 10:00 AM";
+  } else if (afternoonMinutes > 0 || inSec <= T_HALF_B_START) {
+    slotChecked = "AFTERNOON";
+    invalidReason = "Afternoon half-day effective production is below 4 hours";
+  } else {
+    slotChecked = "MORNING";
+    invalidReason = "Morning half-day effective production is below 4 hours";
+  }
+
+  return {
+    slot,
+    slot_checked: slotChecked,
+    effective_minutes: effectiveMinutes,
+    morning_effective_minutes: morningMinutes,
+    afternoon_effective_minutes: afternoonMinutes,
+    invalid_reason: invalidReason,
+  };
+}
+
+export function calculateHalfDayEffectiveMinutes(log, slot) {
+  const inSec = timeToSeconds(log?.office_in);
+  const outSec = timeToSeconds(log?.office_out);
+  if (inSec === null || outSec === null) return 0;
+
+  const slotStart = slot === "SLOT_B" ? T_HALF_B_START : T_HALF_A_START;
+  const slotEnd = slot === "SLOT_B" ? T_HALF_B_END : T_HALF_A_END;
+
+  if (inSec > slotStart) return 0;
+
+  const workStart = Math.max(inSec, slotStart);
+  const workEnd = Math.min(outSec, slotEnd);
+  if (workEnd <= workStart) return 0;
+
+  let breakSec = 0;
+  for (const [rawIn, rawOut] of collectBreakPairs(log)) {
+    const bIn = timeToSeconds(rawIn);
+    const bOut = timeToSeconds(rawOut);
+    if (bIn !== null && bOut !== null && bOut > bIn) {
+      breakSec += overlapSeconds(bIn, bOut, workStart, workEnd);
+    }
+  }
+
+  return Math.max(0, Math.floor((workEnd - workStart - breakSec) / 60));
+}
+
+export function qualifiesHalfDayBySlot(log) {
+  return resolveHalfDaySlot(log) !== "INVALID";
+}
+
+function qualifiesAfternoonHalfDay(log, netHours) {
+  const inSec = timeToSeconds(log?.office_in);
+  return inSec !== null && inSec <= T_HALF_B_START && netHours >= MIN_HALF_DAY_HOURS;
 }
 
 export function buildMonthlyLateStats(logsByDate, daysInMonth, year, month) {
-  let graceLateCount = 0;
+  let totalLateCount = 0;
+  let withinGraceCount = 0;
+  let beyondGraceCount = 0;
   const exceededDates = [];
 
   for (let d = 1; d <= daysInMonth; d += 1) {
@@ -166,20 +245,25 @@ export function buildMonthlyLateStats(logsByDate, daysInMonth, year, month) {
     if (!log) continue;
 
     const lateInfo = evaluateLateLogin(log);
-    if (lateInfo.is_within_grace) {
-      graceLateCount += 1;
-      if (graceLateCount > MAX_PERMITTED_LATES) {
+    if (lateInfo.is_late) {
+      totalLateCount += 1;
+      if (lateInfo.is_within_grace) withinGraceCount += 1;
+      if (lateInfo.is_beyond_grace) beyondGraceCount += 1;
+      if (totalLateCount > MAX_PERMITTED_LATES) {
         exceededDates.push(dateStr);
       }
     }
   }
 
   return {
-    permitted_late_count: graceLateCount,
-    grace_late_count: graceLateCount,
+    permitted_late_count: totalLateCount,
+    late_login_count: totalLateCount,
+    grace_late_count: totalLateCount,
+    within_grace_late_count: withinGraceCount,
+    beyond_grace_late_count: beyondGraceCount,
     exceeded_dates: exceededDates,
     max_permitted: MAX_PERMITTED_LATES,
-    remaining: Math.max(0, MAX_PERMITTED_LATES - graceLateCount),
+    remaining: Math.max(0, MAX_PERMITTED_LATES - totalLateCount),
   };
 }
 
@@ -318,7 +402,14 @@ export function classifyDayPolicy({
 
   const lateInfo = evaluateLateLogin(log);
   const lateExceeded = (monthlyLateStats.exceeded_dates || []).includes(dateStr);
-  const halfDaySlot = resolveHalfDaySlot(log);
+  const halfDayDetails = getHalfDaySlotDetails(log);
+  const halfDaySlot = halfDayDetails.slot;
+  const halfDayMeta = {
+    half_day_slot: halfDaySlot === "INVALID" ? null : halfDaySlot,
+    half_day_effective_minutes: halfDayDetails.effective_minutes,
+    half_day_slot_checked: halfDayDetails.slot_checked,
+    half_day_invalid_reason: halfDayDetails.invalid_reason || null,
+  };
   const outSec = timeToSeconds(log.office_out);
   const misuse =
     log.misuse_of_time === true ||
@@ -328,7 +419,7 @@ export function classifyDayPolicy({
     flags.push("misuse_after_login");
     return result("half_day", "Misuse of time after login - half day absent", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
-      half_day_slot: halfDaySlot,
+      ...halfDayMeta,
     });
   }
 
@@ -336,56 +427,78 @@ export function classifyDayPolicy({
     flags.push("less_than_4_net_hours");
     return result("absent", "Less than 4 net working hours", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
-      half_day_slot: halfDaySlot,
+      ...halfDayMeta,
     });
   }
 
-  if (netHours < MIN_FULL_DAY_HOURS) {
-    if (halfDaySlot !== "INVALID") {
-      flags.push("valid_half_day_slot");
-      return result("half_day", `Valid half-day present slot ${halfDaySlot}`, netHours, flags, {
+  if (lateExceeded) {
+    flags.push("monthly_late_login_limit_exceeded");
+    if (!qualifiesAfternoonHalfDay(log, netHours)) {
+      const inSec = timeToSeconds(log?.office_in);
+      if (inSec !== null && inSec > T_HALF_B_START) {
+        flags.push("login_after_2_30_pm");
+        return result("absent", "Late login limit exceeded; login after 2:30 PM", netHours, flags, {
+          total_break_minutes: totalBreakMinutes,
+          ...halfDayMeta,
+        });
+      }
+      flags.push("strict_half_day_not_eligible");
+      return result("absent", "Late login limit exceeded; strict half-day eligibility not met", netHours, flags, {
         total_break_minutes: totalBreakMinutes,
-        half_day_slot: halfDaySlot,
+        ...halfDayMeta,
       });
     }
-
-    flags.push("invalid_half_day_slot");
-    return result("absent", "4 to less than 8 net hours without a valid half-day slot - absent", netHours, flags, {
+    flags.push("strict_half_day_eligible");
+    return result("half_day", "Late login limit exceeded; strict half-day eligibility met", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
-      half_day_slot: "INVALID",
+      half_day_slot: "SLOT_B",
+      half_day_effective_minutes: Math.round(netHours * 60),
+      half_day_slot_checked: "AFTERNOON",
+      half_day_invalid_reason: null,
     });
   }
 
   if (lateInfo.is_beyond_grace) {
     flags.push("late_after_10_15");
-    return result("half_day", "Login after 10:15 AM - half day absent, no exceptions", netHours, flags, {
+    if (halfDaySlot === "INVALID") {
+      flags.push("invalid_half_day_slot");
+      return result("absent", halfDayDetails.invalid_reason || "Invalid half-day slot", netHours, flags, {
+        total_break_minutes: totalBreakMinutes,
+        ...halfDayMeta,
+      });
+    }
+    flags.push("beyond_grace_valid_half_day_slot");
+    return result("half_day", "Login after 10:15 AM grace time; valid half-day slot completed", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
-      half_day_slot: halfDaySlot,
+      ...halfDayMeta,
     });
   }
 
-  if (lateExceeded) {
-    flags.push("monthly_grace_late_limit_exceeded");
-    return result("half_day", "Monthly grace late limit exceeded - late penalty", netHours, flags, {
+  if (netHours < MIN_FULL_DAY_HOURS) {
+    if (halfDaySlot === "INVALID") {
+      flags.push("invalid_half_day_slot");
+      return result("absent", halfDayDetails.invalid_reason || "Invalid half-day slot", netHours, flags, {
+        total_break_minutes: totalBreakMinutes,
+        ...halfDayMeta,
+      });
+    }
+    flags.push("valid_half_day_slot");
+    return result("half_day", "Valid official half-day slot completed", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
-      half_day_slot: halfDaySlot,
+      ...halfDayMeta,
     });
   }
 
   if (outSec !== null && outSec < T_OFFICE_END) {
     flags.push("logout_before_7_pm");
-    return result("half_day", "Logout before 7:00 PM - half day absent", netHours, flags, {
-      total_break_minutes: totalBreakMinutes,
-      half_day_slot: halfDaySlot,
-    });
   }
 
   if (lateInfo.is_within_grace) {
-    flags.push("grace_late_counted");
+    flags.push("within_grace_time");
   }
 
   flags.push("full_day_policy_satisfied");
-  return result("full_day", "8+ net hours, logout at/after 7:00 PM, and late rules satisfied", netHours, flags, {
+  return result("full_day", "8+ net working hours", netHours, flags, {
     total_break_minutes: totalBreakMinutes,
     half_day_slot: null,
   });

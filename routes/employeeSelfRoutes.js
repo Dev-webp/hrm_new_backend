@@ -1,9 +1,95 @@
 import express from "express";
 import { pool } from "../middleware/db.js";
 import { verifyToken } from "../middleware/auth.js";
-import { calculateLateMinutes } from "../utils/attendancePolicy.js";
+import { calculateLateMinutes, evaluateLateLogin } from "../utils/attendancePolicy.js";
 
 const router = express.Router();
+const STANDARD_BREAK_TYPES = ["break1", "lunch", "break2", "break3"];
+const MAX_DAILY_BREAK_SESSIONS = 6;
+
+function emptyBreakGroup() {
+  return {
+    break1: {},
+    lunch: {},
+    break2: {},
+    break3: {},
+    break3Sessions: [],
+  };
+}
+
+function normalizeBreak3Sessions(breaks = {}) {
+  if (Array.isArray(breaks.break3Sessions)) {
+    return breaks.break3Sessions
+      .filter((item) => item?.start || item?.end)
+      .map((item, index) => ({ ...item, number: item.number || index + 1 }));
+  }
+  const b3 = breaks.break3 || {};
+  return b3.start || b3.end ? [{ ...b3, number: 1 }] : [];
+}
+
+function buildBreak3Aggregate(sessions = []) {
+  const normalized = sessions.slice(0, MAX_DAILY_BREAK_SESSIONS);
+  const first = normalized.find((item) => item.start);
+  const completed = normalized.filter((item) => item.start && item.end);
+  const active = normalized.find((item) => item.start && !item.end);
+  const total = completed.reduce((sum, item) => sum + calcDuration(item.start, item.end), 0);
+  return {
+    start: first?.start || "",
+    end: active ? "" : completed.at(-1)?.end || "",
+    duration_minutes: total,
+    duration: total,
+  };
+}
+
+function assignBreakToGroup(grouped, row) {
+  const payload = {
+    start: row.start_time ? formatTime(row.start_time) : "",
+    end: row.end_time ? formatTime(row.end_time) : "",
+    duration_minutes: row.duration_minutes || 0,
+    duration: row.duration_minutes || 0,
+  };
+  grouped[row.break_type] = payload;
+  if (row.break_type === "break3") {
+    const sessions = Array.isArray(row.break3_sessions) ? row.break3_sessions : [];
+    grouped.break3Sessions = sessions
+      .filter((item) => item?.start || item?.end)
+      .slice(0, MAX_DAILY_BREAK_SESSIONS)
+      .map((item, index) => ({ ...item, number: item.number || index + 1 }));
+    if (!grouped.break3Sessions.length && (payload.start || payload.end)) {
+      grouped.break3Sessions = [{ ...payload, number: 1 }];
+    }
+  }
+}
+
+function validateBreakPolicy(breaks) {
+  const break3Sessions = normalizeBreak3Sessions(breaks);
+  let activeCount = 0;
+  let totalMinutes = 0;
+  let totalSessions = 0;
+  for (const breakType of ["break1", "lunch", "break2"]) {
+    const b = breaks[breakType] || {};
+    if (!b?.start && !b?.end) continue;
+    totalSessions++;
+    if (b.start && !b.end) activeCount++;
+    if (b.start && b.end) totalMinutes += calcDuration(b.start, b.end);
+  }
+  for (const session of break3Sessions) {
+    totalSessions++;
+    if (session.start && !session.end) activeCount++;
+    if (session.start && session.end) totalMinutes += calcDuration(session.start, session.end);
+  }
+
+  if (totalSessions > MAX_DAILY_BREAK_SESSIONS) {
+    return "Maximum 6 total break sessions are allowed per day.";
+  }
+  if (activeCount > 1) {
+    return "End the current break before starting another break.";
+  }
+  if (totalMinutes > 60) {
+    return "Total break time cannot exceed 60 minutes per day.";
+  }
+  return "";
+}
 
 // ──────────────────────────────────────────────
 // ATTENDANCE: today's record (for dashboard)
@@ -114,7 +200,7 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
     }
 
     const lateMinutes = calculateLateMinutes(currentTime);
-    const status = lateMinutes > 0 ? 'late' : 'present';
+    const status = evaluateLateLogin({ office_in: currentTime }).is_late ? 'late' : 'present';
 
     const result = await pool.query(
       `
@@ -375,7 +461,7 @@ router.get("/employee/my-breaks", verifyToken, async (req, res) => {
     if (!date) return res.status(400).json({ message: "date required" });
 
     const result = await pool.query(
-      `SELECT break_type, start_time, end_time, duration_minutes
+      `SELECT break_type, start_time, end_time, duration_minutes, break3_sessions
        FROM employee_breaks
        WHERE user_id = $1 AND date = $2
        ORDER BY break_type`,
@@ -383,13 +469,9 @@ router.get("/employee/my-breaks", verifyToken, async (req, res) => {
     );
 
     // Build grouped object matching what frontend expects
-    const grouped = { break1: {}, lunch: {}, break2: {}, break3: {} };
+    const grouped = emptyBreakGroup();
     result.rows.forEach((row) => {
-      grouped[row.break_type] = {
-        start: row.start_time ? formatTime(row.start_time) : "",
-        end: row.end_time ? formatTime(row.end_time) : "",
-        duration_minutes: row.duration_minutes || 0,
-      };
+      assignBreakToGroup(grouped, row);
     });
 
     res.json({
@@ -422,7 +504,8 @@ router.get(
           break_type,
           start_time,
           end_time,
-          duration_minutes
+          duration_minutes,
+          break3_sessions
         FROM employee_breaks
         WHERE user_id = $1
         ORDER BY date DESC
@@ -438,26 +521,12 @@ router.get(
 
           grouped[row.date] = {
             date: row.date,
-            break1: {},
-            lunch: {},
-            break2: {},
-            break3: {},
+            ...emptyBreakGroup(),
             total: 0
           };
         }
 
-        grouped[row.date][row.break_type] = {
-
-          start: row.start_time
-            ? formatTime(row.start_time)
-            : '',
-
-          end: row.end_time
-            ? formatTime(row.end_time)
-            : '',
-
-          duration: row.duration_minutes || 0
-        };
+        assignBreakToGroup(grouped[row.date], row);
 
         grouped[row.date].total +=
           row.duration_minutes || 0;
@@ -482,29 +551,37 @@ router.get(
 // ──────────────────────────────────────────────
 // BREAKS: employee updates their own breaks
 // PUT /api/employee/my-breaks
-// Body: { date, breaks: { break1: {start, end}, ... } }
+// Body: { date, breaks: { break1: {start, end}, lunch, break2, break3Sessions: [] } }
 // ──────────────────────────────────────────────
 router.put("/employee/my-breaks", verifyToken, async (req, res) => {
   try {
     const { date, breaks } = req.body;
     if (!date || !breaks) return res.status(400).json({ message: "date and breaks required" });
 
-    const BREAK_TYPES = ["break1", "lunch", "break2", "break3"];
+    const policyError = validateBreakPolicy(breaks);
+    if (policyError) {
+      return res.status(400).json({ message: policyError });
+    }
+    const break3Sessions = normalizeBreak3Sessions(breaks);
+    const break3Aggregate = buildBreak3Aggregate(break3Sessions);
 
-    for (const breakType of BREAK_TYPES) {
-      const b = breaks[breakType] || {};
+    for (const breakType of STANDARD_BREAK_TYPES) {
+      const b = breakType === "break3" ? break3Aggregate : breaks[breakType] || {};
       const start = b.start || null;
       const end = b.end || null;
-      const duration = start && end ? calcDuration(start, end) : 0;
+      const duration = breakType === "break3"
+        ? break3Aggregate.duration_minutes
+        : start && end ? calcDuration(start, end) : 0;
 
       await pool.query(
-        `INSERT INTO employee_breaks (user_id, date, break_type, start_time, end_time, duration_minutes)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO employee_breaks (user_id, date, break_type, start_time, end_time, duration_minutes, break3_sessions)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (user_id, date, break_type)
          DO UPDATE SET
            start_time = EXCLUDED.start_time,
            end_time = EXCLUDED.end_time,
-           duration_minutes = EXCLUDED.duration_minutes`,
+           duration_minutes = EXCLUDED.duration_minutes,
+           break3_sessions = EXCLUDED.break3_sessions`,
         [
           req.user.id,
           date,
@@ -512,6 +589,7 @@ router.put("/employee/my-breaks", verifyToken, async (req, res) => {
           start ? convertTo24(start) : null,
           end ? convertTo24(end) : null,
           duration,
+          breakType === "break3" ? JSON.stringify(break3Sessions) : null,
         ]
       );
     }

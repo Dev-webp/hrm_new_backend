@@ -6,6 +6,7 @@
 import express from "express";
 import { pool } from "../middleware/db.js";
 import { verifyToken, authorizeRoles } from "../middleware/auth.js";
+import { formatTime12Hour } from "../utils/timeFormat.js";
 
 const router = express.Router();
 
@@ -57,18 +58,7 @@ function monthRange(yearMonth) {
 }
 
 function normalizedAttendanceStatusSql(alias = "a") {
-  return `CASE
-    WHEN ${alias}.status = 'half_day'
-     AND COALESCE(${alias}.production_hours, 0) >= 4
-     AND COALESCE(${alias}.production_hours, 0) < 8
-     AND NOT (
-       (${alias}.check_in_time <= '10:00:00'::time AND ${alias}.check_out_time >= '14:30:00'::time)
-       OR
-       (${alias}.check_in_time <= '14:30:00'::time AND ${alias}.check_out_time >= '19:00:00'::time)
-     )
-    THEN 'absent'
-    ELSE COALESCE(${alias}.status, 'absent')
-  END`;
+  return `COALESCE(${alias}.status, 'absent')`;
 }
 
 function timeToMinutes(timeStr) {
@@ -79,26 +69,7 @@ function timeToMinutes(timeStr) {
 }
 
 function normalizeAttendanceStatus(att) {
-  const status = att?.status || "absent";
-  const productionHours = parseFloat(att?.production_hours) || 0;
-  const checkIn = timeToMinutes(att?.check_in_time);
-  const checkOut = timeToMinutes(att?.check_out_time);
-  const validHalfDaySlot =
-    checkIn !== null &&
-    checkOut !== null &&
-    ((checkIn <= 10 * 60 && checkOut >= 14 * 60 + 30) ||
-      (checkIn >= 14 * 60 + 30 && checkOut >= 19 * 60));
-
-  if (
-    status === "half_day" &&
-    productionHours >= 4 &&
-    productionHours < 8 &&
-    !validHalfDaySlot
-  ) {
-    return "absent";
-  }
-
-  return status;
+  return att?.status || "absent";
 }
 
 function safeAnalysisRecord(rec) {
@@ -116,6 +87,8 @@ function safeAnalysisRecord(rec) {
       lunch: Number(rec?.breakMins?.lunch) || 0,
       b2: Number(rec?.breakMins?.b2) || 0,
       b3: Number(rec?.breakMins?.b3) || 0,
+      b3Count: Number(rec?.breakMins?.b3Count) || 0,
+      b3History: Array.isArray(rec?.breakMins?.b3History) ? rec.breakMins.b3History : [],
     },
     breakDetails: {
       b1: {
@@ -335,7 +308,7 @@ router.get(
         pool.query(
           `SELECT
              TO_CHAR(date,'YYYY-MM-DD') AS date,
-             break_type, start_time, end_time, duration_minutes
+             break_type, start_time, end_time, duration_minutes, break3_sessions
            FROM employee_breaks
            WHERE user_id = $1 AND date BETWEEN $2 AND $3
            ORDER BY date ASC, break_type ASC`,
@@ -364,6 +337,7 @@ router.get(
       // ── Build full month record array ─────────────────────────
       const lastDay = new Date(year, m, 0).getDate();
       const records = [];
+      const todayStr = new Date().toISOString().slice(0, 10);
 
       for (let d = 1; d <= lastDay; d++) {
         const dateStr = `${month}-${String(d).padStart(2, "0")}`;
@@ -381,26 +355,31 @@ router.get(
         const att = attMap.get(dateStr);
         const dayBreaks = breakMap.get(dateStr) || {};
 
-        const checkIn  = att?.check_in_time  ? att.check_in_time.slice(0,5)  : "--";
-        const checkOut = att?.check_out_time ? att.check_out_time.slice(0,5) : "--";
+        const rawCheckIn  = att?.check_in_time  ? att.check_in_time.slice(0,5)  : "--";
+        const rawCheckOut = att?.check_out_time ? att.check_out_time.slice(0,5) : "--";
+        const checkIn = formatTime12Hour(rawCheckIn);
+        const checkOut = formatTime12Hour(rawCheckOut);
 
         const b1    = dayBreaks.break1 || {};
         const lunch = dayBreaks.lunch  || {};
         const b2    = dayBreaks.break2 || {};
         const b3    = dayBreaks.break3 || {};
+        const break3Sessions = Array.isArray(b3.break3_sessions) ? b3.break3_sessions : [];
 
         const breakMins = {
           b1:    b1.duration_minutes    || 0,
           lunch: lunch.duration_minutes || 0,
           b2:    b2.duration_minutes    || 0,
           b3:    b3.duration_minutes    || 0,
+          b3Count: break3Sessions.length,
+          b3History: break3Sessions,
         };
         const totalBreak = breakMins.b1 + breakMins.lunch + breakMins.b2 + breakMins.b3;
 
         let workHours = 0;
-        if (checkIn !== "--" && checkOut !== "--") {
-          const [ih, im] = checkIn.split(":").map(Number);
-          const [oh, om] = checkOut.split(":").map(Number);
+        if (rawCheckIn !== "--" && rawCheckOut !== "--") {
+          const [ih, im] = rawCheckIn.split(":").map(Number);
+          const [oh, om] = rawCheckOut.split(":").map(Number);
           workHours = Math.max(0, ((oh * 60 + om) - (ih * 60 + im)) / 60);
         }
 
@@ -408,7 +387,7 @@ router.get(
           date:      dateStr,
           checkIn,
           checkOut,
-          status:    normalizeAttendanceStatus(att),
+          status:    att ? normalizeAttendanceStatus(att) : (dateStr > todayStr ? "no_record" : "absent"),
           lateMinutes: att?.late_minutes  || 0,
           workHours,
           breaks:    totalBreak,
@@ -515,3 +494,4 @@ function fmtT(t) {
 // ── Cache invalidation export (call from checkin/checkout routes) ─
 export { invalidateCache };
 export default router;
+

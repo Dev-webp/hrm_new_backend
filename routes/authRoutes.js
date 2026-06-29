@@ -14,7 +14,7 @@ router.post("/login", async (req, res) => {
     const { email, password } = req.body;
 
     const userRes = await pool.query(
-      `SELECT id, full_name, email, password, role, department, branch, designation
+      `SELECT id, full_name, email, password, role, department, branch, designation, employee_code
        FROM users
        WHERE email = $1`,
       [email]
@@ -47,7 +47,8 @@ router.post("/login", async (req, res) => {
         branch: user.branch,
         department: user.department,
         designation: user.designation,
-        full_name: user.full_name
+        full_name: user.full_name,
+        employee_code: user.employee_code
       },
       process.env.JWT_SECRET,
       { expiresIn: "12h" }
@@ -72,7 +73,8 @@ router.post("/login", async (req, res) => {
         role: user.role,
         department: user.department,
         designation: user.designation,
-        branch: user.branch
+        branch: user.branch,
+        employee_code: user.employee_code
       }
     });
 

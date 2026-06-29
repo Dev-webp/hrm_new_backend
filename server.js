@@ -24,6 +24,7 @@ dotenv.config({
 
 import authRoutes from "./routes/authRoutes.js";
 import employeeRoutes from "./routes/employeeRoutes.js";
+import departmentRoutes from "./routes/departmentRoutes.js";
 import branchRoutes from "./routes/branchRoutes.js";
 import attendanceRoutes from "./routes/attendanceRoutes.js";
 import breaksRoutes from "./routes/breaksRoutes.js";
@@ -89,6 +90,7 @@ app.use("/api/", apiLimiter);
 
 app.use("/api", authRoutes);
 app.use("/api", employeeRoutes);
+app.use("/api", departmentRoutes);
 app.use("/api", branchRoutes);
 app.use("/api", attendanceRoutes);
 app.use("/api", breaksRoutes);

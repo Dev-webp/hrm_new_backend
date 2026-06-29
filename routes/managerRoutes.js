@@ -3,17 +3,13 @@ import bcrypt from "bcrypt";                 // ✅ ADD THIS – was missing
 import { pool } from "../middleware/db.js";
 import { verifyToken, authorizeRoles } from "../middleware/auth.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
+import {
+  assertAssignableDepartment,
+  assertAssignableDepartmentForUpdate,
+} from "./departmentRoutes.js";
+import { generateEmployeeCode } from "../utils/employeeCode.js";
 
 const router = express.Router();
-
-// Helper functions
-async function generateEmployeeCode() {
-  const result = await pool.query(
-    "SELECT MAX(CAST(SUBSTRING(employee_code, 4) AS INTEGER)) as max_code FROM users WHERE employee_code LIKE 'VJC%'"
-  );
-  let nextNum = (result.rows[0].max_code || 1000) + 1;
-  return `VJC${nextNum}`;
-}
 
 function getInitials(fullName) {
   return fullName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
@@ -28,30 +24,39 @@ router.get("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async (
     const { department, search, status = "active" } = req.query;
 
     let query = `
-      SELECT id, full_name, email, role, department, branch, employee_code,
-             salary, joining_date, status, profile_initials
-      FROM users
-      WHERE branch = $1 AND role = 'EMPLOYEE'
+      SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch, u.employee_code,
+             u.salary, u.joining_date, u.status, u.profile_initials, u.designation,
+             d.code AS department_code
+      FROM users u
+      LEFT JOIN LATERAL (
+        SELECT code
+        FROM departments d
+        WHERE LOWER(TRIM(d.name)) = LOWER(TRIM(u.department))
+          AND (d.branch = 'All' OR d.branch = u.branch)
+        ORDER BY CASE WHEN d.branch = u.branch THEN 0 ELSE 1 END
+        LIMIT 1
+      ) d ON true
+      WHERE u.branch = $1 AND u.role = 'EMPLOYEE'
     `;
     let params = [branch];
     let idx = 2;
 
     if (department && department !== 'all') {
-      query += ` AND department = $${idx}`;
+      query += ` AND u.department = $${idx}`;
       params.push(department);
       idx++;
     }
     if (status && status !== "all") {
-      query += ` AND COALESCE(status, 'active') = $${idx}`;
+      query += ` AND COALESCE(u.status, 'active') = $${idx}`;
       params.push(status);
       idx++;
     }
     if (search) {
-      query += ` AND (full_name ILIKE $${idx} OR email ILIKE $${idx} OR department ILIKE $${idx})`;
+      query += ` AND (u.full_name ILIKE $${idx} OR u.email ILIKE $${idx} OR u.department ILIKE $${idx} OR u.employee_code ILIKE $${idx})`;
       params.push(`%${search}%`);
       idx++;
     }
-    query += " ORDER BY full_name";
+    query += " ORDER BY u.full_name";
 
     const result = await pool.query(query, params);
     res.json(result.rows);
@@ -66,12 +71,14 @@ router.get("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async (
 // ─────────────────────────────────────────────
 router.post("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async (req, res) => {
   try {
-    const { full_name, email, department, salary, password } = req.body;
+    const { full_name, email, department, salary, password, designation } = req.body;
     const branch = req.user.branch;
 
     if (!full_name || !email || !department || !salary) {
       return res.status(400).json({ message: "Missing required fields" });
     }
+
+    await assertAssignableDepartment(department, branch);
 
     const existing = await pool.query("SELECT id FROM users WHERE email = $1", [email]);
     if (existing.rows.length > 0) {
@@ -85,10 +92,10 @@ router.post("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async 
 
     const result = await pool.query(
       `INSERT INTO users
-       (full_name, email, password, role, department, branch, employee_code, salary, joining_date, status, profile_initials)
-       VALUES ($1, $2, $3, 'EMPLOYEE', $4, $5, $6, $7, $8, 'active', $9)
+       (full_name, email, password, role, department, branch, employee_code, salary, joining_date, status, profile_initials, designation)
+       VALUES ($1, $2, $3, 'EMPLOYEE', $4, $5, $6, $7, $8, 'active', $9, $10)
        RETURNING id`,
-      [full_name, email, hashedPassword, department, branch, employee_code, salary, joining_date, initials]
+      [full_name, email, hashedPassword, department, branch, employee_code, salary, joining_date, initials, designation || null]
     );
 
     res.status(201).json({
@@ -99,7 +106,12 @@ router.post("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async 
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Failed to create employee" });
+    if (err.code === "23505" && String(err.constraint || "").includes("employee_code")) {
+      return res.status(400).json({ message: "Employee ID already exists" });
+    }
+    res
+      .status(err.statusCode || 500)
+      .json({ message: err.statusCode ? err.message : "Failed to create employee" });
   }
 });
 
@@ -109,7 +121,7 @@ router.post("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async 
 router.put("/manager/employees/:id", verifyToken, authorizeRoles("MANAGER"), async (req, res) => {
   try {
     const { id } = req.params;
-    const { full_name, email, department, salary, password } = req.body;
+    const { full_name, email, department, salary, password, designation } = req.body;
     const branch = req.user.branch;
 
     const check = await pool.query("SELECT branch FROM users WHERE id = $1", [id]);
@@ -120,12 +132,18 @@ router.put("/manager/employees/:id", verifyToken, authorizeRoles("MANAGER"), asy
       return res.status(403).json({ message: "Access denied – different branch" });
     }
 
+    if (!full_name || !email || !department || !salary) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    await assertAssignableDepartmentForUpdate(id, department, branch);
+
     let updateQuery = `
       UPDATE users
-      SET full_name = $1, email = $2, department = $3, salary = $4, profile_initials = $5
+      SET full_name = $1, email = $2, department = $3, salary = $4, profile_initials = $5, designation = $6
     `;
-    let params = [full_name, email, department, salary, getInitials(full_name)];
-    let paramIndex = 6;
+    let params = [full_name, email, department, salary, getInitials(full_name), designation || null];
+    let paramIndex = 7;
 
     if (password && password.trim() !== "") {
       const hashed = await bcrypt.hash(password, 10);
@@ -140,7 +158,9 @@ router.put("/manager/employees/:id", verifyToken, authorizeRoles("MANAGER"), asy
     res.json({ message: "Employee updated successfully" });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Update failed" });
+    res
+      .status(err.statusCode || 500)
+      .json({ message: err.statusCode ? err.message : "Update failed" });
   }
 });
 

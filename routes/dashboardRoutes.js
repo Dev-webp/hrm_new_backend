@@ -35,8 +35,10 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "MAN
 
     const branchFilter = effectiveBranch ? `AND u.branch = '${effectiveBranch.replace(/'/g, "''")}'` : "";
 
-    // Fire 4 queries in parallel
-    const [todayRows, monthKpi, leaveRows, deptRows] = await Promise.all([
+    const deptBranchFilter = effectiveBranch ? `WHERE branch = 'All' OR branch = '${effectiveBranch.replace(/'/g, "''")}'` : "";
+
+    // Fire queries in parallel
+    const [todayRows, monthKpi, leaveRows, deptRows, deptCountRows] = await Promise.all([
 
       // 1. Today's attendance — for welcome banner
       pool.query(`
@@ -89,13 +91,23 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "MAN
         ${branchFilter}
         GROUP BY u.department
         ORDER BY present DESC
-      `, [today])
+      `, [today]),
+
+      // 5. Managed department count from source table
+      pool.query(`
+        SELECT COUNT(*)::int AS total,
+               COUNT(*) FILTER (WHERE status = 'active')::int AS active
+        FROM departments
+        ${deptBranchFilter}
+      `)
     ]);
 
     res.json({
       today: todayRows.rows[0],
       monthKpi: monthKpi.rows[0],
       pendingLeaves: Number(leaveRows.rows[0].pending),
+      departmentCount: Number(deptCountRows.rows[0]?.total || 0),
+      activeDepartmentCount: Number(deptCountRows.rows[0]?.active || 0),
       departments: deptRows.rows.map(r => ({
         name: r.department,
         total: Number(r.total),

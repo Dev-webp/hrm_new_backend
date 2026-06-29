@@ -3,19 +3,57 @@ import bcrypt from "bcrypt";
 import { pool } from "../middleware/db.js";
 import { verifyToken, authorizeRoles } from "../middleware/auth.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
+import {
+  assertAssignableDepartment,
+  assertAssignableDepartmentForUpdate,
+} from "./departmentRoutes.js";
+import {
+  ensureEmployeeCodeAvailable,
+  generateEmployeeCode,
+} from "../utils/employeeCode.js";
 
 const router = express.Router();
 
-async function generateEmployeeCode() {
-  const result = await pool.query(
-    "SELECT MAX(CAST(SUBSTRING(employee_code, 4) AS INTEGER)) as max_code FROM users WHERE employee_code LIKE 'VJC%'"
-  );
-  let nextNum = (result.rows[0].max_code || 1000) + 1;
-  return `VJC${nextNum}`;
-}
-
 function getInitials(fullName) {
   return fullName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+}
+
+function cleanDepartmentCode(value) {
+  return typeof value === "string"
+    ? value.trim().replace(/[^A-Za-z0-9_-]/g, "").slice(0, 30).toUpperCase()
+    : "";
+}
+
+async function updateDepartmentCodeIfProvided({ code, department, branch }) {
+  const cleanCode = cleanDepartmentCode(code);
+  if (!cleanCode) return;
+
+  const current = await pool.query(
+    `SELECT id, code FROM departments
+     WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+       AND (branch = 'All' OR branch = $2)
+     ORDER BY CASE WHEN branch = $2 THEN 0 ELSE 1 END
+     LIMIT 1`,
+    [department, branch]
+  );
+
+  if (!current.rows.length) return;
+  if (String(current.rows[0].code || "").toUpperCase() === cleanCode) return;
+
+  const duplicate = await pool.query(
+    "SELECT id FROM departments WHERE LOWER(code) = LOWER($1) AND id != $2 LIMIT 1",
+    [cleanCode, current.rows[0].id]
+  );
+  if (duplicate.rows.length) {
+    const err = new Error("Department code already exists");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  await pool.query(
+    "UPDATE departments SET code = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+    [cleanCode, current.rows[0].id]
+  );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -29,40 +67,48 @@ router.get(
     try {
       const { branch, department, search, status = "active" } = req.query;
       let query = `
-        SELECT id, full_name, email, role, department, branch,
-               employee_code, salary, joining_date, status, profile_initials,
+        SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
+               u.employee_code, u.salary, u.joining_date, u.status, u.profile_initials,
                designation, bank_name, bank_account, bank_ifsc,
-               aadhar_number,
+               aadhar_number, d.code AS department_code,
                -- Only return visible_password for SUPER_ADMIN
-               CASE WHEN $1 = 'SUPER_ADMIN' THEN visible_password ELSE NULL END as visible_password
-        FROM users
-        WHERE role != 'SUPER_ADMIN'
+               CASE WHEN $1 = 'SUPER_ADMIN' THEN u.visible_password ELSE NULL END as visible_password
+        FROM users u
+        LEFT JOIN LATERAL (
+          SELECT code
+          FROM departments d
+          WHERE LOWER(TRIM(d.name)) = LOWER(TRIM(u.department))
+            AND (d.branch = 'All' OR d.branch = u.branch)
+          ORDER BY CASE WHEN d.branch = u.branch THEN 0 ELSE 1 END
+          LIMIT 1
+        ) d ON true
+        WHERE u.role != 'SUPER_ADMIN'
       `;
       const params = [req.user.role];
       const conditions = [];
 
       if (req.user.role === "MANAGER") {
-        conditions.push(`branch = $${params.length + 1}`);
+        conditions.push(`u.branch = $${params.length + 1}`);
         params.push(req.user.branch);
       } else if (req.user.role === "SUPER_ADMIN" && branch && branch !== "all") {
-        conditions.push(`branch = $${params.length + 1}`);
+        conditions.push(`u.branch = $${params.length + 1}`);
         params.push(branch);
       }
 
       if (department && department !== "all") {
-        conditions.push(`department = $${params.length + 1}`);
+        conditions.push(`u.department = $${params.length + 1}`);
         params.push(department);
       }
       if (status && status !== "all") {
-        conditions.push(`COALESCE(status, 'active') = $${params.length + 1}`);
+        conditions.push(`COALESCE(u.status, 'active') = $${params.length + 1}`);
         params.push(status);
       }
       if (search) {
-        conditions.push(`(full_name ILIKE $${params.length + 1} OR email ILIKE $${params.length + 1} OR department ILIKE $${params.length + 1})`);
+        conditions.push(`(u.full_name ILIKE $${params.length + 1} OR u.email ILIKE $${params.length + 1} OR u.department ILIKE $${params.length + 1} OR u.employee_code ILIKE $${params.length + 1})`);
         params.push(`%${search}%`);
       }
       if (conditions.length) query += " AND " + conditions.join(" AND ");
-      query += " ORDER BY id DESC";
+      query += " ORDER BY u.id DESC";
 
       const result = await pool.query(query, params);
       res.json(result.rows);
@@ -84,12 +130,22 @@ router.get(
     try {
       const { id } = req.params;
       const result = await pool.query(
-        `SELECT id, full_name, email, role, department, branch, employee_code,
-                salary, joining_date, status, profile_initials,
-                designation, bank_name, bank_account, bank_ifsc,
+        `SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch, u.employee_code,
+                u.salary, u.joining_date, u.status, u.profile_initials,
+                u.designation, u.bank_name, u.bank_account, u.bank_ifsc,
                 aadhar_number,
-                CASE WHEN $1 = 'SUPER_ADMIN' THEN visible_password ELSE NULL END as visible_password
-         FROM users WHERE id = $2`,
+                d.code AS department_code,
+                CASE WHEN $1 = 'SUPER_ADMIN' THEN u.visible_password ELSE NULL END as visible_password
+         FROM users u
+         LEFT JOIN LATERAL (
+           SELECT code
+           FROM departments d
+           WHERE LOWER(TRIM(d.name)) = LOWER(TRIM(u.department))
+             AND (d.branch = 'All' OR d.branch = u.branch)
+           ORDER BY CASE WHEN d.branch = u.branch THEN 0 ELSE 1 END
+           LIMIT 1
+         ) d ON true
+         WHERE u.id = $2`,
         [req.user.role, id]
       );
       if (result.rows.length === 0) return res.status(404).json({ message: "Employee not found" });
@@ -114,28 +170,9 @@ router.post(
   authorizeRoles("SUPER_ADMIN", "MANAGER"),
   async (req, res) => {
     try {
-    let {
-  full_name,
-  email,
-  role,
-  department,
-  branch,
-  salary,
-  password,
-  designation,
-  bank_name,
-  bank_account,
-  bank_ifsc,
-  employee_code,
-  aadhar_number,
-  joining_date
-} = req.body;
-
-const finalJoiningDate =
-  req.body.joiningDate ||
-  joining_date ||
-  new Date().toISOString().split("T")[0];
-
+      let { full_name, email, role, department, branch, salary, password,
+            designation, bank_name, bank_account, bank_ifsc, employee_code, department_code,
+            aadhar_number } = req.body;
 
       if (req.user.role === "MANAGER") {
         branch = req.user.branch;
@@ -144,6 +181,11 @@ const finalJoiningDate =
 
       if (!full_name || !email || !role || !department || !branch || !salary) {
         return res.status(400).json({ message: "Missing required fields" });
+      }
+
+      await assertAssignableDepartment(department, branch);
+      if (req.user.role === "SUPER_ADMIN") {
+        await updateDepartmentCodeIfProvided({ code: department_code, department, branch });
       }
 
       const existing = await pool.query("SELECT id FROM users WHERE email = $1", [email]);
@@ -155,44 +197,27 @@ const finalJoiningDate =
       if (!finalCode) {
         finalCode = await generateEmployeeCode();
       } else {
-        const codeCheck = await pool.query("SELECT id FROM users WHERE employee_code = $1", [finalCode]);
-        if (codeCheck.rows.length > 0) {
-          return res.status(400).json({ message: "Employee ID already exists" });
-        }
+        await ensureEmployeeCodeAvailable(finalCode);
       }
 
       const plainPassword = password && password.trim() !== "" ? password : "Welcome@123";
       const hashedPassword = await bcrypt.hash(plainPassword, 10);
+      const joining_date = new Date().toISOString().split('T')[0];
       const profile_initials = getInitials(full_name);
 
-     const result = await pool.query(
-  `INSERT INTO users
-   (full_name, email, password, role, department, branch, employee_code,
-    salary, joining_date, status, profile_initials,
-    designation, bank_name, bank_account, bank_ifsc,
-    aadhar_number, visible_password)
-   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-   RETURNING id`,
-  [
-    full_name,
-    email,
-    hashedPassword,
-    role.toUpperCase(),
-    department,
-    branch,
-    finalCode,
-    salary,
-    finalJoiningDate,
-    "active",
-    profile_initials,
-    designation || null,
-    bank_name || null,
-    bank_account || null,
-    bank_ifsc || null,
-    aadhar_number || null,
-    plainPassword,
-  ]
-);
+      const result = await pool.query(
+        `INSERT INTO users
+         (full_name, email, password, role, department, branch, employee_code,
+          salary, joining_date, status, profile_initials,
+          designation, bank_name, bank_account, bank_ifsc,
+          aadhar_number, visible_password)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         RETURNING id`,
+        [full_name, email, hashedPassword, role.toUpperCase(), department, branch, finalCode,
+         salary, joining_date, 'active', profile_initials,
+         designation || null, bank_name || null, bank_account || null, bank_ifsc || null,
+         aadhar_number || null, plainPassword]
+      );
 
       res.status(201).json({
         id: result.rows[0].id,
@@ -202,7 +227,12 @@ const finalJoiningDate =
       });
     } catch (error) {
       console.error(error);
-      res.status(500).json({ message: "Failed to create employee" });
+      if (error.code === "23505" && String(error.constraint || "").includes("employee_code")) {
+        return res.status(400).json({ message: "Employee ID already exists" });
+      }
+      res
+        .status(error.statusCode || 500)
+        .json({ message: error.statusCode ? error.message : "Failed to create employee" });
     }
   }
 );
@@ -218,11 +248,7 @@ router.put(
     try {
       const { id } = req.params;
       let { full_name, email, role, department, branch, salary, password,
-            designation, bank_name, bank_account, bank_ifsc, aadhar_number } = req.body;
-      const finalJoiningDate =
-        req.body.joiningDate ||
-        req.body.joining_date ||
-        new Date().toISOString().split("T")[0];
+            designation, bank_name, bank_account, bank_ifsc, aadhar_number, department_code } = req.body;
 
       const empCheck = await pool.query("SELECT branch, role FROM users WHERE id = $1", [id]);
       if (empCheck.rows.length === 0) return res.status(404).json({ message: "Employee not found" });
@@ -236,18 +262,26 @@ router.put(
         role = "EMPLOYEE";
       }
 
+      if (!full_name || !email || !role || !department || !branch || !salary) {
+        return res.status(400).json({ message: "Missing required fields" });
+      }
+
+      await assertAssignableDepartmentForUpdate(id, department, branch);
+      if (req.user.role === "SUPER_ADMIN") {
+        await updateDepartmentCodeIfProvided({ code: department_code, department, branch });
+      }
+
       let updateQuery = `
         UPDATE users
         SET full_name = $1, email = $2, role = $3, department = $4, branch = $5,
             salary = $6, profile_initials = $7,
             designation = $8, bank_name = $9, bank_account = $10, bank_ifsc = $11,
-            aadhar_number = $12, joining_date = $13
+            aadhar_number = $12
       `;
       let params = [full_name, email, role.toUpperCase(), department, branch, salary,
                     getInitials(full_name), designation || null, bank_name || null,
-                    bank_account || null, bank_ifsc || null, aadhar_number || null,
-                    finalJoiningDate];
-      let paramIndex = 14;
+                    bank_account || null, bank_ifsc || null, aadhar_number || null];
+      let paramIndex = 13;
 
       // If password is provided, update both hashed and visible password
       if (password && password.trim() !== "") {
@@ -265,7 +299,9 @@ router.put(
       res.json({ message: "Employee updated successfully" });
     } catch (error) {
       console.error(error);
-      res.status(500).json({ message: "Update failed" });
+      res
+        .status(error.statusCode || 500)
+        .json({ message: error.statusCode ? error.message : "Update failed" });
     }
   }
 );

@@ -10,6 +10,10 @@
 // Then call them AFTER the DB operation succeeds.
 
 import { emitNotification } from "../socketManager.js";
+import {
+  formatProductionHours,
+  formatTime12Hour,
+} from "../utils/timeFormat.js";
 
 // ─── ATTENDANCE ──────────────────────────────────────────────────────────────
 
@@ -21,7 +25,7 @@ import { emitNotification } from "../socketManager.js";
  * @param {number} recordId - attendance_records.id
  */
 export async function notifyCheckin(user, checkInTime, lateMinutes, recordId) {
-  const time = checkInTime ? checkInTime.slice(0, 5) : "--:--";
+  const time = formatTime12Hour(checkInTime);
   const lateNote = lateMinutes > 0 ? ` ⚠️ ${lateMinutes} min LATE` : "";
 
   await emitNotification({
@@ -38,14 +42,12 @@ export async function notifyCheckin(user, checkInTime, lateMinutes, recordId) {
  * Call inside POST /api/attendance/checkout  (after UPDATE)
  */
 export async function notifyCheckout(user, checkOutTime, productionHours, recordId) {
-  const time = checkOutTime ? checkOutTime.slice(0, 5) : "--:--";
-
-  const hours = Number(productionHours || 0);
+  const time = formatTime12Hour(checkOutTime);
 
   await emitNotification({
     userId: user.id,
     actionType: "checkout",
-    description: `${user.full_name} checked out at ${time} — ${hours.toFixed(1)} hrs production — ${user.branch}`,
+    description: `${user.full_name} checked out at ${time} — ${formatProductionHours(productionHours)} production — ${user.branch}`,
     relatedId: recordId,
     targetRole: "BOTH",
     branch: user.branch,
@@ -172,3 +174,4 @@ export async function notifyPayslipPaid(adminUser, payslip) {
     targetRole: "SUPER_ADMIN",
   });
 }
+

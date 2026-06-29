@@ -1,6 +1,10 @@
 // utils/activityLogger.js
 import { pool } from "../middleware/db.js";
 import { getIO }  from "../socketManager.js";
+import {
+  formatProductionHours,
+  formatTime12Hour,
+} from "./timeFormat.js";
 
 // ═══════════════════════════════════════════════════════════
 // AUDIT LOG (audit_logs table — field-level change trail)
@@ -197,13 +201,13 @@ export const logSystem = (details, metadata = {}) =>
 export const logCheckin = (user, time, lateMinutes, ip = "0.0.0.0") =>
   logActivity({ userId: user.id, userName: user.full_name, role: user.role,
     action: "CheckIn",
-    details: `${user.full_name} checked in at ${time}${lateMinutes > 0 ? ` (${lateMinutes}m late)` : ""}`,
+    details: `${user.full_name} checked in at ${formatTime12Hour(time)}${lateMinutes > 0 ? ` (${lateMinutes}m late)` : ""}`,
     ip, branch: user.branch ?? "all", metadata: { time, lateMinutes } });
 
 export const logCheckout = (user, time, productionHours, ip = "0.0.0.0") =>
   logActivity({ userId: user.id, userName: user.full_name, role: user.role,
     action: "CheckOut",
-    details: `${user.full_name} checked out at ${time} — ${productionHours.toFixed(1)}h production`,
+    details: `${user.full_name} checked out at ${formatTime12Hour(time)} — ${formatProductionHours(productionHours)} production`,
     ip, branch: user.branch ?? "all", metadata: { time, productionHours } });
 
 export const logLeaveApply = (user, leave, ip = "0.0.0.0") => {
@@ -227,3 +231,4 @@ export const logPayslip = (admin, payslip, ip = "0.0.0.0") =>
       netPay: Number(payslip.net_pay),
       generatedBy: admin.full_name || admin.email || "Unknown user",
     } });
+

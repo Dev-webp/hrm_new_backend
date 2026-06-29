@@ -247,7 +247,27 @@ export async function runDailyAttendanceRecalc(targetDateStr) {
     const [year, month] = targetDateStr.split("-").map(Number);
 
     const att = await pool.query(
-      `SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2`,
+      `SELECT a.*,
+              b1.start_time AS break_in,
+              b1.end_time AS break_out,
+              b2.start_time AS break_in_2,
+              b2.end_time AS break_out_2,
+              ln.start_time AS lunch_in,
+              ln.end_time AS lunch_out
+       FROM attendance_records a
+       LEFT JOIN employee_breaks b1
+         ON b1.user_id = a.user_id
+        AND b1.date = a.date
+        AND b1.break_type = 'break1'
+       LEFT JOIN employee_breaks b2
+         ON b2.user_id = a.user_id
+        AND b2.date = a.date
+        AND b2.break_type = 'break2'
+       LEFT JOIN employee_breaks ln
+         ON ln.user_id = a.user_id
+        AND ln.date = a.date
+        AND ln.break_type = 'lunch'
+       WHERE a.user_id = $1 AND a.date = $2`,
       [userId, targetDateStr]
     );
     if (!att.rows.length) continue;
@@ -256,6 +276,14 @@ export async function runDailyAttendanceRecalc(targetDateStr) {
     const log = {
       office_in: r.check_in_time,
       office_out: r.check_out_time,
+      break_in: r.break_in,
+      break_out: r.break_out,
+      break_in_2: r.break_in_2,
+      break_out_2: r.break_out_2,
+      lunch_in: r.lunch_in,
+      lunch_out: r.lunch_out,
+      extra_break_ins: r.extra_break_ins,
+      extra_break_outs: r.extra_break_outs,
       leave_type: r.leave_type,
       leave_status: r.leave_status,
     };

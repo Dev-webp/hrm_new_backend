@@ -23,38 +23,8 @@ function fmtTime24(t) {
   return String(t).slice(0, 5);
 }
 
-function timeToMinutes(timeStr) {
-  if (!timeStr) return null;
-  const [h, m] = String(timeStr).slice(0, 5).split(":").map(Number);
-  if (Number.isNaN(h) || Number.isNaN(m)) return null;
-  return h * 60 + m;
-}
-
-function isValidHalfDaySlot(att) {
-  const checkIn = timeToMinutes(att?.check_in_time);
-  const checkOut = timeToMinutes(att?.check_out_time);
-  if (checkIn === null || checkOut === null) return false;
-
-  return (
-    (checkIn <= 10 * 60 && checkOut >= 14 * 60 + 30) ||
-    (checkIn >= 14 * 60 + 30 && checkOut >= 19 * 60)
-  );
-}
-
 function normalizeAttendanceStatus(att) {
-  const status = att?.status || "absent";
-  const productionHours = parseFloat(att?.production_hours) || 0;
-
-  if (
-    status === "half_day" &&
-    productionHours >= 4 &&
-    productionHours < 8 &&
-    !isValidHalfDaySlot(att)
-  ) {
-    return "absent";
-  }
-
-  return status;
+  return att?.status || "absent";
 }
 
 function expandLeaveDates(leaves, start, end) {
@@ -96,7 +66,11 @@ function buildEmptyDay(dateStr, status, holidayName = null) {
     holidayName,
     leaveType: null,
     isPaidLeave: false,
-    heatmapStatus: status === "sunday" ? "sunday" : status === "holiday" ? "holiday" : "absent",
+    heatmapStatus:
+      status === "sunday" ? "sunday" :
+      status === "holiday" ? "holiday" :
+      status === "no_record" ? "no_record" :
+      "absent",
   };
 }
 
@@ -128,7 +102,7 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     pool.query(
       `SELECT
          TO_CHAR(date,'YYYY-MM-DD') AS date,
-         break_type, start_time, end_time, duration_minutes
+         break_type, start_time, end_time, duration_minutes, break3_sessions
        FROM employee_breaks
        WHERE user_id = $1 AND date BETWEEN $2 AND $3
        ORDER BY date, break_type`,
@@ -186,6 +160,7 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
   let totalBreakMins = 0;
   let breakWorkDays = 0;
   let longestBreakDay = { date: null, minutes: 0 };
+  const todayStr = new Date().toISOString().slice(0, 10);
 
   for (let d = 1; d <= lastDay; d++) {
     const dateStr = `${month}-${String(d).padStart(2, "0")}`;
@@ -215,12 +190,15 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     const lunch = dayBreaks.lunch || {};
     const b2 = dayBreaks.break2 || {};
     const b3 = dayBreaks.break3 || {};
+    const break3Sessions = Array.isArray(b3.break3_sessions) ? b3.break3_sessions : [];
 
     const breakMins = {
       b1: Number(b1.duration_minutes) || 0,
       lunch: Number(lunch.duration_minutes) || 0,
       b2: Number(b2.duration_minutes) || 0,
       b3: Number(b3.duration_minutes) || 0,
+      b3Count: break3Sessions.length,
+      b3History: break3Sessions,
     };
     const totalDayBreak =
       breakMins.b1 + breakMins.lunch + breakMins.b2 + breakMins.b3 ||
@@ -242,7 +220,7 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     }
 
     if (!att && !leaveInfo && dow !== 0 && !holidayMap.has(dateStr)) {
-      status = "absent";
+      status = dateStr > todayStr ? "no_record" : "absent";
     }
 
     const checkIn = att?.check_in_time ? fmtTime24(att.check_in_time) : "--";
