@@ -30,6 +30,7 @@ async function unreadCountFor(user) {
   return Number(result.rows[0]?.count || 0);
 }
 
+
 // ─── Helper: insert a notification row ──────────────────────────────────────
 export async function createNotification({
   userId,
@@ -54,6 +55,7 @@ export async function createNotification({
   } else {
     if (targetRole === "SUPER_ADMIN" || targetRole === "BOTH") {
       io?.to("role:SUPER_ADMIN").emit("new_notification", notification);
+      io?.to("role:OPERATIONAL_MANAGER").emit("new_notification", notification);
     }
     if (targetRole === "MANAGER" || targetRole === "BOTH") {
       io?.to("role:MANAGER").emit("new_notification", notification);
@@ -67,7 +69,7 @@ export async function createNotification({
 router.get(
   "/notifications",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { limit = 50, fromDate, toDate } = req.query;
@@ -118,7 +120,7 @@ router.get(
 router.get(
   "/notifications/unread-count",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       res.json({ count: await unreadCountFor(req.user) });
@@ -221,7 +223,7 @@ router.put(
 router.put(
   "/notifications/:id/read",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const params = [req.params.id];
@@ -250,7 +252,7 @@ router.put(
 router.put(
   "/notifications/mark-all-read",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const role = req.user.role;
@@ -262,11 +264,11 @@ router.put(
          WHERE n.user_id = u.id
          AND n.is_read = false
          AND ${
-           role === "SUPER_ADMIN"
+           ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(role)
              ? "TRUE"
              : "n.target_role IN ('MANAGER', 'BOTH') AND u.branch = $1"
          }`,
-        role === "SUPER_ADMIN" ? [] : [req.user.branch]
+        ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(role) ? [] : [req.user.branch]
       );
 
       res.json({ success: true });
@@ -281,10 +283,10 @@ router.put(
 router.delete(
   "/notifications/read",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
-      const result = req.user.role === "SUPER_ADMIN"
+      const result = ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(req.user.role)
         ? await pool.query(`DELETE FROM notifications WHERE is_read = true RETURNING id`)
         : await pool.query(
             `DELETE FROM notifications n USING users u
@@ -304,12 +306,12 @@ router.delete(
 router.delete(
   "/notifications/selected",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const ids = parseIds(req.body?.ids);
       if (!ids.length) return res.status(400).json({ message: "Select at least one notification" });
-      const result = req.user.role === "SUPER_ADMIN"
+      const result = ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(req.user.role)
         ? await pool.query(`DELETE FROM notifications WHERE id = ANY($1::int[]) RETURNING id`, [ids])
         : await pool.query(
             `DELETE FROM notifications n USING users u
@@ -329,14 +331,14 @@ router.delete(
 router.delete(
   "/notifications/range",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { fromDate, toDate } = req.body || {};
       if (!isDateOnly(fromDate) || !isDateOnly(toDate) || fromDate > toDate) {
         return res.status(400).json({ message: "Enter a valid From and To date range" });
       }
-      const result = req.user.role === "SUPER_ADMIN"
+      const result = ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(req.user.role)
         ? await pool.query(
             `DELETE FROM notifications
              WHERE created_at >= $1::date AND created_at < ($2::date + INTERVAL '1 day') RETURNING id`,
@@ -362,11 +364,11 @@ router.delete(
 router.delete(
   "/notifications/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const params = [req.params.id];
-      const visibility = req.user.role === "SUPER_ADMIN"
+      const visibility = ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(req.user.role)
         ? `TRUE`
         : `target_role IN ('MANAGER', 'BOTH') AND EXISTS (
              SELECT 1 FROM users u WHERE u.id = notifications.user_id AND u.branch = $2
@@ -390,3 +392,7 @@ router.delete(
 );
 
 export default router;
+
+
+
+

@@ -535,7 +535,7 @@ const salary = computeSalary({
 // ============================================================
 async function batchCalculatePayroll(pool, year, month, filters = {}) {
   const { branch, department } = filters;
-  let query = `SELECT id FROM users WHERE role IN ('EMPLOYEE','MANAGER') AND salary > 0`;
+  let query = `SELECT id FROM users WHERE role IN ('EMPLOYEE','MANAGER','OPERATIONAL_MANAGER','SUB_ADMIN') AND salary > 0`;
   const params = [];
   let idx = 1;
   if (branch && branch !== "all")         { query += ` AND branch     = $${idx}`; params.push(branch);     idx++; }
@@ -657,3 +657,4 @@ export {
   round2,
   GRACE_LATE_LOGINS,
 };
+

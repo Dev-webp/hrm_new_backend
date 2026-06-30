@@ -4,7 +4,7 @@ import { verifyToken, authorizeRoles } from "../middleware/auth.js";
 
 const router = express.Router();
 
-router.get("/admin/branches", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
+router.get("/admin/branches", verifyToken, authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER"), async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT branch, COUNT(*) as employee_count

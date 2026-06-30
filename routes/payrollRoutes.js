@@ -83,7 +83,7 @@ router.get(
             'YYYY-MM-DD'
           ) AS joining_date
         FROM users
-        WHERE role IN ('EMPLOYEE','MANAGER') AND salary > 0
+        WHERE role IN ('EMPLOYEE','MANAGER','OPERATIONAL_MANAGER','SUB_ADMIN') AND salary > 0
       `;
       const params = [];
       let idx = 1;
@@ -316,7 +316,7 @@ router.get(
 router.get(
   "/payroll/payslip/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const result = await pool.query(
@@ -332,7 +332,14 @@ router.get(
       );
       if (!result.rows.length)
         return res.status(404).json({ message: "Payslip not found" });
-      res.json(parseBreakdown(result.rows[0]));
+      const payslip = parseBreakdown(result.rows[0]);
+      if (
+        ["OPERATIONAL_MANAGER", "MANAGER"].includes(req.user.role) &&
+        Number(payslip.user_id) !== Number(req.user.id)
+      ) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      res.json(payslip);
     } catch (err) {
       res.status(500).json({ message: err.message });
     }
@@ -368,7 +375,7 @@ router.put(
 router.get(
   "/payroll/payslip/:id/download",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER","EMPLOYEE"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -389,7 +396,7 @@ router.get(
 
       const p = parseBreakdown(result.rows[0]);
       if (
-        ["EMPLOYEE", "MANAGER"].includes(req.user.role) &&
+        ["EMPLOYEE", "MANAGER", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role) &&
         Number(p.user_id) !== Number(req.user.id)
       ) {
         return res.status(403).json({ message: "Access denied" });
@@ -630,3 +637,4 @@ const salaryRows = [
 );
 
 export default router;
+

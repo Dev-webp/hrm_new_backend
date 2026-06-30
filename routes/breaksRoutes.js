@@ -1,6 +1,11 @@
 import express from "express";
 import { pool } from "../middleware/db.js";
-import { verifyToken, authorizeRoles } from "../middleware/auth.js";
+import {
+    verifyToken,
+    authorizeRoles,
+    canEditBreaks,
+    isBranchRestrictedOperationalRole,
+} from "../middleware/auth.js";
 import { recalcAttendanceForUserDate } from "./attendanceRoutes.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
 
@@ -205,7 +210,7 @@ router.get("/breaks", verifyToken, async (req, res) => {
         // BRANCH SECURITY
         // ==========================================
 
-        if (req.user.role === "MANAGER") {
+        if (isBranchRestrictedOperationalRole(req.user)) {
 
             query += ` AND u.branch = $${count++}`;
             params.push(req.user.branch);
@@ -288,7 +293,7 @@ router.get("/breaks", verifyToken, async (req, res) => {
 router.put(
     "/breaks/:userId",
     verifyToken,
-    authorizeRoles("SUPER_ADMIN", "MANAGER"),
+    authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
     async (req, res) => {
 
         try {
@@ -355,18 +360,13 @@ router.put(
             };
 
             // ==========================================
-            // MANAGER SECURITY CHECK
+            // EDIT SECURITY CHECK
             // ==========================================
 
-            if (req.user.role === "MANAGER") {
-
-                if (employee.branch !== req.user.branch) {
-
-                    return res.status(403).json({
-                        message:
-                            "Managers can only access their own branch"
-                    });
-                }
+            if (!canEditBreaks(req.user, employee)) {
+                return res.status(403).json({
+                    message: "You can only edit breaks for employees in your permitted branch"
+                });
             }
 
             const oldBreaksResult = await pool.query(
@@ -637,7 +637,7 @@ router.get(
             // Employee can only access self
 
             if (
-                req.user.role === "EMPLOYEE" &&
+                ["EMPLOYEE", "SUB_ADMIN"].includes(req.user.role) &&
                 req.user.id != userId
             ) {
 
@@ -649,7 +649,7 @@ router.get(
             // Manager can only access own branch
 
             if (
-                req.user.role === "MANAGER" &&
+                isBranchRestrictedOperationalRole(req.user) &&
                 targetUser.rows[0].branch !== req.user.branch
             ) {
 
@@ -693,3 +693,4 @@ router.get(
 );
 
 export default router;
+

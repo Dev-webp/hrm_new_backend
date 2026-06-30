@@ -1,7 +1,13 @@
 import express from "express";
 import bcrypt from "bcrypt";
 import { pool } from "../middleware/db.js";
-import { verifyToken, authorizeRoles } from "../middleware/auth.js";
+import {
+  verifyToken,
+  authorizeRoles,
+  canAccessAllBranches,
+  isBranchRestrictedOperationalRole,
+  normalizeBranchFilter,
+} from "../middleware/auth.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
 import {
   assertAssignableDepartment,
@@ -62,10 +68,11 @@ async function updateDepartmentCodeIfProvided({ code, department, branch }) {
 router.get(
   "/admin/employees",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     try {
-      const { branch, department, search, status = "active" } = req.query;
+      const { department, search, status = "active" } = req.query;
+      const branch = normalizeBranchFilter(req.query.branch);
       let query = `
         SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
                u.employee_code, u.salary, u.joining_date, u.status, u.profile_initials,
@@ -87,10 +94,10 @@ router.get(
       const params = [req.user.role];
       const conditions = [];
 
-      if (req.user.role === "MANAGER") {
+      if (isBranchRestrictedOperationalRole(req.user)) {
         conditions.push(`u.branch = $${params.length + 1}`);
         params.push(req.user.branch);
-      } else if (req.user.role === "SUPER_ADMIN" && branch && branch !== "all") {
+      } else if (canAccessAllBranches(req.user) && branch && branch !== "all") {
         conditions.push(`u.branch = $${params.length + 1}`);
         params.push(branch);
       }
@@ -125,7 +132,7 @@ router.get(
 router.get(
   "/admin/employees/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -167,7 +174,7 @@ router.get(
 router.post(
   "/admin/employees",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       let { full_name, email, role, department, branch, salary, password,
@@ -177,6 +184,13 @@ router.post(
       if (req.user.role === "MANAGER") {
         branch = req.user.branch;
         role = "EMPLOYEE";
+      }
+
+      if (req.user.role === "OPERATIONAL_MANAGER") {
+        const requestedRole = String(role || "").toUpperCase();
+        if (["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(requestedRole)) {
+          return res.status(403).json({ message: "Operational managers cannot create admin-level users" });
+        }
       }
 
       if (!full_name || !email || !role || !department || !branch || !salary) {
@@ -243,7 +257,7 @@ router.post(
 router.put(
   "/admin/employees/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -260,6 +274,13 @@ router.put(
         }
         branch = req.user.branch;
         role = "EMPLOYEE";
+      }
+
+      if (req.user.role === "OPERATIONAL_MANAGER") {
+        const requestedRole = String(role || employee.role || "").toUpperCase();
+        if (["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(requestedRole) || ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(employee.role)) {
+          return res.status(403).json({ message: "Operational managers cannot edit admin-level users" });
+        }
       }
 
       if (!full_name || !email || !role || !department || !branch || !salary) {
@@ -313,7 +334,7 @@ router.put(
 router.patch(
   "/admin/employees/:id/status",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { status } = req.body;
@@ -330,6 +351,9 @@ router.patch(
       if (employee.role === "SUPER_ADMIN") return res.status(403).json({ message: "Super admin status cannot be changed" });
       if (req.user.role === "MANAGER" && (employee.branch !== req.user.branch || employee.role !== "EMPLOYEE")) {
         return res.status(403).json({ message: "Managers can only change employees in their branch" });
+      }
+      if (req.user.role === "OPERATIONAL_MANAGER" && ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(employee.role)) {
+        return res.status(403).json({ message: "Operational managers cannot change admin-level user status" });
       }
       if (employee.status === status) return res.json({ message: `Employee is already ${status}`, employee });
 
@@ -374,7 +398,7 @@ router.patch(
 router.delete(
   "/admin/employees/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -392,6 +416,10 @@ router.delete(
         if (employee.role !== "EMPLOYEE") {
           return res.status(400).json({ message: "Managers cannot mark other managers or admins inactive" });
         }
+      }
+
+      if (req.user.role === "OPERATIONAL_MANAGER" && ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(employee.role)) {
+        return res.status(403).json({ message: "Operational managers cannot mark admin-level users inactive" });
       }
 
       const result = await pool.query(
@@ -452,3 +480,4 @@ router.delete(
 );
 
 export default router;
+

@@ -132,5 +132,5 @@ initSocket(httpServer);
 const PORT = process.env.PORT || 5000;
 
 httpServer.listen(PORT, () => {
-  console.log(`🚀 Server Running on ${PORT}`);
+  console.log(`🚀 Server Running on http://localhost:${PORT}`);
 });

@@ -128,7 +128,7 @@ function safeAnalysisRecords(records = []) {
 router.get(
   "/attendance-analysis/summary",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { month = "2026-05", branch } = req.query;
@@ -270,7 +270,7 @@ router.get(
 router.get(
   "/attendance-analysis/individual",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { userId, month } = req.query;
@@ -418,7 +418,7 @@ router.get(
 router.get(
   "/attendance-analysis/trends",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { branch, months = 6 } = req.query;
@@ -494,4 +494,5 @@ function fmtT(t) {
 // ── Cache invalidation export (call from checkin/checkout routes) ─
 export { invalidateCache };
 export default router;
+
 

@@ -7,7 +7,12 @@
 
 import express from "express";
 import { pool } from "../middleware/db.js";
-import { verifyToken, authorizeRoles } from "../middleware/auth.js";
+import {
+  verifyToken,
+  authorizeRoles,
+  canEditAttendance,
+  isBranchRestrictedOperationalRole,
+} from "../middleware/auth.js";
 import { invalidateCache } from "./analysisRoutes.js";
 import {
   notifyCheckin,
@@ -485,7 +490,7 @@ router.get("/my-attendance", verifyToken, async (req, res) => {
 router.get(
   "/all-attendance",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { month } = req.query;
@@ -540,7 +545,7 @@ router.get(
 router.post(
   "/get-attendance-summary",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { email, month } = req.body;
@@ -652,7 +657,7 @@ router.get("/holidays", verifyToken, async (req, res) => {
 router.post(
   "/holidays",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { date, name, type } = req.body;
@@ -876,7 +881,7 @@ router.post("/attendance", verifyToken, async (req, res) => {
 router.get(
   "/attendance-history/:email",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { email } = req.params;
@@ -927,7 +932,7 @@ router.get(
 router.post(
   "/save-attendance-summary",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { month, summary } = req.body;
@@ -964,7 +969,7 @@ router.get("/attendance", verifyToken, async (req, res) => {
     if (!date) return res.status(400).json({ message: "date required" });
 
     let effectiveBranch = null;
-    if (req.user.role === "MANAGER") {
+    if (isBranchRestrictedOperationalRole(req.user)) {
       effectiveBranch = req.user.branch;
     } else if (branch && branch !== "all") {
       effectiveBranch = branch;
@@ -1045,7 +1050,7 @@ router.get("/attendance/stats", verifyToken, async (req, res) => {
   try {
     const { date, branch } = req.query;
     if (!date) return res.status(400).json({ message: "date required" });
-    const effectiveBranch = req.user.role === "MANAGER" ? req.user.branch
+    const effectiveBranch = isBranchRestrictedOperationalRole(req.user) ? req.user.branch
       : branch && branch !== "all" ? branch : null;
 
     const [y, m, d] = date.split("-").map(Number);
@@ -1305,7 +1310,7 @@ router.get("/attendance/range", verifyToken, async (req, res) => {
     }
 
     const effectiveBranch =
-      req.user.role === "MANAGER"
+      isBranchRestrictedOperationalRole(req.user)
         ? req.user.branch
         : branch && branch !== "all"
         ? branch
@@ -1365,7 +1370,7 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
     }
 
     const effectiveBranch =
-      req.user.role === "MANAGER"
+      isBranchRestrictedOperationalRole(req.user)
         ? req.user.branch
         : branch && branch !== "all"
         ? branch
@@ -1447,7 +1452,7 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
   try {
     const { start, end, branch } = req.query;
     if (!start || !end) return res.status(400).json({ message: "start and end required" });
-    const effectiveBranch = req.user.role === "MANAGER" ? req.user.branch
+    const effectiveBranch = isBranchRestrictedOperationalRole(req.user) ? req.user.branch
       : branch && branch !== "all" ? branch : null;
 
     let query = `
@@ -1481,7 +1486,7 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
 router.put(
   "/attendance/:userId",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     const client = await pool.connect();
 
@@ -1539,6 +1544,12 @@ router.put(
         return res.status(404).json({ message: "User not found" });
       }
       const employee = employeeRes.rows[0];
+
+      if (!canEditAttendance(req.user, employee)) {
+        return res.status(403).json({
+          message: "You can only edit attendance for employees in your permitted branch",
+        });
+      }
 
       const editorRes = await client.query(
         `SELECT id, full_name, email, role
@@ -1761,7 +1772,7 @@ router.put(
 router.post(
   "/attendance/apply-holiday",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     const { date } = req.body;
     if (!date) return res.status(400).json({ message: "date required" });
@@ -1820,7 +1831,7 @@ router.get("/attendance/department-leaderboard", verifyToken, async (req, res) =
   try {
     const { date, branch } = req.query;
     if (!date) return res.status(400).json({ message: "date required" });
-    const effectiveBranch = req.user.role === "MANAGER" ? req.user.branch
+    const effectiveBranch = (req.user.role === "MANAGER") ? req.user.branch
       : branch && branch !== "all" ? branch : null;
 
     let totalQ = `SELECT u.id AS user_id, u.full_name, u.department, u.branch
@@ -1959,7 +1970,7 @@ router.get("/attendance/employee/:userId", verifyToken, async (req, res) => {
 router.get(
   "/attendance/user/:userId",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER"),
   async (req, res) => {
     try {
       const { userId } = req.params;
@@ -1983,7 +1994,7 @@ router.get(
 router.get("/attendance/late-trend", verifyToken, async (req, res) => {
   try {
     const { baseDate, branch } = req.query;
-    const effectiveBranch = req.user.role === "MANAGER" ? req.user.branch
+    const effectiveBranch = (req.user.role === "MANAGER") ? req.user.branch
       : branch && branch !== "all" ? branch : null;
     const end  = new Date(baseDate);
     const dates = Array.from({ length: 5 }, (_, i) => {
@@ -2012,7 +2023,7 @@ router.get("/attendance/paged", verifyToken, async (req, res) => {
     const { date, department, search, branch, page = 1, limit = 25 } = req.query;
     if (!date) return res.status(400).json({ message: "date required" });
     const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(limit);
-    const effectiveBranch = req.user.role === "MANAGER" ? req.user.branch
+    const effectiveBranch = (req.user.role === "MANAGER") ? req.user.branch
       : branch && branch !== "all" ? branch : null;
 
     let baseWhere = `u.role NOT IN ('SUPER_ADMIN') AND COALESCE(u.status, 'active') = 'active'`;
@@ -2058,7 +2069,7 @@ router.get("/departments", verifyToken, async (req, res) => {
   try {
     const { date, branch } = req.query;
     if (!date) return res.status(400).json({ message: "date required" });
-    const effectiveBranch = req.user.role === "MANAGER" ? req.user.branch
+    const effectiveBranch = (req.user.role === "MANAGER") ? req.user.branch
       : branch && branch !== "all" ? branch : null;
 
     let query = `
@@ -2094,11 +2105,11 @@ router.get("/departments", verifyToken, async (req, res) => {
 router.get(
   "/admin/employees",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     try {
       const { status = "active" } = req.query;
-      const effectiveBranch = req.user.role === "MANAGER" ? req.user.branch
+      const effectiveBranch = isBranchRestrictedOperationalRole(req.user) ? req.user.branch
         : req.query.branch && req.query.branch !== "all" ? req.query.branch : null;
       let query = `SELECT id, full_name, role, department, branch FROM users WHERE role!='SUPER_ADMIN'`;
       const params = []; let idx = 1;
@@ -2131,7 +2142,7 @@ router.get("/auth/me", verifyToken, async (req, res) => {
 router.get(
   "/employees/list",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     try {
       const { branch, status = "active" } = req.query;
@@ -2144,7 +2155,7 @@ router.get(
 
       const params = [];
 
-      if (req.user.role === "MANAGER") {
+      if (isBranchRestrictedOperationalRole(req.user)) {
         query += ` AND branch = $1`;
         params.push(req.user.branch);
       } else if (branch && branch !== "all") {
@@ -2171,3 +2182,6 @@ router.get(
 console.log("✅ attendanceRoutes.js loaded — policy engine integrated");
 
 export default router;
+
+
+

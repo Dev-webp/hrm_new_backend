@@ -337,7 +337,7 @@ router.get("/attendance/self/history", verifyToken, async (req, res) => {
 router.get("/employee/attendance-summary", verifyToken, async (req, res) => {
   try {
     const userId = parseInt(req.query.userId || req.user.id);
-    if (req.user.role === "EMPLOYEE" && userId !== req.user.id) {
+    if (["EMPLOYEE", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role) && userId !== req.user.id) {
       return res.status(403).json({ message: "Access denied" });
     }
     const { month } = req.query;
@@ -383,7 +383,7 @@ router.get("/employee/attendance-summary", verifyToken, async (req, res) => {
 router.get("/employee/my-leaves", verifyToken, async (req, res) => {
   try {
     const userId = parseInt(req.query.userId || req.user.id);
-    if (req.user.role === "EMPLOYEE" && userId !== req.user.id) {
+    if (["EMPLOYEE", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role) && userId !== req.user.id) {
       return res.status(403).json({ message: "Access denied" });
     }
     const result = await pool.query(
@@ -406,7 +406,7 @@ router.get("/employee/my-leaves", verifyToken, async (req, res) => {
 router.get("/employee/my-payslip", verifyToken, async (req, res) => {
   try {
     const userId = parseInt(req.query.userId || req.user.id);
-    if (req.user.role === "EMPLOYEE" && userId !== req.user.id) {
+    if (["EMPLOYEE", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role) && userId !== req.user.id) {
       return res.status(403).json({ message: "Access denied" });
     }
     const { month } = req.query;
@@ -432,7 +432,7 @@ router.get("/employee/my-payslip", verifyToken, async (req, res) => {
 router.get("/employee/my-payslips", verifyToken, async (req, res) => {
   try {
     const userId = parseInt(req.query.userId || req.user.id);
-    if (req.user.role === "EMPLOYEE" && userId !== req.user.id) {
+    if (["EMPLOYEE", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role) && userId !== req.user.id) {
       return res.status(403).json({ message: "Access denied" });
     }
     const result = await pool.query(

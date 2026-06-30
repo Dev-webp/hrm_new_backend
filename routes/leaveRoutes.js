@@ -1,6 +1,6 @@
 import express from "express";
 import { pool } from "../middleware/db.js";
-import { verifyToken, authorizeRoles } from "../middleware/auth.js";
+import { verifyToken, authorizeRoles, canAccessAllBranches, normalizeBranchFilter } from "../middleware/auth.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
 
 import {
@@ -132,7 +132,7 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
 router.get(
   "/leaves/my/balance",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER", "EMPLOYEE"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
   async (req, res) => {
     try {
       const now = new Date();
@@ -161,7 +161,7 @@ router.get(
 router.get(
   "/leaves/my",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER", "EMPLOYEE"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
   async (req, res) => {
     try {
       const result = await pool.query(
@@ -202,7 +202,7 @@ router.get(
 router.get(
   "/leaves/approved-monthly",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { userId, month } = req.query;
@@ -235,6 +235,7 @@ router.get(
           l.user_id,
           u.full_name,
           u.branch,
+          u.department,
           l.leave_type,
           l.from_date,
           l.to_date,
@@ -274,10 +275,11 @@ router.get(
 router.get(
   "/leaves",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
-      const { date, branch, status } = req.query;
+      const { date, status } = req.query;
+      const branch = normalizeBranchFilter(req.query.branch);
 
       let query = `
         SELECT 
@@ -285,6 +287,7 @@ router.get(
           l.user_id,
           u.full_name,
           u.branch,
+          u.department,
           l.leave_type,
           l.from_date,
           l.to_date,
@@ -316,7 +319,7 @@ router.get(
         index++;
       }
 
-      if (req.user.role === "SUPER_ADMIN" && branch && branch !== "all") {
+      if (canAccessAllBranches(req.user) && branch && branch !== "all") {
         query += ` AND u.branch = $${index}`;
         values.push(branch);
         index++;
@@ -352,7 +355,7 @@ router.get(
 router.get(
   "/leave/pending-count",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const params = [];
@@ -380,15 +383,21 @@ router.get(
 router.get(
   "/manager-leaves/pending-count",
   verifyToken,
-  authorizeRoles("MANAGER"),
+  authorizeRoles("OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
+      const params = [];
+      let branchClause = "";
+      if (req.user.role === "MANAGER") {
+        params.push(req.user.branch);
+        branchClause = "AND u.branch = $1";
+      }
       const result = await pool.query(
         `SELECT COUNT(*) AS count
          FROM leave_requests l
          JOIN users u ON u.id = l.user_id
-         WHERE l.status = 'pending' AND u.branch = $1`,
-        [req.user.branch]
+         WHERE l.status = 'pending' ${branchClause}`,
+        params
       );
       res.json({ count: Number(result.rows[0]?.count || 0) });
     } catch (error) {
@@ -402,7 +411,7 @@ router.get(
 router.get(
   "/leave/:id/approval-preview",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const scoped = await getScopedLeave(req, req.params.id);
@@ -422,7 +431,7 @@ router.get(
 router.get(
   "/leaves/:id/approval-preview",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -729,14 +738,14 @@ const changeLeaveStatus = async (req, res) => {
 router.patch(
   "/leave/:id/status",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   changeLeaveStatus
 );
 
 router.put(
   "/leaves/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   changeLeaveStatus
 );
 
@@ -781,3 +790,4 @@ router.post("/leaves", verifyToken, async (req, res) => {
 });
 
 export default router;
+

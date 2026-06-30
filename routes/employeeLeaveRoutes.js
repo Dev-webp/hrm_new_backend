@@ -14,7 +14,7 @@ GET EMPLOYEE'S OWN LEAVES
 router.get(
   "/employee/my-leaves",
   verifyToken,
-  authorizeRoles("EMPLOYEE"),
+  authorizeRoles("EMPLOYEE", "SUB_ADMIN"),
   async (req, res) => {
     try {
       const result = await pool.query(
@@ -56,7 +56,7 @@ CREATE EMPLOYEE LEAVE
 router.post(
   "/employee/apply-leave",
   verifyToken,
-  authorizeRoles("EMPLOYEE"),
+  authorizeRoles("EMPLOYEE", "SUB_ADMIN"),
   async (req, res) => {
     try {
       const leave = await createValidatedLeaveRequest(req.user.id, req.body);

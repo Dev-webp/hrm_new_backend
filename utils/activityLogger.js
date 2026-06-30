@@ -54,6 +54,7 @@ export async function createAuditLog({
     const io = getIO();
     if (io) {
       io.to("role:SUPER_ADMIN").emit("new_audit_log", log);
+      io.to("role:OPERATIONAL_MANAGER").emit("new_audit_log", log);
       if (branch && branch !== "all")
         io.to(`branch:${branch}`).emit("new_audit_log", log);
     }
@@ -142,6 +143,7 @@ export async function logActivity({
     const io = getIO();
     if (io) {
       io.to("role:SUPER_ADMIN").emit("new_audit_log", log);
+      io.to("role:OPERATIONAL_MANAGER").emit("new_audit_log", log);
       if (safeBranch && safeBranch !== "all")
         io.to(`branch:${safeBranch}`).emit("new_audit_log", log);
     }

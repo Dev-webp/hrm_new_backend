@@ -145,6 +145,7 @@ function broadcastOnlineCount() {
     }, {}),
   };
   io.to("role:SUPER_ADMIN").emit("online_users", payload);
+  io.to("role:OPERATIONAL_MANAGER").emit("online_users", payload);
 }
 
 // ── Notification emitter (unchanged API) ─────────────────────────────────────
@@ -162,6 +163,7 @@ export async function emitNotification({
 
     if (targetRole === "SUPER_ADMIN" || targetRole === "BOTH") {
       io?.to("role:SUPER_ADMIN").emit("new_notification", notif);
+      io?.to("role:OPERATIONAL_MANAGER").emit("new_notification", notif);
     }
     if ((targetRole === "MANAGER" || targetRole === "BOTH") && branch) {
       io?.to(`branch:${branch}`).emit("new_notification", notif);

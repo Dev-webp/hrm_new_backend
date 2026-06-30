@@ -314,7 +314,7 @@ export async function getLeaveBalanceHistory(employeeId, monthsBack = 6) {
 
 export async function accrueAllActiveEmployees(asOf = new Date()) {
   const users = await pool.query(
-    `SELECT id FROM users WHERE role IN ('EMPLOYEE', 'MANAGER') AND status = 'active'`
+    `SELECT id FROM users WHERE role IN ('EMPLOYEE', 'MANAGER', 'OPERATIONAL_MANAGER', 'SUB_ADMIN') AND status = 'active'`
   );
   const results = [];
   for (const row of users.rows) {
@@ -327,3 +327,4 @@ export async function accrueAllActiveEmployees(asOf = new Date()) {
   }
   return results;
 }
+

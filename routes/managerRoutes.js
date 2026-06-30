@@ -1,7 +1,7 @@
 import express from "express";
 import bcrypt from "bcrypt";                 // ✅ ADD THIS – was missing
 import { pool } from "../middleware/db.js";
-import { verifyToken, authorizeRoles } from "../middleware/auth.js";
+import { verifyToken, authorizeRoles, normalizeBranchFilter } from "../middleware/auth.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
 import {
   assertAssignableDepartment,
@@ -18,9 +18,10 @@ function getInitials(fullName) {
 // ─────────────────────────────────────────────
 // 1. GET all employees of the manager's branch
 // ─────────────────────────────────────────────
-router.get("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async (req, res) => {
+router.get("/manager/employees", verifyToken, authorizeRoles("OPERATIONAL_MANAGER", "MANAGER"), async (req, res) => {
   try {
-    const branch = req.user.branch;
+    const requestedBranch = normalizeBranchFilter(req.query.branch);
+    const branch = req.user.role === "OPERATIONAL_MANAGER" ? requestedBranch : req.user.branch;
     const { department, search, status = "active" } = req.query;
 
     let query = `
@@ -36,10 +37,16 @@ router.get("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async (
         ORDER BY CASE WHEN d.branch = u.branch THEN 0 ELSE 1 END
         LIMIT 1
       ) d ON true
-      WHERE u.branch = $1 AND u.role = 'EMPLOYEE'
+      WHERE u.role = 'EMPLOYEE'
     `;
-    let params = [branch];
-    let idx = 2;
+    let params = [];
+    let idx = 1;
+
+    if (branch !== "all") {
+      query += ` AND u.branch = $${idx}`;
+      params.push(branch);
+      idx++;
+    }
 
     if (department && department !== 'all') {
       query += ` AND u.department = $${idx}`;
@@ -69,7 +76,7 @@ router.get("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async (
 // ─────────────────────────────────────────────
 // 2. CREATE employee – branch forced
 // ─────────────────────────────────────────────
-router.post("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async (req, res) => {
+router.post("/manager/employees", verifyToken, authorizeRoles("OPERATIONAL_MANAGER", "MANAGER"), async (req, res) => {
   try {
     const { full_name, email, department, salary, password, designation } = req.body;
     const branch = req.user.branch;
@@ -118,7 +125,7 @@ router.post("/manager/employees", verifyToken, authorizeRoles("MANAGER"), async 
 // ─────────────────────────────────────────────
 // 3. UPDATE employee – with branch ownership check
 // ─────────────────────────────────────────────
-router.put("/manager/employees/:id", verifyToken, authorizeRoles("MANAGER"), async (req, res) => {
+router.put("/manager/employees/:id", verifyToken, authorizeRoles("OPERATIONAL_MANAGER", "MANAGER"), async (req, res) => {
   try {
     const { id } = req.params;
     const { full_name, email, department, salary, password, designation } = req.body;
@@ -167,7 +174,7 @@ router.put("/manager/employees/:id", verifyToken, authorizeRoles("MANAGER"), asy
 // ─────────────────────────────────────────────
 // 4. DELETE employee – with branch ownership check
 // ─────────────────────────────────────────────
-router.delete("/manager/employees/:id", verifyToken, authorizeRoles("MANAGER"), async (req, res) => {
+router.delete("/manager/employees/:id", verifyToken, authorizeRoles("OPERATIONAL_MANAGER", "MANAGER"), async (req, res) => {
   try {
     const { id } = req.params;
     const branch = req.user.branch;
@@ -242,7 +249,7 @@ router.delete("/manager/employees/:id", verifyToken, authorizeRoles("MANAGER"), 
   }
 });
 // GET /api/manager/my-payslip
-router.get("/manager/my-payslip", verifyToken, authorizeRoles("MANAGER"), async (req, res) => {
+router.get("/manager/my-payslip", verifyToken, authorizeRoles("OPERATIONAL_MANAGER", "MANAGER"), async (req, res) => {
   try {
     const { month } = req.query;
     const userId = req.user.id;
@@ -263,7 +270,7 @@ router.get("/manager/my-payslip", verifyToken, authorizeRoles("MANAGER"), async 
 });
 
 // GET /api/manager/my-payslips
-router.get("/manager/my-payslips", verifyToken, authorizeRoles("MANAGER"), async (req, res) => {
+router.get("/manager/my-payslips", verifyToken, authorizeRoles("OPERATIONAL_MANAGER", "MANAGER"), async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT p.*, u.full_name, u.department, u.branch, u.employee_code, u.salary as base_salary
@@ -287,7 +294,7 @@ router.get("/manager/my-payslips", verifyToken, authorizeRoles("MANAGER"), async
 router.get(
     "/manager/my-break-history",
     verifyToken,
-    authorizeRoles("MANAGER"),
+    authorizeRoles("OPERATIONAL_MANAGER", "MANAGER"),
     async (req, res) => {
 
         try {
@@ -367,3 +374,4 @@ router.get("/manager/team-payslips", verifyToken, authorizeRoles("MANAGER"), asy
 });
 
 export default router;
+

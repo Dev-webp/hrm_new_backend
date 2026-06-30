@@ -15,7 +15,7 @@ router.get("/admin-dashboard", verifyToken, authorizeRoles("SUPER_ADMIN"), (req,
 // Replaces: /attendance/stats + /leaves + /admin/employees
 //           + N×/attendance/employee/:id
 // ======================================================
-router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "MANAGER"), async (req, res) => {
+router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"), async (req, res) => {
   try {
     const { month, branch, today } = req.query;
     if (!month || !today)
@@ -130,3 +130,4 @@ router.get("/employee-dashboard", verifyToken, authorizeRoles("EMPLOYEE"), (req,
 });
 
 export default router;
+

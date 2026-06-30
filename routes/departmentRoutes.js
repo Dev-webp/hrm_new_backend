@@ -175,7 +175,7 @@ router.get("/departments/active", verifyToken, async (req, res) => {
   }
 });
 
-router.post("/departments", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
+router.post("/departments", verifyToken, authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER"), async (req, res) => {
   try {
     const name = cleanText(req.body.name);
     const code = cleanText(req.body.code) || makeCode(name);
@@ -205,7 +205,7 @@ router.post("/departments", verifyToken, authorizeRoles("SUPER_ADMIN"), async (r
   }
 });
 
-router.put("/departments/:id", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
+router.put("/departments/:id", verifyToken, authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     const name = cleanText(req.body.name);
@@ -258,7 +258,7 @@ router.put("/departments/:id", verifyToken, authorizeRoles("SUPER_ADMIN"), async
   }
 });
 
-router.patch("/departments/:id/status", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
+router.patch("/departments/:id/status", verifyToken, authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER"), async (req, res) => {
   try {
     const status = cleanText(req.body.status);
     if (!["active", "inactive"].includes(status)) {
@@ -278,7 +278,7 @@ router.patch("/departments/:id/status", verifyToken, authorizeRoles("SUPER_ADMIN
   }
 });
 
-router.delete("/departments/:id", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
+router.delete("/departments/:id", verifyToken, authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER"), async (req, res) => {
   try {
     const existing = await pool.query("SELECT id, name FROM departments WHERE id = $1", [req.params.id]);
     if (!existing.rows.length) return res.status(404).json({ message: "Department not found" });
@@ -304,3 +304,5 @@ router.delete("/departments/:id", verifyToken, authorizeRoles("SUPER_ADMIN"), as
 });
 
 export default router;
+
+

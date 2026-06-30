@@ -30,7 +30,7 @@ async function activityCountFor(user) {
 }
 
 // ✅ 1. STATS — must be FIRST (before any /:id style routes)
-router.get('/stats/summary', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+router.get('/stats/summary', verifyToken, authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const user = req.user;
     const { branch: branchFilter } = req.query;
@@ -67,7 +67,7 @@ router.get('/stats/summary', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER
 });
 
 // GET /api/activity-logs/count
-router.get('/count', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+router.get('/count', verifyToken, authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const params = [];
     let where = '';
@@ -83,7 +83,7 @@ router.get('/count', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), asyn
   }
 });
 
-router.delete('/selected', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+router.delete('/selected', verifyToken, authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const ids = parseLogIds(req.body?.ids);
     if (!ids.length) return res.status(400).json({ message: 'Select at least one activity log' });
@@ -104,7 +104,7 @@ router.delete('/selected', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER')
   }
 });
 
-router.delete('/range', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+router.delete('/range', verifyToken, authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const { fromDate, toDate } = req.body || {};
     if (!isDateOnly(fromDate) || !isDateOnly(toDate) || fromDate > toDate) {
@@ -129,7 +129,7 @@ router.delete('/range', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), a
   }
 });
 
-router.delete('/:id', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+router.delete('/:id', verifyToken, authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) {
@@ -151,7 +151,7 @@ router.delete('/:id', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), asy
 });
 
 // ✅ 2. GET BY ID — must be before GET / in Express matching
-router.get('/:id', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+router.get('/:id', verifyToken, authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     // Make sure id is a number to avoid matching "stats" as an id
     const id = parseInt(req.params.id);
@@ -172,7 +172,7 @@ router.get('/:id', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), async 
 });
 
 // ✅ 3. LIST (paginated) — last
-router.get('/', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+router.get('/', verifyToken, authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const user = req.user;
     const {
@@ -258,3 +258,4 @@ router.get('/', verifyToken, authorizeRoles('SUPER_ADMIN', 'MANAGER'), async (re
 });
 
 export default router;
+

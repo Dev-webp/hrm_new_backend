@@ -50,7 +50,7 @@ console.log("GET /holidays rows:", result.rows);
 router.post(
   "/holidays",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     const client = await pool.connect();
 
