@@ -175,3 +175,16 @@ export async function notifyPayslipPaid(adminUser, payslip) {
   });
 }
 
+export async function notifyLeaveDeleted(deletedBy, leave, selfDeleted = false) {
+  await emitNotification({
+    userId: leave.user_id,
+    actionType: "leave_deleted",
+    description: selfDeleted
+      ? "Your leave request has been deleted successfully."
+      : `Your leave request has been deleted by ${deletedBy.role || "Admin"}.`,
+    relatedId: leave.id,
+    targetRole: "EMPLOYEE",
+    branch: leave.branch,
+  });
+}
+

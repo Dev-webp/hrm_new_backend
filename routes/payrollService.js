@@ -89,7 +89,22 @@ function isValidHalfDaySlot(rec) {
 }
 
 function normalizeAttendanceStatus(rec) {
-  return rec?.status || "absent";
+  if (!rec?.check_in_time || !rec?.check_out_time) return "absent";
+
+  const existingStatus = rec?.status || "absent";
+  if (["leave", "holiday", "absent"].includes(existingStatus)) return existingStatus;
+
+  const netHours = Number(rec.production_hours || 0);
+  const checkInMinutes = minutesFromTime(rec.check_in_time);
+  const checkOutMinutes = minutesFromTime(rec.check_out_time);
+
+  if (netHours < 4) return "absent";
+  if (checkInMinutes !== null && checkInMinutes > 10 * 60 + 15) return "half_day";
+  if (checkOutMinutes !== null && checkOutMinutes < 19 * 60) return "half_day";
+  if (netHours >= 8 && checkOutMinutes !== null && checkOutMinutes >= 19 * 60) return "full_day";
+  if (netHours >= 4) return "half_day";
+
+  return "absent";
 }
 
 // ============================================================
@@ -210,7 +225,7 @@ function minutesFromTime(value) {
 
 function isGraceLateLogin(rec = {}) {
   const checkInMinutes = minutesFromTime(rec.check_in_time);
-  return checkInMinutes !== null && checkInMinutes > 10 * 60 && checkInMinutes <= 10 * 60 + 15;
+  return Boolean(rec.check_out_time) && checkInMinutes !== null && checkInMinutes > 10 * 60 && checkInMinutes <= 10 * 60 + 15;
 }
 
 function tallyAttendance(workingDays, attMap, approvedLeaveSet) {

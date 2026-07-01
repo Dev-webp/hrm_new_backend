@@ -356,7 +356,11 @@ router.get("/employee/attendance-summary", verifyToken, async (req, res) => {
       `SELECT
          COUNT(*) FILTER (WHERE date::date <= CURRENT_DATE) AS working_days,
          COUNT(*) FILTER (WHERE status IN ('present','late')) AS present_days,
-         COUNT(*) FILTER (WHERE status = 'late') AS late_days
+         COUNT(*) FILTER (
+           WHERE check_in_time > TIME '10:00:00'
+             AND check_in_time <= TIME '10:15:00'
+             AND check_out_time IS NOT NULL
+         ) AS late_days
        FROM attendance_records
        WHERE user_id = $1
          AND date BETWEEN $2 AND $3`,

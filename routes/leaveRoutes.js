@@ -10,6 +10,7 @@ import {
 } from "../utils/leavePolicy.js";
 import {
   notifyLeaveApply,
+  notifyLeaveDeleted,
   notifyLeaveStatus,
 } from "./notificationTriggers.js";
 import { createValidatedLeaveRequest } from "../services/leaveRequestService.js";
@@ -57,10 +58,18 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
   return {
     leave_request_id: leave.id,
     employee_name: leave.full_name,
+    employee_id: leave.employee_code || leave.user_id,
+    employee_code: leave.employee_code || null,
+    department: leave.department || null,
+    branch: leave.branch || null,
     leave_type: leave.leave_type,
+    leave_category: finalCategory,
     leave_duration_type: leave.leave_duration_type || "full_day",
     half_day_session: leave.half_day_session || null,
     requested_days: requestedDays,
+    current_status: leave.status,
+    applied_date: leave.created_at,
+    reason: leave.reason?.trim() || "No reason provided.",
     available_paid_balance: availablePaid,
     paid_days: paidDays,
     unpaid_days: unpaidDays,
@@ -78,7 +87,7 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
 
 async function getScopedLeave(req, id) {
   const result = await pool.query(
-    `SELECT l.*, u.full_name, u.branch
+    `SELECT l.*, u.full_name, u.branch, u.department, u.employee_code
      FROM leave_requests l JOIN users u ON u.id = l.user_id
      WHERE l.id = $1`,
     [id]
@@ -434,6 +443,14 @@ router.get(
   authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
+      const scoped = await getScopedLeave(req, req.params.id);
+      if (scoped.error) return res.status(scoped.error.status).json({ message: scoped.error.message });
+      const preview = await buildApprovalPreview(
+        scoped.leave,
+        req.query.include_sunday_penalty === "true"
+      );
+      return res.json(preview);
+
       const { id } = req.params;
 
       const leaveRes = await pool.query(
@@ -788,6 +805,128 @@ router.post("/leaves", verifyToken, async (req, res) => {
     });
   }
 });
+
+const deleteLeaveRequest = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const leaveResult = await pool.query(
+      `
+      SELECT l.*, u.full_name, u.email, u.branch, u.department, u.employee_code
+      FROM leave_requests l
+      JOIN users u ON u.id = l.user_id
+      WHERE l.id = $1
+      `,
+      [id]
+    );
+
+    if (!leaveResult.rows.length) {
+      return res.status(404).json({ message: "Leave request not found" });
+    }
+
+    const leave = leaveResult.rows[0];
+    const role = req.user.role;
+    const isOwnLeave = Number(leave.user_id) === Number(req.user.id);
+
+    if (role === "EMPLOYEE" || role === "SUB_ADMIN") {
+      if (!isOwnLeave) {
+        return res.status(403).json({ message: "You can delete only your own leave requests" });
+      }
+      if (leave.status !== "pending") {
+        return res.status(403).json({ message: "Only pending leave requests can be deleted by employees" });
+      }
+    } else if (role === "MANAGER" && leave.branch !== req.user.branch) {
+      return res.status(403).json({ message: "Access denied - different branch" });
+    } else if (!["SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"].includes(role)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    await pool.query("DELETE FROM leave_requests WHERE id = $1", [id]);
+
+    const actorResult = await pool.query(
+      "SELECT id, full_name, email, role, branch FROM users WHERE id = $1",
+      [req.user.id]
+    );
+    const actor = actorResult.rows[0] || req.user;
+
+    await logActivity({
+      userId: actor.id,
+      userName: actor.full_name || actor.email || "Unknown user",
+      role: actor.role || role,
+      action: "Delete",
+      actionType: "leave_changed",
+      moduleName: "Leave",
+      details: `Leave Request Deleted for ${leave.full_name} (${leave.leave_type}, ${leave.from_date} to ${leave.to_date}).`,
+      ip: getClientIp(req),
+      branch: leave.branch || actor.branch || "all",
+      department: leave.department || null,
+      metadata: {
+        event: "Leave Request Deleted",
+        leaveId: leave.id,
+        employeeId: leave.user_id,
+        employeeCode: leave.employee_code || null,
+        employeeName: leave.full_name,
+        deletedBy: actor.full_name || actor.email || "Unknown user",
+        deletedByRole: actor.role || role,
+        leaveType: leave.leave_type,
+        fromDate: leave.from_date,
+        toDate: leave.to_date,
+        requestedDays: Number(leave.requested_days ?? leave.days ?? 0),
+        status: leave.status,
+        reason: leave.reason || "No reason provided",
+      },
+    });
+
+    try {
+      await notifyLeaveDeleted(
+        actor,
+        { id: leave.id, user_id: leave.user_id, branch: leave.branch },
+        isOwnLeave && (role === "EMPLOYEE" || role === "SUB_ADMIN")
+      );
+    } catch (notifyError) {
+      console.error("Leave delete notification error:", notifyError);
+    }
+
+    const countParams = [];
+    let branchClause = "";
+    if (role === "MANAGER") {
+      countParams.push(req.user.branch);
+      branchClause = "AND u.branch = $1";
+    }
+    const countResult = await pool.query(
+      `
+      SELECT COUNT(*) AS count
+      FROM leave_requests l
+      JOIN users u ON u.id = l.user_id
+      WHERE l.status = 'pending' ${branchClause}
+      `,
+      countParams
+    );
+
+    res.json({
+      message: "Leave request deleted successfully",
+      leave_request_id: Number(id),
+      pending_count: Number(countResult.rows[0]?.count || 0),
+    });
+  } catch (error) {
+    console.error("Delete leave error:", error);
+    res.status(500).json({ message: "Failed to delete leave request", error: error.message });
+  }
+};
+
+router.delete(
+  "/leave/:id",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
+  deleteLeaveRequest
+);
+
+router.delete(
+  "/leaves/:id",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
+  deleteLeaveRequest
+);
 
 export default router;
 

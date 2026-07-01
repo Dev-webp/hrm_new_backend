@@ -172,7 +172,9 @@ router.get(
     ) AS half_days,
 
     COUNT(*) FILTER (
-      WHERE COALESCE(a.late_minutes, 0) > 0
+      WHERE a.check_in_time > TIME '10:00:00'
+        AND a.check_in_time <= TIME '10:15:00'
+        AND a.check_out_time IS NOT NULL
     ) AS late_days,
 
     COALESCE(

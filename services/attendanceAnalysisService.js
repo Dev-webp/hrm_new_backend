@@ -10,6 +10,15 @@ export { monthRange, heatmapStatus };
 
 const MAX_BREAK_MINS = 60;
 
+function isGraceLateRecord(record = {}) {
+  const raw = record.checkIn || record.check_in_time;
+  if (!raw || raw === "--" || !record.checkOut || record.checkOut === "--") return false;
+  const [h, m] = String(raw).slice(0, 5).split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return false;
+  const minutes = h * 60 + m;
+  return minutes > 10 * 60 && minutes <= 10 * 60 + 15;
+}
+
 function fmtTime(t) {
   if (!t) return "--";
   const s = String(t).slice(0, 5);
@@ -348,7 +357,7 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     paidLeaveDays: safeRecords.filter((r) => r.status === "leave" && r.isPaidLeave).length,
     unpaidLeaveDays: safeRecords.filter((r) => r.status === "leave" && !r.isPaidLeave).length,
     holidayDays: Number(mv.holiday_days) || safeRecords.filter((r) => r.status === "holiday").length,
-    lateDays: Number(mv.late_days) || safeRecords.filter((r) => r.lateMinutes > 0).length,
+    lateDays: Number(mv.late_days) || safeRecords.filter(isGraceLateRecord).length,
     totalLateMinutes: Number(mv.total_late_minutes) || safeRecords.reduce((s, r) => s + r.lateMinutes, 0),
     totalProductionHours: parseFloat(mv.total_production_hours) || safeRecords.reduce((s, r) => s + r.productionHours, 0),
     totalBreakMinutes: Number(mv.total_break_minutes) || totalBreakMins,

@@ -45,7 +45,12 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "OPE
         SELECT
           COUNT(*) FILTER (WHERE a.status IN ('full_day','half_day')) AS present,
           COUNT(*) FILTER (WHERE a.status = 'absent' OR a.status IS NULL) AS absent,
-          COUNT(*) FILTER (WHERE a.late_minutes > 0 AND a.status != 'absent') AS late,
+          COUNT(*) FILTER (
+            WHERE a.check_in_time > TIME '10:00:00'
+              AND a.check_in_time <= TIME '10:15:00'
+              AND a.check_out_time IS NOT NULL
+              AND a.status != 'absent'
+          ) AS late,
           COUNT(u.id) AS total
         FROM users u
         LEFT JOIN attendance_records a ON a.user_id = u.id AND a.date = $1

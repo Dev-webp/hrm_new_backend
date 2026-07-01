@@ -234,7 +234,7 @@ function qualifiesAfternoonHalfDay(log, netHours) {
 }
 
 export function buildMonthlyLateStats(logsByDate, daysInMonth, year, month) {
-  let totalLateCount = 0;
+  let graceLateCount = 0;
   let withinGraceCount = 0;
   let beyondGraceCount = 0;
   const exceededDates = [];
@@ -245,25 +245,31 @@ export function buildMonthlyLateStats(logsByDate, daysInMonth, year, month) {
     if (!log) continue;
 
     const lateInfo = evaluateLateLogin(log);
-    if (lateInfo.is_late) {
-      totalLateCount += 1;
-      if (lateInfo.is_within_grace) withinGraceCount += 1;
-      if (lateInfo.is_beyond_grace) beyondGraceCount += 1;
-      if (totalLateCount > MAX_PERMITTED_LATES) {
+    if (lateInfo.is_within_grace) {
+      graceLateCount += 1;
+      withinGraceCount += 1;
+      if (graceLateCount > MAX_PERMITTED_LATES) {
         exceededDates.push(dateStr);
       }
     }
+    if (lateInfo.is_late) {
+      if (lateInfo.is_beyond_grace) beyondGraceCount += 1;
+    }
   }
 
+  const permittedLateCount = Math.min(graceLateCount, MAX_PERMITTED_LATES);
+
   return {
-    permitted_late_count: totalLateCount,
-    late_login_count: totalLateCount,
-    grace_late_count: totalLateCount,
-    within_grace_late_count: withinGraceCount,
+    permitted_late_count: permittedLateCount,
+    late_login_count: permittedLateCount,
+    grace_late_count: permittedLateCount,
+    within_grace_late_count: permittedLateCount,
+    actual_grace_late_count: graceLateCount,
+    actual_within_grace_late_count: withinGraceCount,
     beyond_grace_late_count: beyondGraceCount,
     exceeded_dates: exceededDates,
     max_permitted: MAX_PERMITTED_LATES,
-    remaining: Math.max(0, MAX_PERMITTED_LATES - totalLateCount),
+    remaining: Math.max(0, MAX_PERMITTED_LATES - permittedLateCount),
   };
 }
 
@@ -411,6 +417,7 @@ export function classifyDayPolicy({
     half_day_invalid_reason: halfDayDetails.invalid_reason || null,
   };
   const outSec = timeToSeconds(log.office_out);
+  const inSec = timeToSeconds(log.office_in);
   const misuse =
     log.misuse_of_time === true ||
     Number(log.post_login_idle_minutes || 0) > POST_LOGIN_IDLE_THRESHOLD_MINUTES;
@@ -420,6 +427,18 @@ export function classifyDayPolicy({
     return result("half_day", "Misuse of time after login - half day absent", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
       ...halfDayMeta,
+    });
+  }
+
+  if (lateInfo.is_beyond_grace && inSec !== null && inSec > T_HALF_B_START) {
+    flags.push("late_after_10_15");
+    flags.push("after_2_30_pm_cutoff");
+    return result("absent", "Check-in after 2:30 PM cutoff; not eligible for half day", netHours, flags, {
+      total_break_minutes: totalBreakMinutes,
+      half_day_slot: null,
+      half_day_effective_minutes: halfDayDetails.effective_minutes,
+      half_day_slot_checked: halfDayDetails.slot_checked,
+      half_day_invalid_reason: "Check-in after 2:30 PM cutoff",
     });
   }
 
@@ -433,57 +452,18 @@ export function classifyDayPolicy({
 
   if (lateExceeded) {
     flags.push("monthly_late_login_limit_exceeded");
-    if (!qualifiesAfternoonHalfDay(log, netHours)) {
-      const inSec = timeToSeconds(log?.office_in);
-      if (inSec !== null && inSec > T_HALF_B_START) {
-        flags.push("login_after_2_30_pm");
-        return result("absent", "Late login limit exceeded; login after 2:30 PM", netHours, flags, {
-          total_break_minutes: totalBreakMinutes,
-          ...halfDayMeta,
-        });
-      }
-      flags.push("strict_half_day_not_eligible");
-      return result("absent", "Late login limit exceeded; strict half-day eligibility not met", netHours, flags, {
-        total_break_minutes: totalBreakMinutes,
-        ...halfDayMeta,
-      });
-    }
-    flags.push("strict_half_day_eligible");
-    return result("half_day", "Late login limit exceeded; strict half-day eligibility met", netHours, flags, {
+    return result("half_day", "Grace late login limit exceeded; strict full-day policy not met", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
-      half_day_slot: "SLOT_B",
+      half_day_slot: halfDaySlot === "INVALID" ? null : halfDaySlot,
       half_day_effective_minutes: Math.round(netHours * 60),
-      half_day_slot_checked: "AFTERNOON",
-      half_day_invalid_reason: null,
+      half_day_slot_checked: halfDaySlot === "INVALID" ? null : halfDayDetails.slot_checked,
+      half_day_invalid_reason: halfDaySlot === "INVALID" ? halfDayDetails.invalid_reason || null : null,
     });
   }
 
   if (lateInfo.is_beyond_grace) {
     flags.push("late_after_10_15");
-    if (halfDaySlot === "INVALID") {
-      flags.push("invalid_half_day_slot");
-      return result("absent", halfDayDetails.invalid_reason || "Invalid half-day slot", netHours, flags, {
-        total_break_minutes: totalBreakMinutes,
-        ...halfDayMeta,
-      });
-    }
-    flags.push("beyond_grace_valid_half_day_slot");
-    return result("half_day", "Login after 10:15 AM grace time; valid half-day slot completed", netHours, flags, {
-      total_break_minutes: totalBreakMinutes,
-      ...halfDayMeta,
-    });
-  }
-
-  if (netHours < MIN_FULL_DAY_HOURS) {
-    if (halfDaySlot === "INVALID") {
-      flags.push("invalid_half_day_slot");
-      return result("absent", halfDayDetails.invalid_reason || "Invalid half-day slot", netHours, flags, {
-        total_break_minutes: totalBreakMinutes,
-        ...halfDayMeta,
-      });
-    }
-    flags.push("valid_half_day_slot");
-    return result("half_day", "Valid official half-day slot completed", netHours, flags, {
+    return result("half_day", "Login after 10:15 AM grace time; strict full-day policy not met", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
       ...halfDayMeta,
     });
@@ -491,16 +471,28 @@ export function classifyDayPolicy({
 
   if (outSec !== null && outSec < T_OFFICE_END) {
     flags.push("logout_before_7_pm");
+    return result("half_day", "Logout before 7:00 PM; strict full-day policy not met", netHours, flags, {
+      total_break_minutes: totalBreakMinutes,
+      ...halfDayMeta,
+    });
   }
 
   if (lateInfo.is_within_grace) {
     flags.push("within_grace_time");
   }
 
-  flags.push("full_day_policy_satisfied");
-  return result("full_day", "8+ net working hours", netHours, flags, {
+  if (netHours >= MIN_FULL_DAY_HOURS) {
+    flags.push("full_day_policy_satisfied");
+    return result("full_day", "8+ net working hours and logout at or after 7:00 PM", netHours, flags, {
+      total_break_minutes: totalBreakMinutes,
+      half_day_slot: null,
+    });
+  }
+
+  flags.push("between_4_and_8_net_hours");
+  return result("half_day", "Between 4 and 8 net working hours", netHours, flags, {
     total_break_minutes: totalBreakMinutes,
-    half_day_slot: null,
+    ...halfDayMeta,
   });
 }
 
@@ -545,7 +537,9 @@ export function calculateMonthlySummary(
     else if (day.bucket === "holiday") holidayDays += 1;
     else if (day.bucket === "absent") absentDays += 1;
 
-    if (log && evaluateLateLogin(log).is_late) lateCount += 1;
+    if (log && evaluateLateLogin(log).is_within_grace && !(monthlyLateStats.exceeded_dates || []).includes(dateStr)) {
+      lateCount += 1;
+    }
 
     const netMs = log ? calculateNetWorkMillis(log) : 0;
     if (netMs > 0) {
@@ -561,7 +555,7 @@ export function calculateMonthlySummary(
     leave_days: leaveDays,
     absent_days: absentDays,
     holiday_days: holidayDays,
-    late_count: lateCount,
+    late_count: Math.min(lateCount, MAX_PERMITTED_LATES),
     total_net_millis: totalNetMs,
     avg_net_millis: workDayCount > 0 ? Math.round(totalNetMs / workDayCount) : null,
     work_day_count: workDayCount,

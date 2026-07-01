@@ -114,7 +114,7 @@ describe("day classification policy", () => {
     assert.ok(result.flags.includes("within_grace_time"));
   });
 
-  it("10:16 to 19:00 is half day because it completes the afternoon slot", () => {
+  it("10:16 to 19:00 is half day because login is beyond grace", () => {
     const result = classifyDayPolicy({
       dateStr: "2026-05-20",
       log: { office_in: "10:16:00", office_out: "19:00:00" },
@@ -124,13 +124,11 @@ describe("day classification policy", () => {
     });
 
     assert.equal(result.bucket, "half_day");
-    assert.equal(result.half_day_slot, "SLOT_B");
-    assert.equal(result.reason, "Login after 10:15 AM grace time; valid half-day slot completed");
+    assert.equal(result.reason, "Login after 10:15 AM grace time; strict full-day policy not met");
     assert.ok(result.flags.includes("late_after_10_15"));
-    assert.ok(result.flags.includes("beyond_grace_valid_half_day_slot"));
   });
 
-  it("10:30 to 15:00 is absent because login misses the morning half-day slot", () => {
+  it("10:30 to 15:00 is half day when net production is at least 4 hours", () => {
     const result = classifyDayPolicy({
       dateStr: "2026-05-20",
       log: { office_in: "10:30:00", office_out: "15:00:00" },
@@ -139,13 +137,11 @@ describe("day classification policy", () => {
       logsByDate: {},
     });
 
-    assert.equal(result.bucket, "absent");
-    assert.equal(result.half_day_slot, null);
-    assert.equal(result.reason, "Afternoon half-day effective production is below 4 hours");
-    assert.ok(result.flags.includes("invalid_half_day_slot"));
+    assert.equal(result.bucket, "half_day");
+    assert.ok(result.flags.includes("late_after_10_15"));
   });
 
-  it("11:30 to 15:30 with 4 total hours is absent without a valid half-day slot", () => {
+  it("11:30 to 15:30 with 4 total hours is half day", () => {
     const result = classifyDayPolicy({
       dateStr: "2026-05-20",
       log: { office_in: "11:30:00", office_out: "15:30:00" },
@@ -154,10 +150,9 @@ describe("day classification policy", () => {
       logsByDate: {},
     });
 
-    assert.equal(result.bucket, "absent");
+    assert.equal(result.bucket, "half_day");
     assert.equal(result.net_hours, 4);
-    assert.equal(result.reason, "Afternoon half-day effective production is below 4 hours");
-    assert.ok(result.flags.includes("invalid_half_day_slot"));
+    assert.ok(result.flags.includes("late_after_10_15"));
   });
 
   it("14:30 to 19:00 is afternoon half day", () => {
@@ -209,7 +204,7 @@ describe("day classification policy", () => {
     assert.ok(result.flags.includes("less_than_4_net_hours"));
   });
 
-  it("10:05 to 14:30 is absent because morning half-day login is after 10:00", () => {
+  it("10:05 to 14:30 is half day because net production is at least 4 hours", () => {
     const result = classifyDayPolicy({
       dateStr: "2026-05-20",
       log: { office_in: "10:05:00", office_out: "14:30:00" },
@@ -218,9 +213,8 @@ describe("day classification policy", () => {
       logsByDate: {},
     });
 
-    assert.equal(result.bucket, "absent");
-    assert.equal(result.half_day_slot, null);
-    assert.ok(result.flags.includes("invalid_half_day_slot"));
+    assert.equal(result.bucket, "half_day");
+    assert.ok(result.flags.includes("logout_before_7_pm"));
   });
 
   it("14:30 to 18:45 with a 15 minute break is afternoon half day", () => {
@@ -241,7 +235,7 @@ describe("day classification policy", () => {
     assert.equal(result.half_day_slot, "SLOT_B");
   });
 
-  it("14:35 to 19:00 is absent because afternoon half-day login is after 2:30", () => {
+  it("14:35 to 19:00 is absent because check-in is after 2:30 PM cutoff", () => {
     const result = classifyDayPolicy({
       dateStr: "2026-05-20",
       log: { office_in: "14:35:00", office_out: "19:00:00" },
@@ -251,8 +245,7 @@ describe("day classification policy", () => {
     });
 
     assert.equal(result.bucket, "absent");
-    assert.equal(result.half_day_slot, null);
-    assert.equal(result.reason, "Afternoon half-day login must be on or before 2:30 PM");
+    assert.ok(result.flags.includes("after_2_30_pm_cutoff"));
   });
 
   it("less than 4 net hours is absent", () => {
@@ -267,7 +260,7 @@ describe("day classification policy", () => {
     assert.equal(result.bucket, "absent");
   });
 
-  it("4 to less than 8 net hours without valid slot is absent", () => {
+  it("4 to less than 8 net hours is half day", () => {
     const result = classifyDayPolicy({
       dateStr: "2026-05-20",
       log: { office_in: "10:05:00", office_out: "15:00:00" },
@@ -276,8 +269,38 @@ describe("day classification policy", () => {
       logsByDate: {},
     });
 
-    assert.equal(result.bucket, "absent");
-    assert.ok(result.flags.includes("invalid_half_day_slot"));
+    assert.equal(result.bucket, "half_day");
+    assert.ok(result.flags.includes("logout_before_7_pm"));
+  });
+
+  it("10:00 to 18:00 with 8 net hours is half day because logout is before 7 PM", () => {
+    const result = classifyDayPolicy({
+      dateStr: "2026-05-20",
+      log: { office_in: "10:00:00", office_out: "18:00:00" },
+      holidaySet: new Set(),
+      monthlyLateStats: { exceeded_dates: [] },
+      logsByDate: {},
+    });
+
+    assert.equal(result.bucket, "half_day");
+    assert.ok(result.flags.includes("logout_before_7_pm"));
+  });
+
+  it("10:00 to 19:00 with 8+ net hours is full day", () => {
+    const result = classifyDayPolicy({
+      dateStr: "2026-05-20",
+      log: {
+        office_in: "10:00:00",
+        office_out: "19:00:00",
+        break_in: "12:00:00",
+        break_out: "13:00:00",
+      },
+      holidaySet: new Set(),
+      monthlyLateStats: { exceeded_dates: [] },
+      logsByDate: {},
+    });
+
+    assert.equal(result.bucket, "full_day");
   });
 });
 
@@ -323,11 +346,13 @@ describe("monthly late count", () => {
       logs[ds] = { office_in: `10:${String(d).padStart(2, "0")}:00` };
     }
     const stats = buildMonthlyLateStats(logs, 31, 2026, 5);
-    assert.ok(stats.permitted_late_count > 6);
+    assert.equal(stats.permitted_late_count, 6);
+    assert.equal(stats.late_login_count, 6);
+    assert.equal(stats.actual_grace_late_count, 7);
     assert.ok(stats.exceeded_dates.length > 0);
   });
 
-  it("counts every login after 10:00, including beyond grace", () => {
+  it("counts only grace late logins, not beyond-grace half-day logins", () => {
     const logs = {
       "2026-05-01": { office_in: "10:01:00" },
       "2026-05-02": { office_in: "10:20:00" },
@@ -335,7 +360,7 @@ describe("monthly late count", () => {
       "2026-05-04": { office_in: "10:00:00" },
     };
     const stats = buildMonthlyLateStats(logs, 31, 2026, 5);
-    assert.equal(stats.late_login_count, 3);
+    assert.equal(stats.late_login_count, 1);
     assert.equal(stats.within_grace_late_count, 1);
     assert.equal(stats.beyond_grace_late_count, 2);
   });
@@ -356,10 +381,10 @@ describe("monthly late count", () => {
     });
 
     assert.equal(result.bucket, "half_day");
-    assert.equal(result.reason, "Late login limit exceeded; strict half-day eligibility met");
+    assert.equal(result.reason, "Grace late login limit exceeded; strict full-day policy not met");
   });
 
-  it("marks login after 2:30 PM absent after late limit is exceeded", () => {
+  it("marks login after 2:30 PM absent even when net production is at least 4 hours", () => {
     const result = classifyDayPolicy({
       dateStr: "2026-05-09",
       log: { office_in: "14:31:00", office_out: "19:30:00" },
@@ -369,6 +394,7 @@ describe("monthly late count", () => {
     });
 
     assert.equal(result.bucket, "absent");
-    assert.equal(result.reason, "Late login limit exceeded; login after 2:30 PM");
+    assert.equal(result.reason, "Check-in after 2:30 PM cutoff; not eligible for half day");
+    assert.ok(result.flags.includes("after_2_30_pm_cutoff"));
   });
 });

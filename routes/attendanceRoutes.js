@@ -203,9 +203,7 @@ function isAttendanceInProgress(dateStr, log) {
 }
 
 function shouldUseOfficeEndCutoff(dateStr, log) {
-  if (!log?.office_in || log?.office_out) return false;
-  const today = todayLocalDateStr();
-  return dateStr < today || (dateStr === today && hasOfficeEndPassed());
+  return false;
 }
 
 function shouldLogPolicyDebug(dateStr, fullName) {
@@ -227,18 +225,17 @@ function buildLateLoginPolicyMeta(log, monthlyLateStats = {}, dateStr) {
 
   if (log?.office_in) {
     if (exceeded) status = "Limit Exceeded";
-    else if (lateInfo.is_beyond_grace) status = "Late Beyond Grace";
-    else if (lateInfo.is_within_grace) status = "Late Within Grace";
+    else if (lateInfo.is_within_grace) status = "Late";
     else status = "On Time";
   }
 
   return {
     late_login_count: count,
     late_login_limit: max,
-    late_login_count_label: `${count} / ${max}${count > max ? " (Limit Exceeded)" : ""}`,
+    late_login_count_label: `${Math.min(count, max)} / ${max}`,
     late_login_status: status,
     remaining_grace_late_logins: Math.max(0, max - count),
-    late_login_limit_exceeded: count > max,
+    late_login_limit_exceeded: exceeded,
   };
 }
 
@@ -1107,7 +1104,7 @@ router.get("/attendance/stats", verifyToken, async (req, res) => {
       if (["full_day", "half_day", "leave", "in_progress", "working"].includes(row.status)) {
         present += 1;
       }
-      if (Number(row.late_minutes || 0) > 0) lateCount += 1;
+      if (row.late_login_status === "Late") lateCount += 1;
     }
 
     const attendanceRate = totalEmployees > 0
@@ -1404,7 +1401,9 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
         ) AS leave,
 
         COUNT(u.id) FILTER (
-          WHERE COALESCE(a.late_minutes, 0) > 0
+          WHERE a.check_in_time > TIME '10:00:00'
+            AND a.check_in_time <= TIME '10:15:00'
+            AND a.check_out_time IS NOT NULL
             AND ${normalizedAttendanceStatusSql("a")} NOT IN ('absent', 'holiday')
         ) AS late,
 
@@ -2004,7 +2003,10 @@ router.get("/attendance/late-trend", verifyToken, async (req, res) => {
     let q = `SELECT TO_CHAR(a.date,'YYYY-MM-DD') AS date, COUNT(*) AS late
              FROM attendance_records a
              JOIN users u ON a.user_id=u.id
-             WHERE a.late_minutes>0 AND a.date=ANY($1::date[])
+             WHERE a.check_in_time > TIME '10:00:00'
+               AND a.check_in_time <= TIME '10:15:00'
+               AND a.check_out_time IS NOT NULL
+               AND a.date=ANY($1::date[])
                AND u.role != 'SUPER_ADMIN'`;
     const p = [dates]; let idx = 2;
     if (effectiveBranch) { q += ` AND u.branch=$${idx}`; p.push(effectiveBranch); }
