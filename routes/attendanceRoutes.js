@@ -219,23 +219,21 @@ function shouldLogPolicyDebug(dateStr, fullName) {
 function buildLateLoginPolicyMeta(log, monthlyLateStats = {}, dateStr) {
   const lateInfo = evaluateLateLogin(log);
   const count = Number(monthlyLateStats.late_login_count ?? monthlyLateStats.permitted_late_count ?? 0);
-  const max = Number(monthlyLateStats.max_permitted ?? 6);
-  const exceeded = (monthlyLateStats.exceeded_dates || []).includes(dateStr);
   let status = "No Login";
 
   if (log?.office_in) {
-    if (exceeded) status = "Limit Exceeded";
-    else if (lateInfo.is_within_grace) status = "Late";
+    if (lateInfo.is_late_window) status = "Late";
+    else if (lateInfo.is_beyond_grace) status = "Half Day";
     else status = "On Time";
   }
 
   return {
     late_login_count: count,
-    late_login_limit: max,
-    late_login_count_label: `${Math.min(count, max)} / ${max}`,
+    late_login_limit: null,
+    late_login_count_label: String(count),
     late_login_status: status,
-    remaining_grace_late_logins: Math.max(0, max - count),
-    late_login_limit_exceeded: exceeded,
+    remaining_grace_late_logins: null,
+    late_login_limit_exceeded: false,
   };
 }
 
@@ -1401,10 +1399,7 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
         ) AS leave,
 
         COUNT(u.id) FILTER (
-          WHERE a.check_in_time > TIME '10:00:00'
-            AND a.check_in_time <= TIME '10:15:00'
-            AND a.check_out_time IS NOT NULL
-            AND ${normalizedAttendanceStatusSql("a")} NOT IN ('absent', 'holiday')
+          WHERE a.check_in_time >= TIME '10:15:00'
         ) AS late,
 
         COUNT(u.id) FILTER (
@@ -2003,9 +1998,7 @@ router.get("/attendance/late-trend", verifyToken, async (req, res) => {
     let q = `SELECT TO_CHAR(a.date,'YYYY-MM-DD') AS date, COUNT(*) AS late
              FROM attendance_records a
              JOIN users u ON a.user_id=u.id
-             WHERE a.check_in_time > TIME '10:00:00'
-               AND a.check_in_time <= TIME '10:15:00'
-               AND a.check_out_time IS NOT NULL
+             WHERE a.check_in_time >= TIME '10:15:00'
                AND a.date=ANY($1::date[])
                AND u.role != 'SUPER_ADMIN'`;
     const p = [dates]; let idx = 2;

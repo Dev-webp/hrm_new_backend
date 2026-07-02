@@ -4,6 +4,44 @@ import { pool } from "../middleware/db.js";
 
 const router = express.Router();
 
+function normalizedAttendanceStatusSql(alias = "a") {
+  return `
+    CASE
+      WHEN ${alias}.status IS NULL THEN 'absent'
+      WHEN LOWER(REPLACE(REPLACE(TRIM(${alias}.status), ' ', '_'), '-', '_')) = 'present_working' THEN 'working'
+      WHEN LOWER(REPLACE(REPLACE(TRIM(${alias}.status), ' ', '_'), '-', '_')) = 'paid_leave' THEN 'leave'
+      ELSE LOWER(REPLACE(REPLACE(TRIM(${alias}.status), ' ', '_'), '-', '_'))
+    END
+  `;
+}
+
+function liveAttendanceStatusSql(alias = "a") {
+  const statusSql = normalizedAttendanceStatusSql(alias);
+  return `
+    CASE
+      WHEN ${alias}.check_in_time IS NOT NULL
+        AND ${alias}.check_out_time IS NULL
+        AND ${statusSql} NOT IN ('holiday', 'leave')
+      THEN CASE WHEN ${statusSql} = 'absent' THEN 'working' ELSE ${statusSql} END
+      ELSE ${statusSql}
+    END
+  `;
+}
+
+function livePresentSql(alias = "a") {
+  return `${liveAttendanceStatusSql(alias)} IN ('full_day','half_day','present','working','in_progress','leave')`;
+}
+
+function liveAbsentSql(alias = "a") {
+  return `(
+    ${alias}.user_id IS NULL
+    OR (
+      ${liveAttendanceStatusSql(alias)} = 'absent'
+      AND NOT (${alias}.check_in_time IS NOT NULL AND ${alias}.check_out_time IS NULL)
+    )
+  )`;
+}
+
 router.get("/admin-dashboard", verifyToken, authorizeRoles("SUPER_ADMIN"), (req, res) => {
   res.json({ message: "Welcome Super Admin", stats: { employees: 240, managers: 12, departments: 8, payroll: "₹18,40,000" } });
 });
@@ -43,13 +81,10 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "OPE
       // 1. Today's attendance — for welcome banner
       pool.query(`
         SELECT
-          COUNT(*) FILTER (WHERE a.status IN ('full_day','half_day')) AS present,
-          COUNT(*) FILTER (WHERE a.status = 'absent' OR a.status IS NULL) AS absent,
+          COUNT(*) FILTER (WHERE ${livePresentSql("a")}) AS present,
+          COUNT(*) FILTER (WHERE ${liveAbsentSql("a")}) AS absent,
           COUNT(*) FILTER (
-            WHERE a.check_in_time > TIME '10:00:00'
-              AND a.check_in_time <= TIME '10:15:00'
-              AND a.check_out_time IS NOT NULL
-              AND a.status != 'absent'
+            WHERE a.check_in_time >= TIME '10:15:00'
           ) AS late,
           COUNT(u.id) AS total
         FROM users u
@@ -88,7 +123,7 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "OPE
         SELECT
           u.department,
           COUNT(u.id) AS total,
-          COUNT(a.user_id) FILTER (WHERE a.status IN ('full_day','half_day')) AS present
+          COUNT(a.user_id) FILTER (WHERE ${livePresentSql("a")}) AS present
         FROM users u
         LEFT JOIN attendance_records a ON a.user_id = u.id AND a.date = $1
         WHERE u.role != 'SUPER_ADMIN' AND u.department IS NOT NULL

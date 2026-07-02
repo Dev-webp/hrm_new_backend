@@ -13,6 +13,7 @@ const router = express.Router();
 
 const BREAK_TYPES = ["break1", "lunch", "break2", "break3"];
 const MAX_DAILY_BREAK_SESSIONS = 6;
+const MAX_BREAK_MINUTES = 60;
 
 function emptyGroupedBreaks() {
     return {
@@ -142,10 +143,45 @@ function validateBreakPolicy(breaks = {}) {
     if (activeCount > 1) {
         return "End the current break before starting another break.";
     }
-    if (totalMinutes > 60) {
-        return "Total break time cannot exceed 60 minutes per day.";
-    }
     return "";
+}
+
+async function applyBreakAttendancePolicy(userId, date) {
+    const totalResult = await pool.query(
+        `SELECT COALESCE(SUM(COALESCE(duration_minutes, 0)), 0)::int AS total_break_minutes
+         FROM employee_breaks
+         WHERE user_id = $1 AND date = $2::date`,
+        [userId, date]
+    );
+    const totalBreakMinutes = Number(totalResult.rows[0]?.total_break_minutes || 0);
+    const breakExceeded = totalBreakMinutes > MAX_BREAK_MINUTES;
+
+    const attendanceResult = await pool.query(
+        `UPDATE attendance_records
+         SET total_break_minutes = $1,
+             status = CASE
+               WHEN $2::boolean AND COALESCE(status, '') NOT IN ('leave', 'holiday', 'sunday') THEN 'half_day'
+               ELSE status
+             END,
+             half_day_slot = CASE
+               WHEN $2::boolean AND COALESCE(status, '') NOT IN ('leave', 'holiday', 'sunday') THEN COALESCE(half_day_slot, 'INVALID')
+               ELSE half_day_slot
+             END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = $3 AND date = $4::date
+         RETURNING status, total_break_minutes, half_day_slot`,
+        [totalBreakMinutes, breakExceeded, userId, date]
+    );
+
+    return {
+        total_break_minutes: totalBreakMinutes,
+        remaining_break_minutes: Math.max(0, MAX_BREAK_MINUTES - totalBreakMinutes),
+        break_exceeded: breakExceeded,
+        break_status: breakExceeded ? "EXCEEDED" : "WITHIN_LIMIT",
+        attendance_status: attendanceResult.rows[0]?.status || null,
+        attendance: attendanceResult.rows[0] || null,
+        warning: breakExceeded ? "Break limit exceeded. Attendance marked as Half Day." : null,
+    };
 }
 
 // ======================================================
@@ -490,6 +526,8 @@ router.put(
                 );
             }
 
+            const breakPolicy = await applyBreakAttendancePolicy(userId, date);
+
             await logActivity({
                 userId: editor.id,
                 userName: editor.full_name || editor.email || "Unknown user",
@@ -522,7 +560,9 @@ router.put(
             });
 
             res.json({
-                message: "Breaks updated successfully"
+                message: breakPolicy.warning || "Breaks updated successfully",
+                ...breakPolicy,
+                breaks: updatedBreaksResult.rows
             });
 
         } catch (error) {

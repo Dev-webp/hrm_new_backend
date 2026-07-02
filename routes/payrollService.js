@@ -24,9 +24,12 @@
  */
 
 // ─── Constants ────────────────────────────────────────────────
-const GRACE_LATE_LOGINS             = 6;
 const PAID_LEAVE_ELIGIBILITY_MONTHS = 3;
 const PAID_LEAVE_PER_MONTH          = 1;
+const OFFICE_START_MINUTES          = 10 * 60;
+const LATE_LOGIN_START_MINUTES      = 10 * 60 + 15;
+const HALF_DAY_LOGIN_START_MINUTES  = 10 * 60 + 30;
+const REQUIRED_FULL_DAY_MINUTES     = 9 * 60;
 
 // ─── Utilities ────────────────────────────────────────────────
 function daysInMonth(year, month) {
@@ -88,21 +91,34 @@ function isValidHalfDaySlot(rec) {
   return ["SLOT_A", "SLOT_B"].includes(rec?.half_day_slot);
 }
 
+function grossHoursFromRecord(rec) {
+  const checkInMinutes = timeToMinutes(rec?.check_in_time);
+  const checkOutMinutes = timeToMinutes(rec?.check_out_time);
+  if (checkInMinutes === null || checkOutMinutes === null || checkOutMinutes <= checkInMinutes) {
+    return 0;
+  }
+  return (checkOutMinutes - Math.max(checkInMinutes, OFFICE_START_MINUTES)) / 60;
+}
+
 function normalizeAttendanceStatus(rec) {
   if (!rec?.check_in_time || !rec?.check_out_time) return "absent";
 
   const existingStatus = rec?.status || "absent";
-  if (["leave", "holiday", "absent"].includes(existingStatus)) return existingStatus;
+  if (["leave", "holiday", "sunday"].includes(existingStatus)) return existingStatus;
 
-  const netHours = Number(rec.production_hours || 0);
-  const checkInMinutes = minutesFromTime(rec.check_in_time);
-  const checkOutMinutes = minutesFromTime(rec.check_out_time);
+  const grossHours = grossHoursFromRecord(rec);
+  const checkInMinutes = timeToMinutes(rec.check_in_time);
+  const checkOutMinutes = timeToMinutes(rec.check_out_time);
+  const requiredLogoutMinutes =
+    checkInMinutes === null
+      ? 19 * 60
+      : Math.max(checkInMinutes, OFFICE_START_MINUTES) + REQUIRED_FULL_DAY_MINUTES;
 
-  if (netHours < 4) return "absent";
-  if (checkInMinutes !== null && checkInMinutes > 10 * 60 + 15) return "half_day";
-  if (checkOutMinutes !== null && checkOutMinutes < 19 * 60) return "half_day";
-  if (netHours >= 8 && checkOutMinutes !== null && checkOutMinutes >= 19 * 60) return "full_day";
-  if (netHours >= 4) return "half_day";
+  if (grossHours < 4) return "absent";
+  if (checkInMinutes !== null && checkInMinutes >= HALF_DAY_LOGIN_START_MINUTES) return "half_day";
+  if (checkOutMinutes !== null && checkOutMinutes < requiredLogoutMinutes) return "half_day";
+  if (grossHours >= 9 && checkOutMinutes !== null && checkOutMinutes >= requiredLogoutMinutes) return "full_day";
+  if (grossHours >= 4) return "half_day";
 
   return "absent";
 }
@@ -225,7 +241,7 @@ function minutesFromTime(value) {
 
 function isGraceLateLogin(rec = {}) {
   const checkInMinutes = minutesFromTime(rec.check_in_time);
-  return Boolean(rec.check_out_time) && checkInMinutes !== null && checkInMinutes > 10 * 60 && checkInMinutes <= 10 * 60 + 15;
+  return checkInMinutes !== null && checkInMinutes >= LATE_LOGIN_START_MINUTES;
 }
 
 function tallyAttendance(workingDays, attMap, approvedLeaveSet) {
@@ -273,7 +289,7 @@ function tallyAttendance(workingDays, attMap, approvedLeaveSet) {
     }
   }
 
-  const lateLoginHalfDays = Math.max(0, lateLogins - GRACE_LATE_LOGINS);
+  const lateLoginHalfDays = 0;
 
   return {
     fullDays, halfDays, absentDays, formalLeaveCount,
@@ -670,6 +686,5 @@ export {
   daysInMonth,
   fmtINR,
   round2,
-  GRACE_LATE_LOGINS,
 };
 

@@ -4,10 +4,9 @@
  * ============================================================
  * Mount at: /api/payroll
  * Fixes applied:
- *   1. Import GRACE_LATE_LOGINS from payrollService (was crashing)
- *   2. PDF shows correct formula (no double-deduction)
- *   3. Joining date properly fetched and returned
- *   4. Activity logging for payslip generation (logPayslip)
+ *   1. PDF shows correct formula (no double-deduction)
+ *   2. Joining date properly fetched and returned
+ *   3. Activity logging for payslip generation (logPayslip)
  * ============================================================
  */
 
@@ -20,7 +19,6 @@ import {
   batchCalculatePayroll,
   persistPayslip,
   fmtINR,
-  GRACE_LATE_LOGINS,
 } from "./payrollService.js";
 import { notifyPayslipGenerated } from "./notificationTriggers.js";
 import { logPayslip, getClientIp } from "../utils/activityLogger.js";
@@ -507,7 +505,7 @@ doc.rect(0, 0, doc.page.width, 100).fill("#ff8c00");
         ["Full Days Present",     bd.fullDays           ?? "—", "Half Days",         bd.halfDays         ?? "—"],
         ["Absent Days",           bd.absentDays         ?? "—", "Approved Leaves",   bd.approvedLeaveCount ?? "—"],
         ["Paid Leaves Used",      bd.paidLeaveUsed      ?? "—", "Unpaid Leaves",     bd.unpaidLeaveDays  ?? "—"],
-        ["Late Logins (total)",   bd.lateLogins         ?? "—", "Late → Half Days",  bd.lateLoginHalfDays ?? "—"],
+        ["Late Logins",           bd.lateLogins         ?? "—", "Late Half Days",    bd.lateLoginHalfDays ?? "—"],
       ];
 
       const colW = [200, 60, 200, 60];
@@ -596,17 +594,6 @@ const salaryRows = [
 
       doc.y = sY + 60;
 
-      // ── Notes ───────────────────────────────────────────────
-      if ((bd.lateLogins || 0) > GRACE_LATE_LOGINS) {
-        doc.fontSize(8).fillColor("#92400e").font("Helvetica")
-           .text(
-             `⚠ Note: ${bd.lateLogins} late logins this month. ` +
-             `${bd.lateLoginHalfDays} day(s) beyond the ${GRACE_LATE_LOGINS}-login grace period ` +
-             `were recorded as half days (already reflected in Payable Days above).`,
-             50, doc.y, { width: tblW }
-           );
-        doc.moveDown(0.4);
-      }
       if (!bd.eligible) {
         doc.fontSize(8).fillColor("#6b7280").font("Helvetica")
            .text(

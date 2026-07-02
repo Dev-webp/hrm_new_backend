@@ -3,8 +3,10 @@
 
 export const OFFICE_START = "10:00:00";
 export const OFFICE_END = "19:00:00";
-export const LATE_GRACE_LIMIT = "10:15:00";
-export const MAX_PERMITTED_LATES = 6;
+export const ON_TIME_GRACE_END = "10:14:59";
+export const LATE_LOGIN_START = "10:15:00";
+export const HALF_DAY_LOGIN_START = "10:30:00";
+export const LATE_GRACE_LIMIT = ON_TIME_GRACE_END;
 
 export const HALF_SLOT_A_START = "10:00:00";
 export const HALF_SLOT_A_END = "14:30:00";
@@ -16,11 +18,12 @@ export const POST_LOGIN_IDLE_THRESHOLD_MINUTES = 15;
 export function calculateLateMinutes(checkInTime) {
   if (!checkInTime) return 0;
   const [h, m] = String(checkInTime).split(":").map(Number);
-  return Math.max(0, h * 60 + m - (10 * 60));
+  return Math.max(0, h * 60 + m - (10 * 60 + 15));
 }
 
 const MIN_HALF_DAY_HOURS = 4;
-const MIN_FULL_DAY_HOURS = 8;
+const MIN_FULL_DAY_HOURS = 9;
+const MAX_BREAK_MINUTES = 60;
 
 export function timeToSeconds(timeStr) {
   if (!timeStr) return null;
@@ -35,7 +38,10 @@ export function timeToSeconds(timeStr) {
 
 const T_OFFICE_START = timeToSeconds(OFFICE_START);
 const T_OFFICE_END = timeToSeconds(OFFICE_END);
-const T_LATE_GRACE_LIMIT = timeToSeconds(LATE_GRACE_LIMIT);
+const T_ON_TIME_GRACE_END = timeToSeconds(ON_TIME_GRACE_END);
+const T_LATE_LOGIN_START = timeToSeconds(LATE_LOGIN_START);
+const T_HALF_DAY_LOGIN_START = timeToSeconds(HALF_DAY_LOGIN_START);
+const REQUIRED_FULL_DAY_SECONDS = MIN_FULL_DAY_HOURS * 3600;
 const T_HALF_A_START = timeToSeconds(HALF_SLOT_A_START);
 const T_HALF_A_END = timeToSeconds(HALF_SLOT_A_END);
 const T_HALF_B_START = timeToSeconds(HALF_SLOT_B_START);
@@ -84,7 +90,7 @@ export function calculateBreakMillis(log) {
   if (inSec === null || outSec === null) return 0;
 
   const workStart = Math.max(inSec, T_OFFICE_START);
-  const workEnd = Math.min(outSec, T_OFFICE_END);
+  const workEnd = outSec;
   if (workEnd <= workStart) return 0;
 
   let breakSec = 0;
@@ -106,10 +112,21 @@ export function calculateNetWorkMillis(log) {
   if (inSec === null || outSec === null) return 0;
 
   const actualIn = Math.max(inSec, T_OFFICE_START);
-  const actualOut = Math.min(outSec, T_OFFICE_END);
+  const actualOut = outSec;
   const grossMs = Math.max(0, (actualOut - actualIn) * 1000);
 
   return Math.max(0, grossMs - calculateBreakMillis(log));
+}
+
+export function calculateGrossWorkMillis(log) {
+  const inSec = timeToSeconds(log?.office_in);
+  const outSec = timeToSeconds(log?.office_out);
+
+  if (inSec === null || outSec === null) return 0;
+
+  const actualIn = Math.max(inSec, T_OFFICE_START);
+  const actualOut = outSec;
+  return Math.max(0, (actualOut - actualIn) * 1000);
 }
 
 export function evaluateLateLogin(log) {
@@ -117,17 +134,29 @@ export function evaluateLateLogin(log) {
     is_late: false,
     is_within_grace: false,
     is_beyond_grace: false,
+    is_on_time_grace: false,
+    is_late_window: false,
   };
 
   const inSec = timeToSeconds(log?.office_in);
 
-  if (inSec === null || inSec <= T_OFFICE_START) {
+  if (inSec === null) {
+    return result;
+  }
+
+  if (inSec <= T_ON_TIME_GRACE_END) {
+    result.is_on_time_grace = true;
+    return result;
+  }
+
+  if (inSec < T_LATE_LOGIN_START) {
     return result;
   }
 
   result.is_late = true;
+  result.is_late_window = true;
 
-  if (inSec <= T_LATE_GRACE_LIMIT) {
+  if (inSec < T_HALF_DAY_LOGIN_START) {
     result.is_within_grace = true;
   } else {
     result.is_beyond_grace = true;
@@ -212,32 +241,22 @@ export function calculateHalfDayEffectiveMinutes(log, slot) {
   const workEnd = Math.min(outSec, slotEnd);
   if (workEnd <= workStart) return 0;
 
-  let breakSec = 0;
-  for (const [rawIn, rawOut] of collectBreakPairs(log)) {
-    const bIn = timeToSeconds(rawIn);
-    const bOut = timeToSeconds(rawOut);
-    if (bIn !== null && bOut !== null && bOut > bIn) {
-      breakSec += overlapSeconds(bIn, bOut, workStart, workEnd);
-    }
-  }
-
-  return Math.max(0, Math.floor((workEnd - workStart - breakSec) / 60));
+  return Math.max(0, Math.floor((workEnd - workStart) / 60));
 }
 
 export function qualifiesHalfDayBySlot(log) {
   return resolveHalfDaySlot(log) !== "INVALID";
 }
 
-function qualifiesAfternoonHalfDay(log, netHours) {
+function qualifiesAfternoonHalfDay(log, grossHours) {
   const inSec = timeToSeconds(log?.office_in);
-  return inSec !== null && inSec <= T_HALF_B_START && netHours >= MIN_HALF_DAY_HOURS;
+  return inSec !== null && inSec <= T_HALF_B_START && grossHours >= MIN_HALF_DAY_HOURS;
 }
 
 export function buildMonthlyLateStats(logsByDate, daysInMonth, year, month) {
-  let graceLateCount = 0;
+  let lateLoginCount = 0;
   let withinGraceCount = 0;
   let beyondGraceCount = 0;
-  const exceededDates = [];
 
   for (let d = 1; d <= daysInMonth; d += 1) {
     const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
@@ -245,31 +264,24 @@ export function buildMonthlyLateStats(logsByDate, daysInMonth, year, month) {
     if (!log) continue;
 
     const lateInfo = evaluateLateLogin(log);
-    if (lateInfo.is_within_grace) {
-      graceLateCount += 1;
-      withinGraceCount += 1;
-      if (graceLateCount > MAX_PERMITTED_LATES) {
-        exceededDates.push(dateStr);
-      }
+    if (lateInfo.is_late_window) {
+      lateLoginCount += 1;
     }
-    if (lateInfo.is_late) {
-      if (lateInfo.is_beyond_grace) beyondGraceCount += 1;
-    }
+    if (lateInfo.is_within_grace) withinGraceCount += 1;
+    if (lateInfo.is_beyond_grace) beyondGraceCount += 1;
   }
 
-  const permittedLateCount = Math.min(graceLateCount, MAX_PERMITTED_LATES);
-
   return {
-    permitted_late_count: permittedLateCount,
-    late_login_count: permittedLateCount,
-    grace_late_count: permittedLateCount,
-    within_grace_late_count: permittedLateCount,
-    actual_grace_late_count: graceLateCount,
+    permitted_late_count: lateLoginCount,
+    late_login_count: lateLoginCount,
+    grace_late_count: lateLoginCount,
+    within_grace_late_count: withinGraceCount,
+    actual_grace_late_count: lateLoginCount,
     actual_within_grace_late_count: withinGraceCount,
     beyond_grace_late_count: beyondGraceCount,
-    exceeded_dates: exceededDates,
-    max_permitted: MAX_PERMITTED_LATES,
-    remaining: Math.max(0, MAX_PERMITTED_LATES - permittedLateCount),
+    exceeded_dates: [],
+    max_permitted: null,
+    remaining: null,
   };
 }
 
@@ -305,7 +317,7 @@ export function classifySunday(sundayDateStr, logsByDate = {}, holidaySet = new 
     const monInSec = timeToSeconds(monLog.office_in);
     const monLeave = String(monLog.leave_type || "").toLowerCase();
     monConditionMet =
-      (monInSec !== null && monInSec <= T_LATE_GRACE_LIMIT) ||
+      (monInSec !== null && monInSec <= T_ON_TIME_GRACE_END) ||
       monLeave.includes("earned") ||
       monLeave.includes("paid");
   }
@@ -334,8 +346,10 @@ export function classifyDayPolicy({
   const weekday = date.getDay();
   const flags = [];
   const netMs = log ? calculateNetWorkMillis(log) : 0;
+  const grossMs = log ? calculateGrossWorkMillis(log) : 0;
   const breakMs = log ? calculateBreakMillis(log) : 0;
   const netHours = netMs / 3_600_000;
+  const grossHours = grossMs / 3_600_000;
   const totalBreakMinutes = Math.round(breakMs / 60000);
 
   if (weekday === 0) {
@@ -378,7 +392,7 @@ export function classifyDayPolicy({
       `Approved ${isPaidLeave ? "paid" : "unpaid"} half-day leave (${log.half_day_slot})`,
       netHours,
       flags,
-      { total_break_minutes: totalBreakMinutes, half_day_slot: log.half_day_slot }
+      { total_break_minutes: totalBreakMinutes, gross_hours: Number(grossHours.toFixed(2)), half_day_slot: log.half_day_slot }
     );
   }
 
@@ -386,6 +400,7 @@ export function classifyDayPolicy({
     flags.push("paid_leave");
     return result("leave", "Approved paid or earned leave", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
+      gross_hours: Number(grossHours.toFixed(2)),
       half_day_slot: null,
     });
   }
@@ -407,7 +422,6 @@ export function classifyDayPolicy({
   }
 
   const lateInfo = evaluateLateLogin(log);
-  const lateExceeded = (monthlyLateStats.exceeded_dates || []).includes(dateStr);
   const halfDayDetails = getHalfDaySlotDetails(log);
   const halfDaySlot = halfDayDetails.slot;
   const halfDayMeta = {
@@ -418,6 +432,8 @@ export function classifyDayPolicy({
   };
   const outSec = timeToSeconds(log.office_out);
   const inSec = timeToSeconds(log.office_in);
+  const requiredLogoutSec =
+    inSec === null ? T_OFFICE_END : Math.max(inSec, T_OFFICE_START) + REQUIRED_FULL_DAY_SECONDS;
   const misuse =
     log.misuse_of_time === true ||
     Number(log.post_login_idle_minutes || 0) > POST_LOGIN_IDLE_THRESHOLD_MINUTES;
@@ -426,72 +442,73 @@ export function classifyDayPolicy({
     flags.push("misuse_after_login");
     return result("half_day", "Misuse of time after login - half day absent", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
+      gross_hours: Number(grossHours.toFixed(2)),
       ...halfDayMeta,
     });
   }
 
-  if (lateInfo.is_beyond_grace && inSec !== null && inSec > T_HALF_B_START) {
-    flags.push("late_after_10_15");
-    flags.push("after_2_30_pm_cutoff");
-    return result("absent", "Check-in after 2:30 PM cutoff; not eligible for half day", netHours, flags, {
+  if (totalBreakMinutes > MAX_BREAK_MINUTES) {
+    flags.push("break_exceeded");
+    return result("half_day", "Break limit exceeded - attendance marked as half day", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
-      half_day_slot: null,
-      half_day_effective_minutes: halfDayDetails.effective_minutes,
-      half_day_slot_checked: halfDayDetails.slot_checked,
-      half_day_invalid_reason: "Check-in after 2:30 PM cutoff",
-    });
-  }
-
-  if (netHours < MIN_HALF_DAY_HOURS) {
-    flags.push("less_than_4_net_hours");
-    return result("absent", "Less than 4 net working hours", netHours, flags, {
-      total_break_minutes: totalBreakMinutes,
+      gross_hours: Number(grossHours.toFixed(2)),
+      break_exceeded: true,
       ...halfDayMeta,
     });
   }
 
-  if (lateExceeded) {
-    flags.push("monthly_late_login_limit_exceeded");
-    return result("half_day", "Grace late login limit exceeded; strict full-day policy not met", netHours, flags, {
+  if (grossHours < MIN_HALF_DAY_HOURS) {
+    flags.push("less_than_4_gross_hours");
+    return result("absent", "Less than 4 hours total login-to-logout duration", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
-      half_day_slot: halfDaySlot === "INVALID" ? null : halfDaySlot,
-      half_day_effective_minutes: Math.round(netHours * 60),
-      half_day_slot_checked: halfDaySlot === "INVALID" ? null : halfDayDetails.slot_checked,
-      half_day_invalid_reason: halfDaySlot === "INVALID" ? halfDayDetails.invalid_reason || null : null,
-    });
-  }
-
-  if (lateInfo.is_beyond_grace) {
-    flags.push("late_after_10_15");
-    return result("half_day", "Login after 10:15 AM grace time; strict full-day policy not met", netHours, flags, {
-      total_break_minutes: totalBreakMinutes,
+      gross_hours: Number(grossHours.toFixed(2)),
       ...halfDayMeta,
     });
   }
 
-  if (outSec !== null && outSec < T_OFFICE_END) {
-    flags.push("logout_before_7_pm");
-    return result("half_day", "Logout before 7:00 PM; strict full-day policy not met", netHours, flags, {
+  if (inSec !== null && inSec >= T_HALF_DAY_LOGIN_START) {
+    flags.push("late_after_10_30");
+    flags.push("half_day_login_window");
+    return result("half_day", "Login at or after 10:30 AM is eligible for half day only", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
+      gross_hours: Number(grossHours.toFixed(2)),
       ...halfDayMeta,
     });
   }
 
-  if (lateInfo.is_within_grace) {
-    flags.push("within_grace_time");
+  if (outSec !== null && outSec < requiredLogoutSec) {
+    flags.push("logout_before_required_time");
+    const requiredLogoutHour = Math.floor(requiredLogoutSec / 3600);
+    const requiredLogoutMinute = Math.floor((requiredLogoutSec % 3600) / 60);
+    const requiredLogoutLabel = `${String(requiredLogoutHour).padStart(2, "0")}:${String(requiredLogoutMinute).padStart(2, "0")}`;
+    return result("half_day", `Logout before required 9-hour completion time (${requiredLogoutLabel}); strict full-day policy not met`, netHours, flags, {
+      total_break_minutes: totalBreakMinutes,
+      gross_hours: Number(grossHours.toFixed(2)),
+      ...halfDayMeta,
+    });
   }
 
-  if (netHours >= MIN_FULL_DAY_HOURS) {
+  if (lateInfo.is_on_time_grace) {
+    flags.push("within_on_time_grace");
+  }
+
+  if (lateInfo.is_late_window) {
+    flags.push("late_login_window");
+  }
+
+  if (grossHours >= MIN_FULL_DAY_HOURS) {
     flags.push("full_day_policy_satisfied");
-    return result("full_day", "8+ net working hours and logout at or after 7:00 PM", netHours, flags, {
+    return result("full_day", "9+ hours total login-to-logout duration completed from actual check-in time", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
+      gross_hours: Number(grossHours.toFixed(2)),
       half_day_slot: null,
     });
   }
 
-  flags.push("between_4_and_8_net_hours");
-  return result("half_day", "Between 4 and 8 net working hours", netHours, flags, {
+  flags.push("between_4_and_9_gross_hours");
+  return result("half_day", "Between 4 and 9 hours total login-to-logout duration", netHours, flags, {
     total_break_minutes: totalBreakMinutes,
+    gross_hours: Number(grossHours.toFixed(2)),
     ...halfDayMeta,
   });
 }
@@ -537,7 +554,7 @@ export function calculateMonthlySummary(
     else if (day.bucket === "holiday") holidayDays += 1;
     else if (day.bucket === "absent") absentDays += 1;
 
-    if (log && evaluateLateLogin(log).is_within_grace && !(monthlyLateStats.exceeded_dates || []).includes(dateStr)) {
+    if (log && evaluateLateLogin(log).is_late_window) {
       lateCount += 1;
     }
 
@@ -555,7 +572,7 @@ export function calculateMonthlySummary(
     leave_days: leaveDays,
     absent_days: absentDays,
     holiday_days: holidayDays,
-    late_count: Math.min(lateCount, MAX_PERMITTED_LATES),
+    late_count: lateCount,
     total_net_millis: totalNetMs,
     avg_net_millis: workDayCount > 0 ? Math.round(totalNetMs / workDayCount) : null,
     work_day_count: workDayCount,

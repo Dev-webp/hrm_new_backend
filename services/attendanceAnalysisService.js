@@ -12,11 +12,11 @@ const MAX_BREAK_MINS = 60;
 
 function isGraceLateRecord(record = {}) {
   const raw = record.checkIn || record.check_in_time;
-  if (!raw || raw === "--" || !record.checkOut || record.checkOut === "--") return false;
+  if (!raw || raw === "--") return false;
   const [h, m] = String(raw).slice(0, 5).split(":").map(Number);
   if (Number.isNaN(h) || Number.isNaN(m)) return false;
   const minutes = h * 60 + m;
-  return minutes > 10 * 60 && minutes <= 10 * 60 + 15;
+  return minutes >= 10 * 60 + 15;
 }
 
 function fmtTime(t) {
