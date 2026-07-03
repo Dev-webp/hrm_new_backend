@@ -1,11 +1,26 @@
--- Late-login count is independent from attendance status.
--- Check-ins from 10:15 AM through 10:29 AM count as late.
--- Check-ins at or after 10:30 AM are half-day eligible and do not count as late.
+-- Late-login window ends before the half-day login cutoff.
+-- 10:15:00 through 10:29:59 counts as late.
+-- 10:30:00 onward is half-day eligible and does not count as late.
 
 UPDATE policy_config
 SET config_value = '10:15:00',
     description = 'Late-login count starts at this time and ends before 10:30 AM'
-WHERE config_key = 'late_login_grace_time';
+WHERE config_key IN ('late_login_grace_time', 'grace_login_time');
+
+UPDATE attendance_records
+SET late_minutes = 0,
+    updated_at = CURRENT_TIMESTAMP
+WHERE check_in_time >= TIME '10:30:00'
+  AND COALESCE(late_minutes, 0) <> 0;
+
+UPDATE attendance_records
+SET late_minutes = GREATEST(
+      0,
+      EXTRACT(EPOCH FROM (check_in_time - TIME '10:15:00'))::int / 60
+    ),
+    updated_at = CURRENT_TIMESTAMP
+WHERE check_in_time >= TIME '10:15:00'
+  AND check_in_time < TIME '10:30:00';
 
 DROP MATERIALIZED VIEW IF EXISTS mv_monthly_attendance;
 

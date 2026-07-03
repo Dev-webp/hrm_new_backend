@@ -4,41 +4,14 @@ import { pool } from "../middleware/db.js";
 
 const router = express.Router();
 
-function normalizedAttendanceStatusSql(alias = "a") {
-  return `
-    CASE
-      WHEN ${alias}.status IS NULL THEN 'absent'
-      WHEN LOWER(REPLACE(REPLACE(TRIM(${alias}.status), ' ', '_'), '-', '_')) = 'present_working' THEN 'working'
-      WHEN LOWER(REPLACE(REPLACE(TRIM(${alias}.status), ' ', '_'), '-', '_')) = 'paid_leave' THEN 'leave'
-      ELSE LOWER(REPLACE(REPLACE(TRIM(${alias}.status), ' ', '_'), '-', '_'))
-    END
-  `;
-}
-
-function liveAttendanceStatusSql(alias = "a") {
-  const statusSql = normalizedAttendanceStatusSql(alias);
-  return `
-    CASE
-      WHEN ${alias}.check_in_time IS NOT NULL
-        AND ${alias}.check_out_time IS NULL
-        AND ${statusSql} NOT IN ('holiday', 'leave')
-      THEN CASE WHEN ${statusSql} = 'absent' THEN 'working' ELSE ${statusSql} END
-      ELSE ${statusSql}
-    END
-  `;
-}
-
 function livePresentSql(alias = "a") {
-  return `${liveAttendanceStatusSql(alias)} IN ('full_day','half_day','present','working','in_progress','leave')`;
+  return `${alias}.check_in_time IS NOT NULL`;
 }
 
 function liveAbsentSql(alias = "a") {
   return `(
     ${alias}.user_id IS NULL
-    OR (
-      ${liveAttendanceStatusSql(alias)} = 'absent'
-      AND NOT (${alias}.check_in_time IS NOT NULL AND ${alias}.check_out_time IS NULL)
-    )
+    OR ${alias}.check_in_time IS NULL
   )`;
 }
 
@@ -85,6 +58,7 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "OPE
           COUNT(*) FILTER (WHERE ${liveAbsentSql("a")}) AS absent,
           COUNT(*) FILTER (
             WHERE a.check_in_time >= TIME '10:15:00'
+              AND a.check_in_time < TIME '10:30:00'
           ) AS late,
           COUNT(u.id) AS total
         FROM users u

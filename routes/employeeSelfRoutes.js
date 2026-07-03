@@ -394,6 +394,7 @@ router.get("/employee/attendance-summary", verifyToken, async (req, res) => {
          COUNT(*) FILTER (WHERE status IN ('present','late')) AS present_days,
          COUNT(*) FILTER (
            WHERE check_in_time >= TIME '10:15:00'
+             AND check_in_time < TIME '10:30:00'
          ) AS late_days
        FROM attendance_records
        WHERE user_id = $1

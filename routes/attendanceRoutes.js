@@ -1400,6 +1400,7 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
 
         COUNT(u.id) FILTER (
           WHERE a.check_in_time >= TIME '10:15:00'
+            AND a.check_in_time < TIME '10:30:00'
         ) AS late,
 
         COUNT(u.id) FILTER (
@@ -1999,6 +2000,7 @@ router.get("/attendance/late-trend", verifyToken, async (req, res) => {
              FROM attendance_records a
              JOIN users u ON a.user_id=u.id
              WHERE a.check_in_time >= TIME '10:15:00'
+               AND a.check_in_time < TIME '10:30:00'
                AND a.date=ANY($1::date[])
                AND u.role != 'SUPER_ADMIN'`;
     const p = [dates]; let idx = 2;

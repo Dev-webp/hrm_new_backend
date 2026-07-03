@@ -24,10 +24,11 @@ describe("late minute calculation", () => {
     ["10:15:00", 0],
     ["10:16:00", 1],
     ["10:20:00", 5],
-    ["10:30:00", 15],
-    ["10:35:00", 20],
-    ["11:00:00", 45],
-    ["16:10:00", 355],
+    ["10:29:00", 14],
+    ["10:30:00", 0],
+    ["10:35:00", 0],
+    ["11:00:00", 0],
+    ["16:10:00", 0],
   ];
 
   for (const [checkInTime, expected] of cases) {
@@ -57,10 +58,10 @@ describe("late login detection", () => {
     assert.equal(r.is_beyond_grace, false);
   });
 
-  it("10:31 is late and beyond the full-day login window", () => {
+  it("10:31 is not late and is beyond the full-day login window", () => {
     const r = evaluateLateLogin({ office_in: "10:31:00" });
-    assert.equal(r.is_late, true);
-    assert.equal(r.is_late_window, true);
+    assert.equal(r.is_late, false);
+    assert.equal(r.is_late_window, false);
     assert.equal(r.is_beyond_grace, true);
   });
 });
@@ -436,7 +437,7 @@ describe("monthly late count", () => {
     assert.deepEqual(stats.exceeded_dates, []);
   });
 
-  it("counts every login at or after 10:15 as late", () => {
+  it("counts only 10:15 through 10:29 as late", () => {
     const logs = {
       "2026-05-01": { office_in: "10:01:00" },
       "2026-05-02": { office_in: "10:20:00" },
@@ -447,7 +448,7 @@ describe("monthly late count", () => {
       "2026-05-07": { office_in: "10:29:00" },
     };
     const stats = buildMonthlyLateStats(logs, 31, 2026, 5);
-    assert.equal(stats.late_login_count, 5);
+    assert.equal(stats.late_login_count, 3);
     assert.equal(stats.within_grace_late_count, 3);
     assert.equal(stats.beyond_grace_late_count, 2);
   });

@@ -241,7 +241,9 @@ function minutesFromTime(value) {
 
 function isGraceLateLogin(rec = {}) {
   const checkInMinutes = minutesFromTime(rec.check_in_time);
-  return checkInMinutes !== null && checkInMinutes >= LATE_LOGIN_START_MINUTES;
+  return checkInMinutes !== null
+    && checkInMinutes >= LATE_LOGIN_START_MINUTES
+    && checkInMinutes < HALF_DAY_LOGIN_START_MINUTES;
 }
 
 function tallyAttendance(workingDays, attMap, approvedLeaveSet) {

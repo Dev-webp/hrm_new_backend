@@ -18,7 +18,9 @@ export const POST_LOGIN_IDLE_THRESHOLD_MINUTES = 15;
 export function calculateLateMinutes(checkInTime) {
   if (!checkInTime) return 0;
   const [h, m] = String(checkInTime).split(":").map(Number);
-  return Math.max(0, h * 60 + m - (10 * 60 + 15));
+  const minutes = h * 60 + m;
+  if (minutes < 10 * 60 + 15 || minutes >= 10 * 60 + 30) return 0;
+  return minutes - (10 * 60 + 15);
 }
 
 const MIN_HALF_DAY_HOURS = 4;
@@ -153,10 +155,9 @@ export function evaluateLateLogin(log) {
     return result;
   }
 
-  result.is_late = true;
-  result.is_late_window = true;
-
   if (inSec < T_HALF_DAY_LOGIN_START) {
+    result.is_late = true;
+    result.is_late_window = true;
     result.is_within_grace = true;
   } else {
     result.is_beyond_grace = true;

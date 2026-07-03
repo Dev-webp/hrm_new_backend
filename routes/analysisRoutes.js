@@ -173,6 +173,7 @@ router.get(
 
     COUNT(*) FILTER (
       WHERE a.check_in_time >= TIME '10:15:00'
+        AND a.check_in_time < TIME '10:30:00'
     ) AS late_days,
 
     COALESCE(
