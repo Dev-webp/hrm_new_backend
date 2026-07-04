@@ -444,22 +444,44 @@ router.get("/employee/my-leaves", verifyToken, async (req, res) => {
 // ──────────────────────────────────────────────
 router.get("/employee/my-payslip", verifyToken, async (req, res) => {
   try {
-    const userId = parseInt(req.query.userId || req.user.id);
-    if (["EMPLOYEE", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role) && userId !== req.user.id) {
-      return res.status(403).json({ message: "Access denied" });
-    }
+    const userId = Number(req.user.id);
     const { month } = req.query;
     if (!month) return res.status(400).json({ message: "month required" });
+    const requestedMonth = String(month).slice(0, 7) + "-01";
+    const requestedYear = Number(requestedMonth.slice(0, 4));
 
     const result = await pool.query(
-      `SELECT p.*, u.full_name, u.department, u.branch, u.employee_code
+      `SELECT
+         p.*,
+         p.user_id AS employee_id,
+         u.employee_code,
+         EXTRACT(YEAR FROM p.month)::int AS year,
+         p.payment_status AS status,
+         p.created_at AS generated_at,
+         CONCAT('/api/payroll/payslip/', p.id, '/download') AS pdf_url,
+         u.full_name, u.department, u.branch, u.email
        FROM payslip_records p
        JOIN users u ON p.user_id = u.id
-       WHERE p.user_id = $1 AND p.month = $2::date`,
-      [userId, month]
+       WHERE p.user_id = $1
+         AND p.month = $2::date
+         AND EXTRACT(YEAR FROM p.month)::int = $3
+       ORDER BY p.created_at DESC
+       LIMIT 1`,
+      [userId, requestedMonth, requestedYear]
     );
+
+    console.log("[EmployeePayslip] GET /employee/my-payslip", {
+      loggedInUserId: userId,
+      requestedMonth,
+      requestedYear,
+      sqlResultCount: result.rows.length,
+      returnedPayslipCount: result.rows.length ? 1 : 0,
+      pdfPath: result.rows[0]?.pdf_url || null,
+    });
+
     res.json(result.rows[0] || null);
   } catch (err) {
+    console.error("[EmployeePayslip] GET /employee/my-payslip error:", err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -470,20 +492,36 @@ router.get("/employee/my-payslip", verifyToken, async (req, res) => {
 // ──────────────────────────────────────────────
 router.get("/employee/my-payslips", verifyToken, async (req, res) => {
   try {
-    const userId = parseInt(req.query.userId || req.user.id);
-    if (["EMPLOYEE", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role) && userId !== req.user.id) {
-      return res.status(403).json({ message: "Access denied" });
-    }
+    const userId = Number(req.user.id);
     const result = await pool.query(
-      `SELECT p.*, u.full_name, u.department, u.branch, u.employee_code
+      `SELECT
+         p.*,
+         p.user_id AS employee_id,
+         u.employee_code,
+         EXTRACT(YEAR FROM p.month)::int AS year,
+         p.payment_status AS status,
+         p.created_at AS generated_at,
+         CONCAT('/api/payroll/payslip/', p.id, '/download') AS pdf_url,
+         u.full_name, u.department, u.branch, u.email
        FROM payslip_records p
        JOIN users u ON p.user_id = u.id
        WHERE p.user_id = $1
-       ORDER BY p.month DESC`,
+       ORDER BY p.month DESC, p.created_at DESC`,
       [userId]
     );
+
+    console.log("[EmployeePayslip] GET /employee/my-payslips", {
+      loggedInUserId: userId,
+      requestedMonth: req.query.month || null,
+      requestedYear: req.query.year || null,
+      sqlResultCount: result.rows.length,
+      returnedPayslipCount: result.rows.length,
+      pdfPath: result.rows[0]?.pdf_url || null,
+    });
+
     res.json(result.rows);
   } catch (err) {
+    console.error("[EmployeePayslip] GET /employee/my-payslips error:", err);
     res.status(500).json({ message: err.message });
   }
 });
