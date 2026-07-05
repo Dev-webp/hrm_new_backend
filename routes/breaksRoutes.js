@@ -15,6 +15,19 @@ const BREAK_TYPES = ["break1", "lunch", "break2", "break3"];
 const MAX_DAILY_BREAK_SESSIONS = 6;
 const MAX_BREAK_MINUTES = 60;
 
+function hasOwn(object, key) {
+    return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function getRequestedBreakTypes(breaks = {}) {
+    const requested = BREAK_TYPES.filter((breakType) =>
+        breakType === "break3"
+            ? hasOwn(breaks, "break3") || hasOwn(breaks, "break3Sessions")
+            : hasOwn(breaks, breakType)
+    );
+    return [...new Set(requested)];
+}
+
 function emptyGroupedBreaks() {
     return {
         break1: {},
@@ -429,9 +442,13 @@ router.put(
             // UPSERT BREAKS
             // ==========================================
 
-            for (const breakType of BREAK_TYPES) {
+            const requestedBreakTypes = getRequestedBreakTypes(breaks);
+            const break3Sessions = requestedBreakTypes.includes("break3")
+                ? normalizeBreak3Sessions(breaks)
+                : [];
 
-                const break3Sessions = normalizeBreak3Sessions(breaks);
+            for (const breakType of requestedBreakTypes) {
+
                 const breakData = breakType === "break3"
                     ? buildBreak3Aggregate(break3Sessions)
                     : breaks[breakType] || {};

@@ -439,67 +439,38 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
   const tally = tallyAttendance(workingDays, attMap, approvedLeaveSet);
 
   // ✅ Pass BOTH absentDays and formalLeaveCount to the fixed function
-const approvedLeaveSplit = computeApprovedLeaveSplit(data.leaves);
-
-const eligible =
-  monthsBetween(
+  const approvedLeaveSplit = computeApprovedLeaveSplit(data.leaves);
+  const leaveCalc = computePaidLeave(
     employee.joining_date,
-    monthStart
-  ) >= PAID_LEAVE_ELIGIBILITY_MONTHS;
+    monthStart,
+    Number(tally.absentDays || 0),
+    Number(tally.formalLeaveCount || 0)
+  );
+  leaveCalc.penaltyDays = approvedLeaveSplit.penaltyDays;
+  leaveCalc.paidLeaveUsed = round2(leaveCalc.paidLeaveUsed);
+  leaveCalc.unpaidLeaveDays = round2(leaveCalc.unpaidLeaveDays);
+  leaveCalc.totalAbsences = round2(leaveCalc.totalAbsences);
+  leaveCalc.totalAbsenceDays = leaveCalc.totalAbsences;
 
-const leaveCalc = {
-  monthsCompleted: monthsBetween(employee.joining_date, monthStart),
+  const payableDays = round2(Math.max(
+    0,
+    Math.min(
+      totalDaysInMonth,
+      Number(totalDaysInMonth || 0) -
+        Number(leaveCalc.unpaidLeaveDays || 0) -
+        Number(tally.halfDays || 0) * 0.5
+    )
+  ));
 
-  eligible,
-
-  allowedPaidLeave: eligible ? PAID_LEAVE_PER_MONTH : 0,
-
-  paidLeaveUsed: approvedLeaveSplit.paidLeaveUsed,
-
-  unpaidLeaveDays:
-    tally.absentDays +
-    approvedLeaveSplit.unpaidLeaveDays,
-
-  penaltyDays:
-    approvedLeaveSplit.penaltyDays,
-
-  totalAbsences:
-    tally.absentDays +
-    approvedLeaveSplit.unpaidLeaveDays,
-};
-
-const payableDays = Math.min(
-  totalDaysInMonth,
-  Number(tally.fullDays || 0) +
-    Number(tally.halfDays || 0) * 0.5 +
-    Number(sundayDates.length || 0) +
-    Number(holidayDates.length || 0) +
-    Number(leaveCalc.paidLeaveUsed || 0)
-);
-
-const unpaidLeaveDays = Math.max(
-  0,
-  Number(workingDays.length || 0) -
-    Number(tally.fullDays || 0) -
-    Number(tally.halfDays || 0) * 0.5 -
-    Number(leaveCalc.paidLeaveUsed || 0)
-);
-leaveCalc.unpaidLeaveDays = Number(approvedLeaveSplit.unpaidLeaveDays || 0);
-
-leaveCalc.totalAbsences =
-  Number(approvedLeaveSplit.paidLeaveUsed || 0) +
-  Number(approvedLeaveSplit.unpaidLeaveDays || 0);
-
-
-const salary = computeSalary({
-  monthlySalary,
-  totalDaysInMonth,
-  payableDays,
-  penaltyDays: leaveCalc.penaltyDays || 0,
-  incentives,
-  manualDeductions,
-  tax,
-});
+  const salary = computeSalary({
+    monthlySalary,
+    totalDaysInMonth,
+    payableDays,
+    penaltyDays: leaveCalc.penaltyDays || 0,
+    incentives,
+    manualDeductions,
+    tax,
+  });
 
 
   return {
@@ -533,19 +504,20 @@ const salary = computeSalary({
       lateDates          : tally.lateDates,
       halfDayDates       : tally.halfDayDates,
     },
-   leave: {
-  monthsCompleted: leaveCalc.monthsCompleted,
-  eligible: leaveCalc.eligible,
-  allowedPaidLeave: leaveCalc.allowedPaidLeave,
-  paidLeaveUsed: leaveCalc.paidLeaveUsed,
-  unpaidLeaveDays: leaveCalc.unpaidLeaveDays,
-  penaltyDays: leaveCalc.penaltyDays || 0,
-  totalAbsences: leaveCalc.totalAbsences,
-  remainingPaidLeave: Math.max(
-    0,
-    leaveCalc.allowedPaidLeave - leaveCalc.paidLeaveUsed
-  ),
-},
+    leave: {
+      monthsCompleted: leaveCalc.monthsCompleted,
+      eligible: leaveCalc.eligible,
+      allowedPaidLeave: leaveCalc.allowedPaidLeave,
+      paidLeaveUsed: leaveCalc.paidLeaveUsed,
+      unpaidLeaveDays: leaveCalc.unpaidLeaveDays,
+      penaltyDays: leaveCalc.penaltyDays || 0,
+      totalAbsences: leaveCalc.totalAbsences,
+      totalAbsenceDays: leaveCalc.totalAbsenceDays,
+      remainingPaidLeave: Math.max(
+        0,
+        leaveCalc.allowedPaidLeave - leaveCalc.paidLeaveUsed
+      ),
+    },
 
    salary: {
   monthlyCTC: monthlySalary,
@@ -599,8 +571,56 @@ async function batchCalculatePayroll(pool, year, month, filters = {}) {
 async function persistPayslip(pool, calc, overrides = {}) {
   const { employee, period, attendance, leave, salary, calendar } = calc;
 
-const breakdown = JSON.stringify({
-  totalDaysInMonth  : calendar.totalDaysInMonth,
+  const existingRes = await pool.query(
+    `SELECT incentives, deductions, tax, net_pay
+     FROM payslip_records
+     WHERE user_id = $1 AND month = $2`,
+    [employee.id, period.monthStart]
+  );
+  const existingPayslip = existingRes.rows[0] || null;
+  const forceManualUpdate = Boolean(
+    overrides.forceManualUpdate ||
+      overrides.forceManualAdjustments ||
+      overrides.forceRegeneration
+  );
+  const hasNonZeroOverride = key =>
+    Object.prototype.hasOwnProperty.call(overrides, key) &&
+    Number(overrides[key] || 0) !== 0;
+  const shouldUseOverride = key =>
+    forceManualUpdate || hasNonZeroOverride(key);
+
+  const leaveDeduction = round2(Number(salary.absenceDeduction || 0));
+  const penaltyDeduction = round2(Number(salary.penaltyDeduction || 0));
+  const calculatedDeductions = round2(Number(salary.totalDeductions || 0));
+  const effectiveIncentives = round2(
+    existingPayslip && !shouldUseOverride("incentives")
+      ? Number(existingPayslip.incentives || 0)
+      : Number(salary.incentives || 0)
+  );
+  const effectiveDeductions = round2(
+    existingPayslip && !shouldUseOverride("deductions")
+      ? Number(existingPayslip.deductions || 0)
+      : calculatedDeductions
+  );
+  const effectiveTax = round2(
+    existingPayslip && !shouldUseOverride("tax")
+      ? Number(existingPayslip.tax || 0)
+      : Number(salary.tax || 0)
+  );
+  const manualOverrideApplied =
+    forceManualUpdate ||
+    hasNonZeroOverride("incentives") ||
+    hasNonZeroOverride("deductions") ||
+    hasNonZeroOverride("tax");
+  const effectiveNetPay = round2(
+    existingPayslip && !manualOverrideApplied
+      ? Number(existingPayslip.net_pay || 0)
+      : Number(salary.earnedSalary || 0) + effectiveIncentives - effectiveDeductions
+  );
+
+  const breakdown = JSON.stringify({
+    autoCalculated: {
+      totalDaysInMonth  : calendar.totalDaysInMonth,
   sundayCount       : calendar.sundayCount,
   holidayCount      : calendar.holidayCount,
   workingDaysCount  : calendar.workingDaysCount,
@@ -616,17 +636,44 @@ const breakdown = JSON.stringify({
   allowedPaidLeave  : leave.allowedPaidLeave,
   paidLeaveUsed     : leave.paidLeaveUsed,           // ← was missing in some paths
   unpaidLeaveDays   : leave.unpaidLeaveDays,         // ← was missing in some paths
-  totalAbsences     : leave.totalAbsences,
-  dailyRate         : salary.dailyRate,
+      totalAbsences     : leave.totalAbsences,
+      totalAbsenceDays  : leave.totalAbsenceDays || leave.totalAbsences,
+      dailyRate         : salary.dailyRate,
 
+      earnedSalary      : salary.earnedSalary,
+      grossPay          : salary.grossPay,
+    },
+  manualAdjustments: {
+    incentives       : effectiveIncentives,
+    deductions       : effectiveDeductions,
+    tax              : effectiveTax,
+    netPay           : effectiveNetPay,
+    preservedExisting: Boolean(existingPayslip && !manualOverrideApplied),
+  },
+  totalDaysInMonth  : calendar.totalDaysInMonth,
+  sundayCount       : calendar.sundayCount,
+  holidayCount      : calendar.holidayCount,
+  workingDaysCount  : calendar.workingDaysCount,
+  fullDays          : attendance.fullDays,
+  halfDays          : attendance.halfDays,
+  absentDays        : attendance.absentDays,
+  formalLeaveCount  : attendance.formalLeaveCount,
+  approvedLeaveCount: attendance.formalLeaveCount,
+  lateLogins        : attendance.lateLogins,
+  lateLoginHalfDays : attendance.lateLoginHalfDays,
+  monthsCompleted   : leave.monthsCompleted,
+  eligible          : leave.eligible,
+  allowedPaidLeave  : leave.allowedPaidLeave,
+  paidLeaveUsed     : leave.paidLeaveUsed,
+  unpaidLeaveDays   : leave.unpaidLeaveDays,
+  totalAbsences     : leave.totalAbsences,
+  totalAbsenceDays  : leave.totalAbsenceDays || leave.totalAbsences,
+  dailyRate         : salary.dailyRate,
   earnedSalary      : salary.earnedSalary,
   grossPay          : salary.grossPay,
 });
 
 
-const leaveDeduction = round2(Number(salary.absenceDeduction || 0));
-const penaltyDeduction = round2(Number(salary.penaltyDeduction || 0));
-const totalDeductions = round2(Number(salary.totalDeductions || 0));
 const result = await pool.query(
   `INSERT INTO payslip_records
      (user_id, month, basic_salary, earned_basic,
@@ -655,10 +702,10 @@ const result = await pool.query(
   period.monthStart,
   salary.monthlyCTC,
   salary.earnedSalary,
-  salary.incentives,
-  totalDeductions,
-  salary.tax,
-  salary.netPay,
+  effectiveIncentives,
+  effectiveDeductions,
+  effectiveTax,
+  effectiveNetPay,
   calendar.workingDaysCount,
   round2(
     attendance.fullDays +

@@ -36,6 +36,7 @@ import {
   parseDateStr,
   calculateLateMinutes,
   timeToSeconds,
+  OFFICE_START,
 } from "../utils/attendancePolicy.js";
 
 const router = express.Router();
@@ -99,6 +100,7 @@ async function fetchLogsByDate(userId, startDate, endDate) {
        b2s.end_time                  AS break_out_2,
        ls.start_time                 AS lunch_in,
        ls.end_time                   AS lunch_out,
+       a.total_break_minutes,
        a.extra_break_ins,
        a.extra_break_outs,
        a.leave_type,
@@ -214,6 +216,21 @@ function shouldLogPolicyDebug(dateStr, fullName) {
     "ramesh kumar",
     "priyanka vaddi",
   ].includes(String(fullName || "").toLowerCase());
+}
+
+function getStoredBreakMillis(log) {
+  const storedMinutes = Number(log?.total_break_minutes);
+  return Number.isFinite(storedMinutes) && storedMinutes > 0
+    ? storedMinutes * 60_000
+    : null;
+}
+
+function calculateGrossMillisFromLog(log) {
+  const inSec = timeToSeconds(log?.office_in);
+  const outSec = timeToSeconds(log?.office_out);
+  const officeStartSec = timeToSeconds(OFFICE_START);
+  if (inSec === null || outSec === null || officeStartSec === null) return 0;
+  return Math.max(0, (outSec - Math.max(inSec, officeStartSec)) * 1000);
 }
 
 function buildLateLoginPolicyMeta(log, monthlyLateStats = {}, dateStr) {
@@ -338,18 +355,26 @@ function normalizeManualStatusOverride(status) {
 }
 
 async function getLatestManualStatusOverride(userId, dateStr) {
-  const result = await pool.query(
-    `SELECT ah.snapshot_metadata #>> '{requestedValues,status}' AS requested_status
-     FROM attendance_history ah
-     JOIN users u ON u.email = ah.employee_email
-     WHERE u.id = $1
-       AND ah.date = $2::date
-     ORDER BY ah.edited_at DESC
-     LIMIT 1`,
-    [userId, dateStr]
-  );
+  try {
+    const result = await pool.query(
+      `SELECT ah.snapshot_metadata #>> '{requestedValues,status}' AS requested_status
+       FROM attendance_history ah
+       JOIN users u ON u.email = ah.employee_email
+       WHERE u.id = $1
+         AND ah.date = $2::date
+       ORDER BY ah.edited_at DESC
+       LIMIT 1`,
+      [userId, dateStr]
+    );
 
-  return normalizeManualStatusOverride(result.rows[0]?.requested_status);
+    return normalizeManualStatusOverride(result.rows[0]?.requested_status);
+  } catch (err) {
+    console.warn(
+      "Manual attendance override lookup skipped during recalculation:",
+      err.message
+    );
+    return null;
+  }
 }
 
 /**
@@ -390,8 +415,11 @@ async function recalcAttendanceForUserDate(userId, dateStr) {
     logsByDate: logsByDateExtended,
   });
 
-  const netMs    = log ? calculateNetWorkMillis(log) : 0;
-  const breakMs  = log ? calculateBreakMillis(log) : 0;
+  const storedBreakMs = getStoredBreakMillis(log);
+  const calculatedBreakMs = log ? calculateBreakMillis(log) : 0;
+  const breakMs = storedBreakMs ?? calculatedBreakMs;
+  const grossMs = log ? calculateGrossMillisFromLog(log) : 0;
+  const netMs = Math.max(0, grossMs - breakMs);
   const netHours = netMs / 3_600_000;
   const totalBreakMinutes = Math.round(breakMs / 60000);
   const lateMinutes = calculateLateMinutes(log?.office_in);

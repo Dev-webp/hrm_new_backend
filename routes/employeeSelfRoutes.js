@@ -9,6 +9,19 @@ const STANDARD_BREAK_TYPES = ["break1", "lunch", "break2", "break3"];
 const MAX_DAILY_BREAK_SESSIONS = 6;
 const MAX_BREAK_MINUTES = 60;
 
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function getRequestedBreakTypes(breaks = {}) {
+  const requested = STANDARD_BREAK_TYPES.filter((breakType) =>
+    breakType === "break3"
+      ? hasOwn(breaks, "break3") || hasOwn(breaks, "break3Sessions")
+      : hasOwn(breaks, breakType)
+  );
+  return [...new Set(requested)];
+}
+
 function emptyBreakGroup() {
   return {
     break1: {},
@@ -129,21 +142,7 @@ async function applyBreakAttendancePolicy(userId, date) {
 }
 
 // ──────────────────────────────────────────────
-// ATTENDANCE: today's record (for dashboard)
 // ──────────────────────────────────────────────
-router.get("/attendance/self/today", verifyToken, async (req, res) => {
-  try {
-    const today = new Date().toISOString().slice(0, 10);
-    const result = await pool.query(
-      `SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2`,
-      [req.user.id, today]
-    );
-    res.json(result.rows[0] || null);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
 // ──────────────────────────────────────────────
 // ATTENDANCE: monthly history (for employeeattendance.html)
 // GET /api/employee/attendance-history?userId=X&month=YYYY-MM-DD
@@ -270,6 +269,8 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
 
   } catch(err) {
 
+    console.error("POST /employee/check-in error:", err);
+
     res.status(500).json({
       message: err.message
     });
@@ -342,6 +343,8 @@ router.post("/employee/check-out", verifyToken, async (req, res) => {
 
   } catch(err) {
 
+    console.error("POST /employee/check-out error:", err);
+
     res.status(500).json({
       message: err.message
     });
@@ -350,34 +353,7 @@ router.post("/employee/check-out", verifyToken, async (req, res) => {
 
 
 // ──────────────────────────────────────────────
-// ATTENDANCE: self history with start/end range
-// GET /api/attendance/self/history?start=YYYY-MM-DD&end=YYYY-MM-DD
-// (used by manager's own history modal too)
 // ──────────────────────────────────────────────
-router.get("/attendance/self/history", verifyToken, async (req, res) => {
-  try {
-    const { start, end } = req.query;
-    if (!start || !end) return res.status(400).json({ message: "start and end required" });
-
-    const result = await pool.query(
-      `SELECT
-         date::text,
-         check_in_time,
-         check_out_time,
-         status,
-         late_minutes
-       FROM attendance_records
-       WHERE user_id = $1
-         AND date BETWEEN $2 AND $3
-       ORDER BY date DESC`,
-      [req.user.id, start, end]
-    );
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
 // ──────────────────────────────────────────────
 // ATTENDANCE: monthly summary/rate
 // GET /api/employee/attendance-summary?month=YYYY-MM-DD&userId=X
@@ -651,10 +627,13 @@ router.put("/employee/my-breaks", verifyToken, async (req, res) => {
     if (policyError) {
       return res.status(400).json({ message: policyError });
     }
-    const break3Sessions = normalizeBreak3Sessions(breaks);
+    const requestedBreakTypes = getRequestedBreakTypes(breaks);
+    const break3Sessions = requestedBreakTypes.includes("break3")
+      ? normalizeBreak3Sessions(breaks)
+      : [];
     const break3Aggregate = buildBreak3Aggregate(break3Sessions);
 
-    for (const breakType of STANDARD_BREAK_TYPES) {
+    for (const breakType of requestedBreakTypes) {
       const b = breakType === "break3" ? break3Aggregate : breaks[breakType] || {};
       const start = b.start || null;
       const end = b.end || null;
@@ -682,6 +661,13 @@ router.put("/employee/my-breaks", verifyToken, async (req, res) => {
         ]
       );
     }
+
+    try {
+      await recalcAttendanceForUserDate(req.user.id, date);
+    } catch (recalcErr) {
+      console.warn("Employee break recalc attendance warning:", recalcErr.message);
+    }
+
     const breakPolicy = await applyBreakAttendancePolicy(req.user.id, date);
     res.json({
       message: breakPolicy.warning || "Breaks saved",
