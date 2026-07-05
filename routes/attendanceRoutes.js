@@ -321,6 +321,37 @@ async function classifyAttendanceForResponse(user, dateStr, att, holidaySet) {
   };
 }
 
+const MANUAL_STATUS_VALUES = new Set([
+  "full_day",
+  "half_day",
+  "absent",
+  "leave",
+  "holiday",
+  "present",
+  "late",
+]);
+
+function normalizeManualStatusOverride(status) {
+  const value = String(status || "").trim().toLowerCase();
+  if (!value || value === "auto" || value === "auto_calculate") return null;
+  return MANUAL_STATUS_VALUES.has(value) ? value : null;
+}
+
+async function getLatestManualStatusOverride(userId, dateStr) {
+  const result = await pool.query(
+    `SELECT ah.snapshot_metadata #>> '{requestedValues,status}' AS requested_status
+     FROM attendance_history ah
+     JOIN users u ON u.email = ah.employee_email
+     WHERE u.id = $1
+       AND ah.date = $2::date
+     ORDER BY ah.edited_at DESC
+     LIMIT 1`,
+    [userId, dateStr]
+  );
+
+  return normalizeManualStatusOverride(result.rows[0]?.requested_status);
+}
+
 /**
  * Re-classify and persist a single day using the policy engine.
  * Called after check-in, check-out, or break edits.
@@ -373,9 +404,10 @@ async function recalcAttendanceForUserDate(userId, dateStr) {
     holiday: "holiday",
     absent: "absent",
   };
-  const legacyStatus = statusMap[result.bucket] || "absent";
+  const manualStatusOverride = await getLatestManualStatusOverride(userId, dateStr);
+  const legacyStatus = manualStatusOverride || statusMap[result.bucket] || "absent";
   const halfDaySlot =
-    result.bucket === "half_day"
+    legacyStatus === "half_day"
       ? result.half_day_slot || "INVALID"
       : null;
 

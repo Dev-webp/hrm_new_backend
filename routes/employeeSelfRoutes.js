@@ -2,6 +2,7 @@ import express from "express";
 import { pool } from "../middleware/db.js";
 import { verifyToken } from "../middleware/auth.js";
 import { calculateLateMinutes, evaluateLateLogin } from "../utils/attendancePolicy.js";
+import { recalcAttendanceForUserDate } from "./attendanceRoutes.js";
 
 const router = express.Router();
 const STANDARD_BREAK_TYPES = ["break1", "lunch", "break2", "break3"];
@@ -315,15 +316,26 @@ router.post("/employee/check-out", verifyToken, async (req, res) => {
       });
     }
 
-    const result = await pool.query(
+    await pool.query(
       `
       UPDATE attendance_records
       SET check_out_time = $1
       WHERE user_id = $2
       AND date = $3
-      RETURNING *
       `,
       [currentTime, userId, date]
+    );
+
+    await recalcAttendanceForUserDate(userId, date);
+
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM attendance_records
+      WHERE user_id = $1
+      AND date = $2
+      `,
+      [userId, date]
     );
 
     res.json(result.rows[0]);
