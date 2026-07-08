@@ -127,7 +127,9 @@ function calculateDuration(start12, end12) {
     const start = new Date(`1970-01-01T${start24}`);
     const end = new Date(`1970-01-01T${end24}`);
 
-    return Math.max(0, (end - start) / 60000);
+    const minutes = (end - start) / 60000;
+    if (minutes < 0) throw new Error("Break end time cannot be before start time.");
+    return minutes;
 }
 
 function validateBreakPolicy(breaks = {}) {
@@ -135,19 +137,36 @@ function validateBreakPolicy(breaks = {}) {
     let activeCount = 0;
     let totalMinutes = 0;
     let totalSessions = 0;
+    const completedWindows = [];
 
     for (const breakType of ["break1", "lunch", "break2"]) {
         const b = breaks[breakType] || {};
         if (!b?.start && !b?.end) continue;
+        if (!b.start && b.end) return `${breakType} cannot end before it starts.`;
         totalSessions++;
         if (b.start && !b.end) activeCount++;
-        if (b.start && b.end) totalMinutes += calculateDuration(b.start, b.end);
+        if (b.start && b.end) {
+            try {
+                totalMinutes += calculateDuration(b.start, b.end);
+            } catch (err) {
+                return err.message;
+            }
+            completedWindows.push({ breakType, start: convertTo24Hour(b.start), end: convertTo24Hour(b.end) });
+        }
     }
 
     for (const session of break3Sessions) {
+        if (!session.start && session.end) return "Break3 cannot end before it starts.";
         totalSessions++;
         if (session.start && !session.end) activeCount++;
-        if (session.start && session.end) totalMinutes += calculateDuration(session.start, session.end);
+        if (session.start && session.end) {
+            try {
+                totalMinutes += calculateDuration(session.start, session.end);
+            } catch (err) {
+                return err.message;
+            }
+            completedWindows.push({ breakType: "break3", start: convertTo24Hour(session.start), end: convertTo24Hour(session.end) });
+        }
     }
 
     if (totalSessions > MAX_DAILY_BREAK_SESSIONS) {
@@ -156,12 +175,24 @@ function validateBreakPolicy(breaks = {}) {
     if (activeCount > 1) {
         return "End the current break before starting another break.";
     }
+    completedWindows.sort((a, b) => a.start.localeCompare(b.start));
+    for (let i = 1; i < completedWindows.length; i++) {
+        if (completedWindows[i].start < completedWindows[i - 1].end) {
+            return "Break sessions cannot overlap.";
+        }
+    }
     return "";
 }
 
 async function applyBreakAttendancePolicy(userId, date) {
     const totalResult = await pool.query(
-        `SELECT COALESCE(SUM(COALESCE(duration_minutes, 0)), 0)::int AS total_break_minutes
+        `SELECT COALESCE(SUM(
+            COALESCE(
+              duration_minutes,
+              GREATEST(EXTRACT(EPOCH FROM (end_time::time - start_time::time)) / 60, 0)::int,
+              0
+            )
+          ), 0)::int AS total_break_minutes
          FROM employee_breaks
          WHERE user_id = $1 AND date = $2::date`,
         [userId, date]
@@ -172,18 +203,10 @@ async function applyBreakAttendancePolicy(userId, date) {
     const attendanceResult = await pool.query(
         `UPDATE attendance_records
          SET total_break_minutes = $1,
-             status = CASE
-               WHEN $2::boolean AND COALESCE(status, '') NOT IN ('leave', 'holiday', 'sunday') THEN 'half_day'
-               ELSE status
-             END,
-             half_day_slot = CASE
-               WHEN $2::boolean AND COALESCE(status, '') NOT IN ('leave', 'holiday', 'sunday') THEN COALESCE(half_day_slot, 'INVALID')
-               ELSE half_day_slot
-             END,
              updated_at = CURRENT_TIMESTAMP
-         WHERE user_id = $3 AND date = $4::date
+         WHERE user_id = $2 AND date = $3::date
          RETURNING status, total_break_minutes, half_day_slot`,
-        [totalBreakMinutes, breakExceeded, userId, date]
+        [totalBreakMinutes, userId, date]
     );
 
     return {

@@ -1,7 +1,7 @@
 // backend/routes/auditRoutes.js
 import express from 'express';
 import { pool } from "../middleware/db.js";
-import { verifyToken, authorizeRoles } from "../middleware/auth.js";
+import { canAccessAuditLog, canCreateClientAuditLog, verifyToken, authorizeRoles } from "../middleware/auth.js";
 import { createAuditLog, getClientIp, getDeviceInfo } from '../utils/activityLogger.js';
 
 const router = express.Router();
@@ -61,7 +61,9 @@ router.get('/', verifyToken, async (req, res) => {
       branch: branchFilter, startDate, endDate, search,
     } = req.query;
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const offset = (pageNum - 1) * limitNum;
     const params = [];
     const conditions = [];
     let idx = 1;
@@ -113,15 +115,15 @@ router.get('/', verifyToken, async (req, res) => {
       `SELECT * FROM audit_logs ${where}
        ORDER BY created_at DESC
        LIMIT $${idx} OFFSET $${idx + 1}`,
-      [...params, parseInt(limit), offset]
+      [...params, limitNum, offset]
     );
 
     res.json({
       data: dataResult.rows,
       total,
-      page: parseInt(page),
-      limit: parseInt(limit),
-      totalPages: Math.ceil(total / parseInt(limit)),
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum),
     });
   } catch (err) {
     console.error('[AuditRoutes] GET /', err);
@@ -135,7 +137,7 @@ router.get('/:id', verifyToken, async (req, res) => {
     const result = await pool.query('SELECT * FROM audit_logs WHERE id = $1', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ message: 'Log not found' });
     const log = result.rows[0];
-    if (req.user.role === 'EMPLOYEE' && log.user_id !== req.user.id)
+    if (!canAccessAuditLog(req.user, log))
       return res.status(403).json({ message: 'Access denied' });
     res.json(log);
   } catch (err) {
@@ -146,6 +148,9 @@ router.get('/:id', verifyToken, async (req, res) => {
 router.post('/', verifyToken, async (req, res) => {
   try {
     const user = req.user;
+    if (!canCreateClientAuditLog(user)) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
     const log = await createAuditLog({
       ...req.body,
       performedBy: user.full_name || user.name,

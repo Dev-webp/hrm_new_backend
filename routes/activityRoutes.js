@@ -185,7 +185,9 @@ router.get('/', verifyToken, authorizeRoles('SUPER_ADMIN'), async (req, res) => 
       sort = 'desc',
     } = req.query;
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
+    const offset = (pageNum - 1) * limitNum;
     const params = [];
     const conditions = [];
     let idx = 1;
@@ -240,16 +242,16 @@ router.get('/', verifyToken, authorizeRoles('SUPER_ADMIN'), async (req, res) => 
       pool.query(`SELECT COUNT(*) FROM activity_logs ${where}`, params),
       pool.query(
         `SELECT * FROM activity_logs ${where} ORDER BY created_at ${sort === 'asc' ? 'ASC' : 'DESC'} LIMIT $${idx} OFFSET $${idx + 1}`,
-        [...params, parseInt(limit), offset]
+        [...params, limitNum, offset]
       ),
     ]);
 
     res.json({
       data:       dataResult.rows,
       total:      parseInt(countResult.rows[0].count),
-      page:       parseInt(page),
-      limit:      parseInt(limit),
-      totalPages: Math.ceil(parseInt(countResult.rows[0].count) / parseInt(limit)),
+      page:       pageNum,
+      limit:      limitNum,
+      totalPages: Math.ceil(parseInt(countResult.rows[0].count) / limitNum),
     });
   } catch (err) {
     console.error('[ActivityRoutes] GET /', err);

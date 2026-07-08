@@ -23,12 +23,15 @@
  * ============================================================
  */
 
+import { getComputedAttendanceStatus } from "../utils/computedAttendanceStatus.js";
+
 // ─── Constants ────────────────────────────────────────────────
 const PAID_LEAVE_ELIGIBILITY_MONTHS = 3;
 const PAID_LEAVE_PER_MONTH          = 1;
 const OFFICE_START_MINUTES          = 10 * 60;
 const LATE_LOGIN_START_MINUTES      = 10 * 60 + 15;
 const HALF_DAY_LOGIN_START_MINUTES  = 10 * 60 + 30;
+const AFTERNOON_HALF_DAY_START_MINUTES = 14 * 60 + 30;
 const REQUIRED_FULL_DAY_MINUTES     = 9 * 60;
 
 // ─── Utilities ────────────────────────────────────────────────
@@ -73,6 +76,32 @@ function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
+function finiteNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function safeDateString(value, fallback = null) {
+  if (!value) return fallback;
+  const raw = value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : fallback;
+}
+
+function normalizeAttendanceRow(row = {}) {
+  const status = row.status ? String(row.status).toLowerCase() : null;
+  return {
+    ...row,
+    date: safeDateString(row.date),
+    status,
+    late_minutes: finiteNumber(row.late_minutes, 0),
+    production_hours: finiteNumber(row.production_hours, 0),
+    total_break_minutes: finiteNumber(row.total_break_minutes, 0),
+    check_in_time: row.check_in_time || null,
+    check_out_time: row.check_out_time || null,
+    half_day_slot: row.half_day_slot || null,
+  };
+}
+
 function fmtINR(n) {
   return Number(n).toLocaleString("en-IN", {
     minimumFractionDigits: 2,
@@ -100,49 +129,42 @@ function grossHoursFromRecord(rec) {
   return (checkOutMinutes - Math.max(checkInMinutes, OFFICE_START_MINUTES)) / 60;
 }
 
-function normalizeAttendanceStatus(rec) {
-  if (!rec?.check_in_time || !rec?.check_out_time) return "absent";
-
-  const existingStatus = rec?.status || "absent";
-  if (["leave", "holiday", "sunday"].includes(existingStatus)) return existingStatus;
-
-  const grossHours = grossHoursFromRecord(rec);
-  const checkInMinutes = timeToMinutes(rec.check_in_time);
-  const checkOutMinutes = timeToMinutes(rec.check_out_time);
-  const requiredLogoutMinutes =
-    checkInMinutes === null
-      ? 19 * 60
-      : Math.max(checkInMinutes, OFFICE_START_MINUTES) + REQUIRED_FULL_DAY_MINUTES;
-
-  if (grossHours < 4) return "absent";
-  if (checkInMinutes !== null && checkInMinutes >= HALF_DAY_LOGIN_START_MINUTES) return "half_day";
-  if (checkOutMinutes !== null && checkOutMinutes < requiredLogoutMinutes) return "half_day";
-  if (grossHours >= 9 && checkOutMinutes !== null && checkOutMinutes >= requiredLogoutMinutes) return "full_day";
-  if (grossHours >= 4) return "half_day";
-
-  return "absent";
+function normalizeAttendanceStatus(rec, dateStr, holidaySet = new Set()) {
+  return getComputedAttendanceStatus(rec, { dateStr, holidaySet }).computed_status;
 }
 
 // ============================================================
 // STEP 1: Fetch raw data
 // ============================================================
 async function fetchPayrollData(pool, userId, year, month) {
+  if (!Number.isInteger(Number(userId)) || Number(userId) <= 0) {
+    throw new Error("Invalid employee id");
+  }
+  if (!Number.isInteger(Number(year)) || !Number.isInteger(Number(month)) || month < 1 || month > 12) {
+    throw new Error("Invalid payroll month");
+  }
+
   const monthStr   = String(month).padStart(2, "0");
   const monthStart = `${year}-${monthStr}-01`;
   const total      = daysInMonth(year, month);
   const monthEnd   = `${year}-${monthStr}-${String(total).padStart(2, "0")}`;
 
-  const [userRes, holidayRes, attRes, leaveRes] = await Promise.all([
-    pool.query(
-      `SELECT
+  const userRes = await pool.query(
+    `SELECT
          id, full_name, email, department, branch,
          salary               AS monthly_salary,
          employee_code,
          COALESCE(joining_date, DATE(created_at)) AS joining_date,
          role
        FROM users WHERE id = $1`,
-      [userId]
-    ),
+    [userId]
+  );
+  if (!userRes.rows.length) throw new Error(`Employee ${userId} not found`);
+
+  const joiningDate = safeDateString(userRes.rows[0].joining_date, monthStart);
+  const effectiveStartDate = joiningDate > monthStart ? joiningDate : monthStart;
+
+  const [holidayRes, attRes, leaveRes] = await Promise.all([
     pool.query(
       `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date, name, type
        FROM company_holidays
@@ -155,11 +177,12 @@ async function fetchPayrollData(pool, userId, year, month) {
       `SELECT
          TO_CHAR(date,'YYYY-MM-DD') AS date,
          status, late_minutes, check_in_time, check_out_time,
-         production_hours, total_break_minutes, half_day_slot
+         production_hours, total_break_minutes, half_day_slot,
+         leave_type, leave_status, post_login_idle_minutes, misuse_of_time
        FROM attendance_records
        WHERE user_id = $1 AND date BETWEEN $2 AND $3
        ORDER BY date`,
-      [userId, monthStart, monthEnd]
+      [userId, effectiveStartDate, monthEnd]
     ),
     pool.query(
       `SELECT
@@ -179,19 +202,18 @@ WHERE user_id = $1
   AND status = 'approved'
   AND from_date <= $3
   AND to_date >= $2`,
-      [userId, monthStart, monthEnd]
+      [userId, effectiveStartDate, monthEnd]
     ),
   ]);
-
-  if (!userRes.rows.length) throw new Error(`Employee ${userId} not found`);
 
   return {
     employee        : userRes.rows[0],
     holidays        : holidayRes.rows,
-    attendance      : attRes.rows,
+    attendance      : attRes.rows.map(normalizeAttendanceRow).filter(row => row.date),
     leaves          : leaveRes.rows,
     year, month,
     monthStart, monthEnd,
+    effectiveStartDate,
     totalDaysInMonth: total,
   };
 }
@@ -200,7 +222,7 @@ WHERE user_id = $1
 // STEP 2: Build calendar maps
 // ============================================================
 function buildCalendarMaps(data) {
-  const { holidays, attendance, leaves, year, month } = data;
+  const { holidays, attendance, leaves, year, month, effectiveStartDate } = data;
 
   const holidayMap = new Map(holidays.map(h => [h.date, h]));
   const attMap     = new Map(attendance.map(a => [a.date, a]));
@@ -215,18 +237,19 @@ function buildCalendarMaps(data) {
   }
 
   const allDates    = allDatesInMonth(year, month);
+  const activeDates = allDates.filter(ds => ds >= effectiveStartDate);
   const sundayDates  = [];
   const holidayDates = [];
   const workingDays  = [];
 
-  for (const ds of allDates) {
+  for (const ds of activeDates) {
     const dow = new Date(ds + "T00:00:00").getDay();
     if (dow === 0)               sundayDates.push(ds);
     else if (holidayMap.has(ds)) holidayDates.push(ds);
     else                         workingDays.push(ds);
   }
 
-  return { holidayMap, attMap, approvedLeaveSet, allDates, sundayDates, holidayDates, workingDays };
+  return { holidayMap, attMap, approvedLeaveSet, allDates, activeDates, sundayDates, holidayDates, workingDays };
 }
 
 // ============================================================
@@ -243,10 +266,10 @@ function isGraceLateLogin(rec = {}) {
   const checkInMinutes = minutesFromTime(rec.check_in_time);
   return checkInMinutes !== null
     && checkInMinutes >= LATE_LOGIN_START_MINUTES
-    && checkInMinutes < HALF_DAY_LOGIN_START_MINUTES;
+    && checkInMinutes < AFTERNOON_HALF_DAY_START_MINUTES;
 }
 
-function tallyAttendance(workingDays, attMap, approvedLeaveSet) {
+function tallyAttendance(workingDays, attMap, approvedLeaveSet, holidayMap = new Map()) {
   let fullDays           = 0;
   let halfDays           = 0;
   let absentDays         = 0;        // raw absent (no attendance record, no approved leave)
@@ -275,7 +298,7 @@ function tallyAttendance(workingDays, attMap, approvedLeaveSet) {
       lateDates.push({ date: ds, minutes: rec.late_minutes });
     }
 
-    const status = normalizeAttendanceStatus(rec);
+    const status = normalizeAttendanceStatus(rec, ds, new Set(holidayMap.keys()));
     if (status === "full_day" || status === "present") {
       fullDays++;
     } else if (status === "half_day") {
@@ -428,15 +451,15 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
   const { incentives = 0, manualDeductions = 0, tax = 0 } = overrides;
 
   const data = await fetchPayrollData(pool, userId, year, month);
-  const { employee, totalDaysInMonth, monthStart } = data;
+  const { employee, totalDaysInMonth, monthStart, effectiveStartDate } = data;
 
-  const monthlySalary = Number(employee.monthly_salary || 0);
+  const monthlySalary = finiteNumber(employee.monthly_salary, 0);
   if (monthlySalary <= 0) throw new Error("Employee has no salary configured");
 
   const maps = buildCalendarMaps(data);
-  const { sundayDates, holidayDates, workingDays, attMap, approvedLeaveSet } = maps;
+  const { sundayDates, holidayDates, workingDays, attMap, approvedLeaveSet, holidayMap, activeDates } = maps;
 
-  const tally = tallyAttendance(workingDays, attMap, approvedLeaveSet);
+  const tally = tallyAttendance(workingDays, attMap, approvedLeaveSet, holidayMap);
 
   // ✅ Pass BOTH absentDays and formalLeaveCount to the fixed function
   const approvedLeaveSplit = computeApprovedLeaveSplit(data.leaves);
@@ -455,8 +478,8 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
   const payableDays = round2(Math.max(
     0,
     Math.min(
-      totalDaysInMonth,
-      Number(totalDaysInMonth || 0) -
+      activeDates.length,
+      Number(activeDates.length || 0) -
         Number(leaveCalc.unpaidLeaveDays || 0) -
         Number(tally.halfDays || 0) * 0.5
     )
@@ -481,12 +504,14 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
       department    : employee.department,
       branch        : employee.branch,
       employee_code : employee.employee_code,
-      joining_date  : new Date(employee.joining_date).toISOString().slice(0, 10),
+      joining_date  : safeDateString(employee.joining_date, monthStart),
       monthly_salary: monthlySalary,
     },
-    period: { year, month, monthStart },
+    period: { year, month, monthStart, effectiveStartDate },
     calendar: {
       totalDaysInMonth,
+      activeDaysInMonth  : activeDates.length,
+      preJoinExcludedDays: totalDaysInMonth - activeDates.length,
       sundayCount      : sundayDates.length,
       sundayDates,
       holidayCount     : holidayDates.length,
@@ -522,6 +547,7 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
    salary: {
   monthlyCTC: monthlySalary,
   dailyRate: salary.dailyRate,
+  payableDays: salary.payableDays,
   earnedSalary: salary.earnedBasic,
   incentives: Number(incentives),
   grossPay: salary.grossPay,
@@ -540,6 +566,7 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
 // ============================================================
 async function batchCalculatePayroll(pool, year, month, filters = {}) {
   const { branch, department } = filters;
+  const maxBatchEmployees = Number(process.env.MAX_PAYROLL_BATCH_EMPLOYEES || 100);
   let query = `SELECT id FROM users WHERE role IN ('EMPLOYEE','MANAGER','OPERATIONAL_MANAGER','SUB_ADMIN') AND salary > 0`;
   const params = [];
   let idx = 1;
@@ -548,6 +575,11 @@ async function batchCalculatePayroll(pool, year, month, filters = {}) {
   query += " ORDER BY id";
 
   const employees = await pool.query(query, params);
+  if (employees.rows.length > maxBatchEmployees) {
+    const err = new Error(`Payroll batch has ${employees.rows.length} employees. Limit is ${maxBatchEmployees}; filter by branch/department or increase MAX_PAYROLL_BATCH_EMPLOYEES.`);
+    err.statusCode = 413;
+    throw err;
+  }
   const results   = [];
   const errors    = [];
   const CHUNK     = 10;
@@ -569,12 +601,16 @@ async function batchCalculatePayroll(pool, year, month, filters = {}) {
 // PERSIST
 // ============================================================
 async function persistPayslip(pool, calc, overrides = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
   const { employee, period, attendance, leave, salary, calendar } = calc;
 
-  const existingRes = await pool.query(
+  const existingRes = await client.query(
     `SELECT incentives, deductions, tax, net_pay
      FROM payslip_records
-     WHERE user_id = $1 AND month = $2`,
+     WHERE user_id = $1 AND month = $2
+     FOR UPDATE`,
     [employee.id, period.monthStart]
   );
   const existingPayslip = existingRes.rows[0] || null;
@@ -613,9 +649,7 @@ async function persistPayslip(pool, calc, overrides = {}) {
     hasNonZeroOverride("deductions") ||
     hasNonZeroOverride("tax");
   const effectiveNetPay = round2(
-    existingPayslip && !manualOverrideApplied
-      ? Number(existingPayslip.net_pay || 0)
-      : Number(salary.earnedSalary || 0) + effectiveIncentives - effectiveDeductions
+    Number(salary.earnedSalary || 0) + effectiveIncentives - effectiveDeductions
   );
 
   const breakdown = JSON.stringify({
@@ -674,7 +708,7 @@ async function persistPayslip(pool, calc, overrides = {}) {
 });
 
 
-const result = await pool.query(
+const result = await client.query(
   `INSERT INTO payslip_records
      (user_id, month, basic_salary, earned_basic,
       incentives, deductions, tax, net_pay,
@@ -720,7 +754,16 @@ const result = await pool.query(
 ]
 );
 
-return result.rows[0];
+  await client.query("COMMIT");
+  return result.rows[0];
+  } catch (err) {
+    await client.query("ROLLBACK").catch((rollbackErr) => {
+      console.error("persistPayslip rollback failed:", rollbackErr);
+    });
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export {

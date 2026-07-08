@@ -247,7 +247,9 @@ router.put("/departments/:id", verifyToken, authorizeRoles("SUPER_ADMIN", "OPERA
       await client.query("COMMIT");
       res.json({ message: "Department updated", department: result.rows[0] });
     } catch (error) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch((rollbackErr) => {
+        console.error("Update department rollback failed:", rollbackErr);
+      });
       throw error;
     } finally {
       client.release();

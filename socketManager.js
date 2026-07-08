@@ -44,6 +44,12 @@ export function initSocket(server) {
   io.on("connection", (socket) => {
     const { role, branch, id: userId, full_name } = socket.user;
 
+    for (const [socketId, user] of onlineUsers.entries()) {
+      if (userId && user.userId === userId && socketId !== socket.id) {
+        onlineUsers.delete(socketId);
+      }
+    }
+
     // Join role & branch rooms
     socket.join(`role:${role}`);
     if (branch) socket.join(`branch:${branch}`);
@@ -56,6 +62,15 @@ export function initSocket(server) {
     console.log(`🔌 Connected: ${full_name} [${role}]`);
 
     // ── Fetch notifications (unchanged) ──────────────────────────────────────
+    socket.on("error", (err) => {
+      console.error("[SOCKET_ERROR]", {
+        socketId: socket.id,
+        userId,
+        role,
+        message: err?.message || String(err),
+      });
+    });
+
     socket.on("fetch_notifications", async ({ limit = 100 } = {}) => {
       try {
         let query = `

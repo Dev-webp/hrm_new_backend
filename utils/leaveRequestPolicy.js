@@ -60,15 +60,15 @@ export function halfDaySlotForSession(session) {
   return null;
 }
 
-export function resolveLeaveBalanceUsage({ isPaid, requestedDays, availableBalance }) {
+export function resolveLeaveBalanceUsage({ usePaidLeave, requestedDays, availableBalance }) {
   const requested = Number(requestedDays || 0);
   const available = Number(availableBalance || 0);
-  if (isPaid && available < requested) {
-    throw new Error(`Insufficient paid leave balance. Available: ${available}`);
-  }
+  const paidDays = usePaidLeave ? Math.min(requested, available) : 0;
+  const unpaidDays = Math.max(0, requested - paidDays);
+
   return {
-    paidDays: isPaid ? requested : 0,
-    unpaidDays: isPaid ? 0 : requested,
-    remainingBalance: isPaid ? available - requested : available,
+    paidDays,
+    unpaidDays,
+    remainingBalance: Math.max(0, available - paidDays),
   };
 }

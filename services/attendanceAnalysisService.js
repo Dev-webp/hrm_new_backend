@@ -5,6 +5,8 @@
  */
 import { pool } from "../middleware/db.js";
 import { monthRange, heatmapStatus } from "./attendanceAnalysisPure.js";
+import { getComputedAttendanceStatus } from "../utils/computedAttendanceStatus.js";
+import { formatDateStr } from "../utils/attendancePolicy.js";
 
 export { monthRange, heatmapStatus };
 
@@ -16,7 +18,7 @@ function isGraceLateRecord(record = {}) {
   const [h, m] = String(raw).slice(0, 5).split(":").map(Number);
   if (Number.isNaN(h) || Number.isNaN(m)) return false;
   const minutes = h * 60 + m;
-  return minutes >= 10 * 60 + 15 && minutes < 10 * 60 + 30;
+  return minutes >= 10 * 60 + 15;
 }
 
 function fmtTime(t) {
@@ -30,10 +32,6 @@ function fmtTime(t) {
 function fmtTime24(t) {
   if (!t) return "--";
   return String(t).slice(0, 5);
-}
-
-function normalizeAttendanceStatus(att) {
-  return att?.status || "absent";
 }
 
 function expandLeaveDates(leaves, start, end) {
@@ -91,7 +89,7 @@ function buildEmptyDay(dateStr, status, holidayName = null) {
 export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = null) {
   const { start, end, year, month: mNum, lastDay } = monthRange(month);
 
-  const [userRes, attRes, breakRes, holidayRes, leaveRes, mvRes] = await Promise.all([
+  const [userRes, attRes, breakRes, holidayRes, leaveRes] = await Promise.all([
     pool.query(
       `SELECT id, full_name, email, department, branch, employee_code, salary, joining_date
        FROM users WHERE id = $1`,
@@ -134,11 +132,6 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
          AND from_date <= $3 AND to_date >= $2`,
       [userId, start, end]
     ),
-    pool.query(
-      `SELECT * FROM mv_monthly_attendance
-       WHERE user_id = $1 AND month_start = $2::date`,
-      [userId, `${month}-01`]
-    ),
   ]);
 
   if (!userRes.rows.length) {
@@ -152,6 +145,7 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
 
   const attMap = new Map(attRes.rows.map((r) => [r.date, r]));
   const holidayMap = new Map(holidayRes.rows.map((h) => [h.date, h.name]));
+  const holidaySet = new Set(holidayMap.keys());
   const leaveDateMap = expandLeaveDates(leaveRes.rows, start, end);
 
   const breakMap = new Map();
@@ -169,7 +163,7 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
   let totalBreakMins = 0;
   let breakWorkDays = 0;
   let longestBreakDay = { date: null, minutes: 0 };
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = formatDateStr(new Date());
 
   for (let d = 1; d <= lastDay; d++) {
     const dateStr = `${month}-${String(d).padStart(2, "0")}`;
@@ -214,15 +208,40 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
       Number(att?.total_break_minutes) ||
       0;
 
-    let status = normalizeAttendanceStatus(att);
+    let computed = getComputedAttendanceStatus(
+      {
+        ...(att || {}),
+        date: dateStr,
+        break1_in: b1.start_time,
+        break1_out: b1.end_time,
+        lunch_in: lunch.start_time,
+        lunch_out: lunch.end_time,
+        break2_in: b2.start_time,
+        break2_out: b2.end_time,
+        total_break_minutes: totalDayBreak,
+      },
+      {
+        dateStr,
+        holidaySet,
+        noRecordStatus: dateStr > todayStr ? "no_record" : "absent",
+      }
+    );
+    let status = computed.computed_status;
     let isPaidLeave = att?.is_paid_leave === true;
     let leaveType = null;
 
     const leaveInfo = leaveDateMap.get(dateStr);
-    if (leaveInfo && (!att || att.status === "leave" || att.status === "absent")) {
+    if (leaveInfo && (!att || ["leave", "absent", "no_record"].includes(computed.computed_status))) {
       status = "leave";
       isPaidLeave = leaveInfo.isPaidLeave;
       leaveType = leaveInfo.leaveType;
+      computed = {
+        ...computed,
+        computed_status: "leave",
+        display_status: "Leave",
+        policy_status: "leave",
+        policy_reason: "Approved leave",
+      };
     } else if (att?.leave_request_id || leaveInfo) {
       leaveType = leaveInfo?.leaveType || null;
       isPaidLeave = isPaidLeave || leaveInfo?.isPaidLeave || false;
@@ -230,12 +249,17 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
 
     if (!att && !leaveInfo && dow !== 0 && !holidayMap.has(dateStr)) {
       status = dateStr > todayStr ? "no_record" : "absent";
+      computed = {
+        ...computed,
+        computed_status: status,
+        display_status: status === "no_record" ? "No Record" : "Absent",
+      };
     }
 
     const checkIn = att?.check_in_time ? fmtTime24(att.check_in_time) : "--";
     const checkOut = att?.check_out_time ? fmtTime24(att.check_out_time) : "--";
-    const lateMinutes = Number(att?.late_minutes) || 0;
-    const productionHours = parseFloat(att?.production_hours) || 0;
+    const lateMinutes = Number(computed.late_minutes ?? att?.late_minutes) || 0;
+    const productionHours = parseFloat(computed.production_hours ?? att?.production_hours) || 0;
     let workHours = productionHours;
     if (!workHours && checkIn !== "--" && checkOut !== "--") {
       const [ih, im] = checkIn.split(":").map(Number);
@@ -246,6 +270,10 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     const rec = {
       date: dateStr,
       status,
+      computed_status: computed.computed_status,
+      display_status: computed.display_status,
+      policy_status: computed.policy_status,
+      policy_reason: computed.policy_reason,
       checkIn,
       checkOut,
       loginTime: fmtTime(att?.check_in_time),
@@ -348,23 +376,22 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     label: r.label || r.status || "Absent",
   }));
 
-  const mv = mvRes.rows[0] || {};
   const monthlySummary = {
     fullDays: safeRecords.filter((r) => r.status === "full_day").length,
     halfDays: safeRecords.filter((r) => r.status === "half_day").length,
     absentDays: safeRecords.filter((r) => r.status === "absent").length,
-    leaveDays: Number(mv.leave_days) || safeRecords.filter((r) => r.status === "leave").length,
+    leaveDays: safeRecords.filter((r) => r.status === "leave").length,
     paidLeaveDays: safeRecords.filter((r) => r.status === "leave" && r.isPaidLeave).length,
     unpaidLeaveDays: safeRecords.filter((r) => r.status === "leave" && !r.isPaidLeave).length,
-    holidayDays: Number(mv.holiday_days) || safeRecords.filter((r) => r.status === "holiday").length,
-    lateDays: Number(mv.late_days) || safeRecords.filter(isGraceLateRecord).length,
-    totalLateMinutes: Number(mv.total_late_minutes) || safeRecords.reduce((s, r) => s + r.lateMinutes, 0),
-    totalProductionHours: parseFloat(mv.total_production_hours) || safeRecords.reduce((s, r) => s + r.productionHours, 0),
-    totalBreakMinutes: Number(mv.total_break_minutes) || totalBreakMins,
-    avgBreakMins: Number(mv.avg_break_mins) || (breakWorkDays ? Math.round(totalBreakMins / breakWorkDays) : 0),
-    breakExceededDays: Number(mv.break_exceeded_days) || safeRecords.filter((r) => r.breaks > MAX_BREAK_MINS).length,
-    avgLoginTime: mv.avg_login_time ? fmtTime(mv.avg_login_time) : "--",
-    avgLogoutTime: mv.avg_logout_time ? fmtTime(mv.avg_logout_time) : "--",
+    holidayDays: safeRecords.filter((r) => r.status === "holiday").length,
+    lateDays: safeRecords.filter(isGraceLateRecord).length,
+    totalLateMinutes: safeRecords.reduce((s, r) => s + r.lateMinutes, 0),
+    totalProductionHours: safeRecords.reduce((s, r) => s + r.productionHours, 0),
+    totalBreakMinutes: totalBreakMins,
+    avgBreakMins: breakWorkDays ? Math.round(totalBreakMins / breakWorkDays) : 0,
+    breakExceededDays: safeRecords.filter((r) => r.breaks > MAX_BREAK_MINS).length,
+    avgLoginTime: "--",
+    avgLogoutTime: "--",
   };
 
   const breakAnalysis = {

@@ -7,6 +7,8 @@ import express from "express";
 import { pool } from "../middleware/db.js";
 import { verifyToken, authorizeRoles } from "../middleware/auth.js";
 import { formatTime12Hour } from "../utils/timeFormat.js";
+import { getComputedAttendanceStatus } from "../utils/computedAttendanceStatus.js";
+import { formatDateStr } from "../utils/attendancePolicy.js";
 
 const router = express.Router();
 
@@ -68,8 +70,9 @@ function timeToMinutes(timeStr) {
   return h * 60 + m;
 }
 
-function normalizeAttendanceStatus(att) {
-  return att?.status || "absent";
+function isLateLoginRecord(rec = {}) {
+  const minutes = timeToMinutes(rec.checkIn ?? rec.check_in_time);
+  return minutes !== null && minutes >= 10 * 60 + 15;
 }
 
 function safeAnalysisRecord(rec) {
@@ -139,118 +142,142 @@ router.get(
       if (cached) return res.json({ ...cached, _cached: true });
 
       const { start, end, year, month: monthNumber } = monthRange(month);
-      const daysInSelectedMonth = new Date(year, monthNumber, 0).getDate();
-
-      const params = [start, end];
+      const empParams = [];
       let branchFilter = "";
-      let daysParamIndex = 3;
-
       if (eb) {
-        params.push(eb);
-        branchFilter = "AND branch = $3";
-        daysParamIndex = 4;
+        empParams.push(eb);
+        branchFilter = "AND branch = $1";
       }
 
-      params.push(daysInSelectedMonth);
-
-      const attAggQ = `
-        WITH emp AS (
-          SELECT id, full_name, department, branch, role
-          FROM users
-          WHERE role != 'SUPER_ADMIN'
-          ${branchFilter}
+      const [empRes, attRes, breakRes, holidayRes] = await Promise.all([
+        pool.query(
+          `SELECT id AS user_id, full_name, department, branch, role
+           FROM users
+           WHERE role != 'SUPER_ADMIN'
+           ${branchFilter}
+           ORDER BY full_name ASC`,
+          empParams
         ),
-       att AS (
-  SELECT
-    a.user_id,
-    COUNT(*) FILTER (
-      WHERE ${normalizedAttendanceStatusSql("a")} = 'full_day' OR ${normalizedAttendanceStatusSql("a")} = 'present'
-    ) AS full_days,
+        pool.query(
+          `SELECT
+             user_id,
+             TO_CHAR(date,'YYYY-MM-DD') AS date,
+             status, check_in_time, check_out_time,
+             late_minutes, production_hours, total_break_minutes,
+             half_day_slot, leave_type, leave_status,
+             post_login_idle_minutes, misuse_of_time
+           FROM attendance_records
+           WHERE date BETWEEN $1::date AND $2::date`,
+          [start, end]
+        ),
+        pool.query(
+          `SELECT user_id, TO_CHAR(date,'YYYY-MM-DD') AS date,
+                  SUM(COALESCE(duration_minutes, 0)) AS total_break_minutes
+           FROM employee_breaks
+           WHERE date BETWEEN $1::date AND $2::date
+           GROUP BY user_id, date`,
+          [start, end]
+        ),
+        pool.query(
+          `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date
+           FROM company_holidays
+           WHERE date BETWEEN $1::date AND $2::date`,
+          [start, end]
+        ),
+      ]);
 
-    COUNT(*) FILTER (
-      WHERE ${normalizedAttendanceStatusSql("a")} = 'half_day'
-    ) AS half_days,
+      const holidaySet = new Set(holidayRes.rows.map((r) => r.date));
+      const breakMap = new Map(
+        breakRes.rows.map((r) => [`${r.user_id}|${r.date}`, Number(r.total_break_minutes || 0)])
+      );
+      const attMap = new Map();
+      for (const row of attRes.rows) {
+        const key = `${row.user_id}|${row.date}`;
+        attMap.set(key, {
+          ...row,
+          total_break_minutes: breakMap.get(key) ?? Number(row.total_break_minutes || 0),
+        });
+      }
 
-    COUNT(*) FILTER (
-      WHERE a.check_in_time >= TIME '10:15:00'
-        AND a.check_in_time < TIME '10:30:00'
-    ) AS late_days,
+      const days = Array.from({ length: new Date(year, monthNumber, 0).getDate() }, (_, index) =>
+        `${month}-${String(index + 1).padStart(2, "0")}`
+      );
 
-    COALESCE(
-      ROUND(AVG(COALESCE(br.total_break_minutes, 0))),
-      0
-    ) AS avg_break_mins,
+      const employees = empRes.rows.map((emp) => {
+        const summary = {
+          user_id: emp.user_id,
+          full_name: emp.full_name,
+          department: emp.department,
+          branch: emp.branch,
+          full_days: 0,
+          half_days: 0,
+          present_days: 0,
+          late_days: 0,
+          avg_break_mins: 0,
+          break_exceeded_days: 0,
+          absent_days: 0,
+          leave_days: 0,
+        };
+        let breakTotal = 0;
+        let breakDays = 0;
 
-    COUNT(*) FILTER (
-      WHERE COALESCE(br.total_break_minutes, 0) > 60
-    ) AS break_exceeded_days
+        for (const dateStr of days) {
+          const rec = attMap.get(`${emp.user_id}|${dateStr}`) || { date: dateStr };
+          const computed = getComputedAttendanceStatus(rec, {
+            dateStr,
+            holidaySet,
+            noRecordStatus: "absent",
+          });
 
-  FROM attendance_records a
+          if (computed.computed_status === "full_day") summary.full_days += 1;
+          else if (computed.computed_status === "half_day") summary.half_days += 1;
+          else if (computed.computed_status === "absent") summary.absent_days += 1;
+          else if (computed.computed_status === "leave") summary.leave_days += 1;
 
-  LEFT JOIN (
-    SELECT
-      user_id,
-      date,
-      SUM(COALESCE(duration_minutes, 0)) AS total_break_minutes
-    FROM employee_breaks
-    WHERE date BETWEEN $1::date AND $2::date
-    GROUP BY user_id, date
-  ) br
-    ON br.user_id = a.user_id
-   AND br.date = a.date
+          if (["full_day", "working", "in_progress"].includes(computed.computed_status)) {
+            summary.present_days += 1;
+          } else if (computed.computed_status === "half_day") {
+            summary.present_days += 0.5;
+          }
+          if (isLateLoginRecord(rec)) summary.late_days += 1;
+          if (Number(computed.total_break_minutes || 0) > 0) {
+            breakTotal += Number(computed.total_break_minutes || 0);
+            breakDays += 1;
+          }
+          if (Number(computed.total_break_minutes || 0) > 60) summary.break_exceeded_days += 1;
+        }
 
-  WHERE a.date BETWEEN $1::date AND $2::date
-  GROUP BY a.user_id
-)
-        SELECT
-          emp.id AS user_id,
-          emp.full_name,
-          emp.department,
-          emp.branch,
-          COALESCE(att.full_days,0) AS full_days,
-          COALESCE(att.half_days,0) AS half_days,
-          COALESCE(att.full_days,0) + COALESCE(att.half_days,0) AS present_days,
-          COALESCE(att.late_days,0) AS late_days,
-          COALESCE(att.avg_break_mins,0) AS avg_break_mins,
-          COALESCE(att.break_exceeded_days,0) AS break_exceeded_days,
-          GREATEST(
-            $${daysParamIndex} - (COALESCE(att.full_days,0) + COALESCE(att.half_days,0)),
-            0
-          ) AS absent_days
-        FROM emp
-        LEFT JOIN att ON att.user_id = emp.id
-        ORDER BY emp.full_name ASC
-      `;
-
-      const empRes = await pool.query(attAggQ, params);
+        summary.avg_break_mins = breakDays ? Math.round(breakTotal / breakDays) : 0;
+        return summary;
+      });
 
       const kpi = {
-        total_employees: empRes.rows.length,
-        total_present: empRes.rows.reduce(
+        total_employees: employees.length,
+        total_present: employees.reduce(
           (s, e) => s + Number(e.present_days || 0),
           0
         ),
-        total_late: empRes.rows.reduce(
+        total_late: employees.reduce(
           (s, e) => s + Number(e.late_days || 0),
           0
         ),
-        total_exceeded: empRes.rows.reduce(
+        total_exceeded: employees.reduce(
           (s, e) => s + Number(e.break_exceeded_days || 0),
           0
         ),
-        avg_break: empRes.rows.length
+        avg_break: employees.length
           ? Math.round(
-              empRes.rows.reduce(
+              employees.reduce(
                 (s, e) => s + Number(e.avg_break_mins || 0),
                 0
-              ) / empRes.rows.length
+              ) / employees.length
             )
           : 0,
       };
 
       const result = {
         kpi,
-        employees: empRes.rows,
+        employees,
         month,
         generatedAt: new Date().toISOString(),
       };
@@ -300,7 +327,9 @@ router.get(
              TO_CHAR(date,'YYYY-MM-DD') AS date,
              check_in_time, check_out_time, status,
              late_minutes, production_hours,
-             total_break_minutes
+             total_break_minutes, half_day_slot,
+             leave_type, leave_status,
+             post_login_idle_minutes, misuse_of_time
            FROM attendance_records
            WHERE user_id = $1 AND date BETWEEN $2 AND $3
            ORDER BY date ASC`,
@@ -338,7 +367,7 @@ router.get(
       // ── Build full month record array ─────────────────────────
       const lastDay = new Date(year, m, 0).getDate();
       const records = [];
-      const todayStr = new Date().toISOString().slice(0, 10);
+      const todayStr = formatDateStr(new Date());
 
       for (let d = 1; d <= lastDay; d++) {
         const dateStr = `${month}-${String(d).padStart(2, "0")}`;
@@ -384,14 +413,38 @@ router.get(
           workHours = Math.max(0, ((oh * 60 + om) - (ih * 60 + im)) / 60);
         }
 
+        const computed = getComputedAttendanceStatus(
+          {
+            ...(att || {}),
+            date: dateStr,
+            break1_in: b1.start_time,
+            break1_out: b1.end_time,
+            lunch_in: lunch.start_time,
+            lunch_out: lunch.end_time,
+            break2_in: b2.start_time,
+            break2_out: b2.end_time,
+            total_break_minutes: totalBreak,
+          },
+          {
+            dateStr,
+            holidaySet,
+            noRecordStatus: dateStr > todayStr ? "no_record" : "absent",
+          }
+        );
+
         records.push({
           date:      dateStr,
           checkIn,
           checkOut,
-          status:    att ? normalizeAttendanceStatus(att) : (dateStr > todayStr ? "no_record" : "absent"),
-          lateMinutes: att?.late_minutes  || 0,
-          workHours,
-          breaks:    totalBreak,
+          status: computed.computed_status,
+          computed_status: computed.computed_status,
+          display_status: computed.display_status,
+          policy_status: computed.policy_status,
+          policy_reason: computed.policy_reason,
+          lateMinutes: computed.late_minutes || 0,
+          workHours: computed.production_hours || workHours,
+          productionHours: computed.production_hours || workHours,
+          breaks: computed.total_break_minutes || totalBreak,
           breakMins,
           breakDetails: {
             b1:    { in: fmtT(b1.start_time),    out: fmtT(b1.end_time)    },
@@ -428,23 +481,108 @@ router.get(
       const cached = getCache(ck);
       if (cached) return res.json({ ...cached, _cached: true });
 
-      let q = `
-        SELECT
-          TO_CHAR(month_start, 'YYYY-MM')       AS month,
-          SUM(full_days + half_days)             AS present,
-          SUM(absent_days)                       AS absent,
-          SUM(late_days)                         AS late,
-          ROUND(AVG(avg_break_mins))             AS avg_break,
-          SUM(break_exceeded_days)               AS exceeded
-        FROM mv_monthly_attendance
-        WHERE month_start >= DATE_TRUNC('month', NOW()) - INTERVAL '${parseInt(months) - 1} months'
-      `;
-      const p = [];
-      if (eb) { q += ` AND branch = $1`; p.push(eb); }
-      q += ` GROUP BY month_start ORDER BY month_start ASC`;
+      const monthCount = Math.max(1, parseInt(months, 10) || 6);
+      const now = new Date();
+      const monthLabels = Array.from({ length: monthCount }, (_, index) => {
+        const d = new Date(now.getFullYear(), now.getMonth() - (monthCount - 1 - index), 1);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      });
 
-      const result = await pool.query(q, p);
-      const data = { trends: result.rows };
+      const trends = [];
+      for (const label of monthLabels) {
+        const { start, end, year, month: monthNumber } = monthRange(label);
+        const empParams = [];
+        let branchFilter = "";
+        if (eb) {
+          empParams.push(eb);
+          branchFilter = "AND branch = $1";
+        }
+
+        const [empRes, attRes, breakRes, holidayRes] = await Promise.all([
+          pool.query(
+            `SELECT id AS user_id
+             FROM users
+             WHERE role != 'SUPER_ADMIN'
+             ${branchFilter}`,
+            empParams
+          ),
+          pool.query(
+            `SELECT user_id, TO_CHAR(date,'YYYY-MM-DD') AS date,
+                    status, check_in_time, check_out_time,
+                    late_minutes, production_hours, total_break_minutes,
+                    half_day_slot, leave_type, leave_status,
+                    post_login_idle_minutes, misuse_of_time
+             FROM attendance_records
+             WHERE date BETWEEN $1::date AND $2::date`,
+            [start, end]
+          ),
+          pool.query(
+            `SELECT user_id, TO_CHAR(date,'YYYY-MM-DD') AS date,
+                    SUM(COALESCE(duration_minutes, 0)) AS total_break_minutes
+             FROM employee_breaks
+             WHERE date BETWEEN $1::date AND $2::date
+             GROUP BY user_id, date`,
+            [start, end]
+          ),
+          pool.query(
+            `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date
+             FROM company_holidays
+             WHERE date BETWEEN $1::date AND $2::date`,
+            [start, end]
+          ),
+        ]);
+
+        const holidaySet = new Set(holidayRes.rows.map((r) => r.date));
+        const breakMap = new Map(
+          breakRes.rows.map((r) => [`${r.user_id}|${r.date}`, Number(r.total_break_minutes || 0)])
+        );
+        const attMap = new Map();
+        for (const row of attRes.rows) {
+          const key = `${row.user_id}|${row.date}`;
+          attMap.set(key, {
+            ...row,
+            total_break_minutes: breakMap.get(key) ?? Number(row.total_break_minutes || 0),
+          });
+        }
+
+        const days = Array.from({ length: new Date(year, monthNumber, 0).getDate() }, (_, index) =>
+          `${label}-${String(index + 1).padStart(2, "0")}`
+        );
+        const trend = { month: label, present: 0, absent: 0, leave: 0, late: 0, avg_break: 0, exceeded: 0 };
+        let breakTotal = 0;
+        let breakDays = 0;
+
+        for (const emp of empRes.rows) {
+          for (const dateStr of days) {
+            const rec = attMap.get(`${emp.user_id}|${dateStr}`) || { date: dateStr };
+            const computed = getComputedAttendanceStatus(rec, {
+              dateStr,
+              holidaySet,
+              noRecordStatus: "absent",
+            });
+            if (["full_day", "working", "in_progress"].includes(computed.computed_status)) {
+              trend.present += 1;
+            } else if (computed.computed_status === "half_day") {
+              trend.present += 0.5;
+            } else if (computed.computed_status === "leave") {
+              trend.leave += 1;
+            } else if (computed.computed_status === "absent") {
+              trend.absent += 1;
+            }
+            if (isLateLoginRecord(rec)) trend.late += 1;
+            if (Number(computed.total_break_minutes || 0) > 0) {
+              breakTotal += Number(computed.total_break_minutes || 0);
+              breakDays += 1;
+            }
+            if (Number(computed.total_break_minutes || 0) > 60) trend.exceeded += 1;
+          }
+        }
+
+        trend.avg_break = breakDays ? Math.round(breakTotal / breakDays) : 0;
+        trends.push(trend);
+      }
+
+      const data = { trends };
       setCache(ck, data);
       res.json(data);
     } catch (err) {

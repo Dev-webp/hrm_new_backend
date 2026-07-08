@@ -112,7 +112,9 @@ router.post(
 
       res.json(result.rows[0]);
     } catch (err) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch((rollbackErr) => {
+        console.error("POST /holidays rollback failed:", rollbackErr);
+      });
       console.error("POST /holidays error:", err);
       res.status(500).json({ message: err.message });
     } finally {

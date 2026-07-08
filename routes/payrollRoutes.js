@@ -28,25 +28,41 @@ const router = express.Router();
 // ── Helper: parse year/month from "YYYY-MM" or "YYYY-MM-DD" ──
 function parseYearMonth(monthStr) {
   if (!monthStr) {
-    throw new Error("month is required");
+    const err = new Error("month is required");
+    err.statusCode = 400;
+    throw err;
   }
 
   const clean = String(monthStr).trim();
 
-  const match = clean.match(/^(\d{4})-(\d{1,2})(?:-\d{1,2})?$/);
+  const match = clean.match(/^(\d{4})-(\d{2})(?:-\d{2})?$/);
 
   if (!match) {
-    throw new Error("Invalid month format. Use YYYY-MM, example: 2026-03");
+    const err = new Error("Invalid month format. Use YYYY-MM, example: 2026-06");
+    err.statusCode = 400;
+    throw err;
   }
 
   const year = Number(match[1]);
   const month = Number(match[2]);
 
   if (!year || month < 1 || month > 12) {
-    throw new Error("Invalid month value. Month must be 01 to 12");
+    const err = new Error("Invalid month value. Month must be 01 to 12");
+    err.statusCode = 400;
+    throw err;
   }
 
   return { year, month };
+}
+
+function parseUserId(value) {
+  const userId = Number(value);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    const err = new Error("Invalid user_id. user_id must be a positive integer");
+    err.statusCode = 400;
+    throw err;
+  }
+  return userId;
 }
 
 
@@ -116,8 +132,9 @@ router.get(
     try {
       const { user_id, month } = req.query;
       if (!user_id) return res.status(400).json({ message: "user_id required" });
+      const userId = parseUserId(user_id);
       const { year, month: m } = parseYearMonth(month);
-      const calc = await calculatePayroll(pool, Number(user_id), year, m);
+      const calc = await calculatePayroll(pool, userId, year, m);
       res.json({
         calendar  : calc.calendar,
         attendance: calc.attendance,
@@ -127,7 +144,10 @@ router.get(
       });
     } catch (err) {
       console.error("payroll/attendance-preview:", err);
-      res.status(500).json({ message: err.message });
+      res.status(err.statusCode || 500).json({
+        message: err.statusCode ? err.message : "Unable to load payslip attendance preview",
+        detail: process.env.NODE_ENV === "production" ? undefined : err.message,
+      });
     }
   }
 );
@@ -146,7 +166,8 @@ router.post(
         return res.status(400).json({ message: "user_id and month are required" });
 
       const { year, month: m } = parseYearMonth(month);
-      const calc = await calculatePayroll(pool, Number(user_id), year, m, {
+      const userId = parseUserId(user_id);
+      const calc = await calculatePayroll(pool, userId, year, m, {
         incentives       : Number(incentives),
         manualDeductions : Number(deductions),
         tax              : Number(tax),
@@ -181,7 +202,7 @@ router.post(
       res.status(201).json({ ...saved, breakdown: calc });
     } catch (err) {
       console.error("payroll/generate:", err);
-      res.status(500).json({ message: err.message });
+      res.status(err.statusCode || 500).json({ message: err.message });
     }
   }
 );
@@ -235,7 +256,7 @@ router.post(
       });
     } catch (err) {
       console.error("payroll/batch-generate:", err);
-      res.status(500).json({ message: err.message });
+      res.status(err.statusCode || 500).json({ message: err.message });
     }
   }
 );
@@ -250,7 +271,9 @@ router.get(
   async (req, res) => {
     try {
       const { branch, department, search, month, page = 1, limit = 50 } = req.query;
-      const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(limit);
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+      const offset = (pageNum - 1) * limitNum;
 
       let q = `
         SELECT
@@ -290,16 +313,16 @@ router.get(
         pool.query(countQ, params),
         pool.query(
           q + ` ORDER BY p.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
-          [...params, parseInt(limit), offset]
+          [...params, limitNum, offset]
         ),
       ]);
 
       res.json({
         data : dataRes.rows.map(parseBreakdown),
         total: Number(countRes.rows[0]?.total || 0),
-        page : parseInt(page),
-        limit: parseInt(limit),
-        pages: Math.ceil(Number(countRes.rows[0]?.total || 0) / parseInt(limit)),
+        page : pageNum,
+        limit: limitNum,
+        pages: Math.ceil(Number(countRes.rows[0]?.total || 0) / limitNum),
       });
     } catch (err) {
       console.error("payroll/payslips:", err);

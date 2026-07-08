@@ -36,6 +36,26 @@ export function canEditAttendance(user = {}, targetEmployee = {}) {
   return false;
 }
 
+export function canAccessUserAttendance(user = {}, targetEmployee = {}) {
+  if (user.role === ROLES.SUPER_ADMIN) return true;
+  if (user.role === ROLES.OPERATIONAL_MANAGER) return true;
+  if (Number(user.id) === Number(targetEmployee.id)) return true;
+  if (isBranchRestrictedOperationalRole(user) && user.branch === targetEmployee.branch) return true;
+  return false;
+}
+
+export function canAccessAuditLog(user = {}, auditLog = {}) {
+  if (user.role === ROLES.SUPER_ADMIN) return true;
+  if (user.role === ROLES.OPERATIONAL_MANAGER) return true;
+  if (user.role === ROLES.EMPLOYEE) return Number(auditLog.user_id) === Number(user.id);
+  if (isBranchRestrictedOperationalRole(user)) return auditLog.branch === user.branch;
+  return false;
+}
+
+export function canCreateClientAuditLog(user = {}) {
+  return [ROLES.SUPER_ADMIN, ROLES.OPERATIONAL_MANAGER, ROLES.MANAGER].includes(user.role);
+}
+
 export function canEditBreaks(user = {}, targetEmployee = {}) {
   return canEditAttendance(user, targetEmployee);
 }

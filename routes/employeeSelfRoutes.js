@@ -1,13 +1,47 @@
 import express from "express";
 import { pool } from "../middleware/db.js";
-import { verifyToken } from "../middleware/auth.js";
-import { calculateLateMinutes, evaluateLateLogin } from "../utils/attendancePolicy.js";
-import { recalcAttendanceForUserDate } from "./attendanceRoutes.js";
+import { canAccessUserAttendance, verifyToken } from "../middleware/auth.js";
+import { calculateLateMinutes, formatDateStr } from "../utils/attendancePolicy.js";
+import {
+  getDisplayAttendanceStatus,
+  recalcAttendanceForUserDate,
+} from "./attendanceRoutes.js";
 
 const router = express.Router();
 const STANDARD_BREAK_TYPES = ["break1", "lunch", "break2", "break3"];
 const MAX_DAILY_BREAK_SESSIONS = 6;
 const MAX_BREAK_MINUTES = 60;
+
+async function assertCanAccessUserAttendance(req, targetUserId) {
+  const userId = Number(targetUserId);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    const err = new Error("Invalid userId");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const target = await pool.query(
+    `SELECT id, branch, role, COALESCE(joining_date, DATE(created_at)) AS joining_date FROM users WHERE id = $1`,
+    [userId]
+  );
+  if (!target.rows.length) {
+    const err = new Error("User not found");
+    err.statusCode = 404;
+    throw err;
+  }
+  if (!canAccessUserAttendance(req.user, target.rows[0])) {
+    const err = new Error("Access denied");
+    err.statusCode = 403;
+    throw err;
+  }
+  return target.rows[0];
+}
+
+function maxDateStr(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return a > b ? a : b;
+}
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object || {}, key);
@@ -105,7 +139,13 @@ function validateBreakPolicy(breaks) {
 
 async function applyBreakAttendancePolicy(userId, date) {
   const totalResult = await pool.query(
-    `SELECT COALESCE(SUM(COALESCE(duration_minutes, 0)), 0)::int AS total_break_minutes
+    `SELECT COALESCE(SUM(
+        COALESCE(
+          duration_minutes,
+          GREATEST(EXTRACT(EPOCH FROM (end_time::time - start_time::time)) / 60, 0)::int,
+          0
+        )
+      ), 0)::int AS total_break_minutes
      FROM employee_breaks
      WHERE user_id = $1 AND date = $2::date`,
     [userId, date]
@@ -116,18 +156,10 @@ async function applyBreakAttendancePolicy(userId, date) {
   const attendanceResult = await pool.query(
     `UPDATE attendance_records
      SET total_break_minutes = $1,
-         status = CASE
-           WHEN $2::boolean AND COALESCE(status, '') NOT IN ('leave', 'holiday', 'sunday') THEN 'half_day'
-           ELSE status
-         END,
-         half_day_slot = CASE
-           WHEN $2::boolean AND COALESCE(status, '') NOT IN ('leave', 'holiday', 'sunday') THEN COALESCE(half_day_slot, 'INVALID')
-           ELSE half_day_slot
-         END,
          updated_at = CURRENT_TIMESTAMP
-     WHERE user_id = $3 AND date = $4::date
+     WHERE user_id = $2 AND date = $3::date
      RETURNING status, total_break_minutes, half_day_slot`,
-    [totalBreakMinutes, breakExceeded, userId, date]
+    [totalBreakMinutes, userId, date]
   );
 
   return {
@@ -149,7 +181,6 @@ async function applyBreakAttendancePolicy(userId, date) {
 // ──────────────────────────────────────────────
 router.get("/employee/attendance-history", verifyToken, async (req, res) => {
   try {
-
     // ALWAYS use logged-in user id
     const userId = req.user.id;
 
@@ -187,7 +218,12 @@ router.get("/employee/attendance-history", verifyToken, async (req, res) => {
       [userId, startDate, endDate]
     );
 
-    res.json(result.rows);
+    const rows = result.rows.map((row) => ({
+      ...row,
+      status: getDisplayAttendanceStatus(row, row.date?.slice?.(0, 10)),
+    }));
+
+    res.json(rows);
 
   } catch (err) {
     console.error(err);
@@ -206,7 +242,7 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
 
     const now = new Date();
 
-    const date = now.toISOString().slice(0,10);
+    const date = formatDateStr(now);
 
     const currentTime =
       now.toTimeString().split(' ')[0];
@@ -236,7 +272,7 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
     }
 
     const lateMinutes = calculateLateMinutes(currentTime);
-    const status = evaluateLateLogin({ office_in: currentTime }).is_late ? 'late' : 'present';
+    const status = 'present';
 
     const result = await pool.query(
       `
@@ -245,13 +281,16 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
         user_id,
         date,
         check_in_time,
+        check_out_time,
         status,
         late_minutes,
+        production_hours,
+        total_break_minutes,
         branch,
         department
       )
       VALUES
-      ($1,$2,$3,$4,$5,$6,$7)
+      ($1,$2,$3,NULL,$4,$5,0,0,$6,$7)
       RETURNING *
       `,
       [
@@ -265,7 +304,7 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
       ]
     );
 
-    res.json(result.rows[0]);
+    res.json({ ...result.rows[0], status: "in_progress" });
 
   } catch(err) {
 
@@ -286,7 +325,7 @@ router.post("/employee/check-out", verifyToken, async (req, res) => {
 
     const now = new Date();
 
-    const date = now.toISOString().slice(0,10);
+    const date = formatDateStr(now);
 
     const currentTime =
       now.toTimeString().split(' ')[0];
@@ -327,7 +366,10 @@ router.post("/employee/check-out", verifyToken, async (req, res) => {
       [currentTime, userId, date]
     );
 
-    await recalcAttendanceForUserDate(userId, date);
+    await recalcAttendanceForUserDate(userId, date, {
+      source: "employee_self_checkout",
+      logResult: true,
+    });
 
     const result = await pool.query(
       `
@@ -361,9 +403,7 @@ router.post("/employee/check-out", verifyToken, async (req, res) => {
 router.get("/employee/attendance-summary", verifyToken, async (req, res) => {
   try {
     const userId = parseInt(req.query.userId || req.user.id);
-    if (["EMPLOYEE", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role) && userId !== req.user.id) {
-      return res.status(403).json({ message: "Access denied" });
-    }
+    const targetUser = await assertCanAccessUserAttendance(req, userId);
     const { month } = req.query;
     if (!month) return res.status(400).json({ message: "month required" });
 
@@ -376,10 +416,21 @@ router.get("/employee/attendance-summary", verifyToken, async (req, res) => {
       .toISOString()
       .slice(0, 10);
 
+    const effectiveStartDate = maxDateStr(
+      startDate,
+      targetUser.joining_date ? String(targetUser.joining_date).slice(0, 10) : startDate
+    );
+
     const result = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE date::date <= CURRENT_DATE) AS working_days,
-         COUNT(*) FILTER (WHERE status IN ('present','late')) AS present_days,
+         COUNT(*) FILTER (WHERE status NOT IN ('holiday') AND date::date <= CURRENT_DATE) AS working_days,
+         COUNT(*) FILTER (WHERE status IN ('present','late','full_day')) AS full_present_days,
+         COUNT(*) FILTER (WHERE status = 'half_day') AS half_days,
+         COUNT(*) FILTER (WHERE status = 'absent') AS absent_days,
+         COUNT(*) FILTER (
+           WHERE status = 'leave'
+             AND COALESCE(leave_status, 'approved') = 'approved'
+         ) AS leave_days,
          COUNT(*) FILTER (
            WHERE check_in_time >= TIME '10:15:00'
              AND check_in_time < TIME '10:30:00'
@@ -387,19 +438,24 @@ router.get("/employee/attendance-summary", verifyToken, async (req, res) => {
        FROM attendance_records
        WHERE user_id = $1
          AND date BETWEEN $2 AND $3`,
-      [userId, startDate, endDate]
+      [userId, effectiveStartDate, endDate]
     );
     const row = result.rows[0];
-    const workingDays = parseInt(row.working_days) || 1;
-    const presentDays = parseInt(row.present_days) || 0;
+    const workingDays = parseInt(row.working_days) || 0;
+    const presentDays = Number(row.full_present_days || 0) + Number(row.half_days || 0) * 0.5;
+    const absentDays = Number(row.absent_days || 0);
+    const attendanceDenominator = presentDays + absentDays;
     res.json({
-      rate: Math.round((presentDays / workingDays) * 100),
+      rate: attendanceDenominator > 0 ? Math.round((presentDays / attendanceDenominator) * 100) : 0,
       presentDays,
+      absentDays,
+      leaveDays: Number(row.leave_days || 0),
       workingDays,
+      effectiveStartDate,
       lateDays: parseInt(row.late_days) || 0,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.statusCode || 500).json({ message: err.message });
   }
 });
 
@@ -410,9 +466,7 @@ router.get("/employee/attendance-summary", verifyToken, async (req, res) => {
 router.get("/employee/my-leaves", verifyToken, async (req, res) => {
   try {
     const userId = parseInt(req.query.userId || req.user.id);
-    if (["EMPLOYEE", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role) && userId !== req.user.id) {
-      return res.status(403).json({ message: "Access denied" });
-    }
+    await assertCanAccessUserAttendance(req, userId);
     const result = await pool.query(
       `SELECT id, leave_type, from_date::text, to_date::text, days, reason, status, created_at
        FROM leave_requests
@@ -422,7 +476,7 @@ router.get("/employee/my-leaves", verifyToken, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.statusCode || 500).json({ message: err.message });
   }
 });
 
@@ -743,7 +797,9 @@ function calcDuration(s, e) {
     if (m[3].toUpperCase() === "AM" && h === 12) h = 0;
     return h * 60 + parseInt(m[2]);
   };
-  return Math.max(0, toMin(e) - toMin(s));
+  const minutes = toMin(e) - toMin(s);
+  if (minutes < 0) throw new Error("Break end time cannot be before start time");
+  return minutes;
 }
 
 export default router;

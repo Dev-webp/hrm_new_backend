@@ -5,14 +5,17 @@ import { pool } from "../middleware/db.js";
 const router = express.Router();
 
 function livePresentSql(alias = "a") {
-  return `${alias}.check_in_time IS NOT NULL`;
+  return `COALESCE(${alias}.status, '') IN ('full_day', 'present', 'half_day', 'in_progress', 'working')
+    OR (${alias}.check_in_time IS NOT NULL AND COALESCE(${alias}.status, '') NOT IN ('leave', 'holiday', 'absent'))`;
+}
+
+function liveLeaveSql(alias = "a") {
+  return `COALESCE(${alias}.status, '') = 'leave'
+    AND COALESCE(${alias}.leave_status, 'approved') = 'approved'`;
 }
 
 function liveAbsentSql(alias = "a") {
-  return `(
-    ${alias}.user_id IS NULL
-    OR ${alias}.check_in_time IS NULL
-  )`;
+  return `COALESCE(${alias}.status, 'absent') = 'absent'`;
 }
 
 router.get("/admin-dashboard", verifyToken, authorizeRoles("SUPER_ADMIN"), (req, res) => {
@@ -56,6 +59,7 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "OPE
         SELECT
           COUNT(*) FILTER (WHERE ${livePresentSql("a")}) AS present,
           COUNT(*) FILTER (WHERE ${liveAbsentSql("a")}) AS absent,
+          COUNT(*) FILTER (WHERE ${liveLeaveSql("a")}) AS leave,
           COUNT(*) FILTER (
             WHERE a.check_in_time >= TIME '10:15:00'
               AND a.check_in_time < TIME '10:30:00'
@@ -97,7 +101,9 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "OPE
         SELECT
           u.department,
           COUNT(u.id) AS total,
-          COUNT(a.user_id) FILTER (WHERE ${livePresentSql("a")}) AS present
+          COUNT(a.user_id) FILTER (WHERE ${livePresentSql("a")}) AS present,
+          COUNT(a.user_id) FILTER (WHERE ${liveAbsentSql("a")}) AS absent,
+          COUNT(a.user_id) FILTER (WHERE ${liveLeaveSql("a")}) AS leave
         FROM users u
         LEFT JOIN attendance_records a ON a.user_id = u.id AND a.date = $1
         WHERE u.role != 'SUPER_ADMIN' AND u.department IS NOT NULL
@@ -126,7 +132,11 @@ router.get("/dashboard/summary", verifyToken, authorizeRoles("SUPER_ADMIN", "OPE
         name: r.department,
         total: Number(r.total),
         present: Number(r.present),
-        pct: Number(r.total) > 0 ? Math.round((Number(r.present) / Number(r.total)) * 100) : 0
+        absent: Number(r.absent),
+        leave: Number(r.leave),
+        pct: Number(r.present) + Number(r.absent) > 0
+          ? Math.round((Number(r.present) / (Number(r.present) + Number(r.absent))) * 100)
+          : 0
       }))
     });
   } catch (err) {

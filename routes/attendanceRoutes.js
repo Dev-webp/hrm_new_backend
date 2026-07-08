@@ -22,6 +22,10 @@ import {
 import { createNotification } from "./notificationRoutes.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
 import { formatTime12Hour } from "../utils/timeFormat.js";
+import {
+  getComputedAttendanceStatus,
+  withComputedAttendanceStatus,
+} from "../utils/computedAttendanceStatus.js";
 
 // ── Policy engine (pure functions, no DB calls) ──────────────────
 import {
@@ -41,6 +45,80 @@ import {
 
 const router = express.Router();
 const OFFICE_END_TIME = "19:00:00";
+const MAX_ATTENDANCE_RANGE_DAYS = Number(process.env.MAX_ATTENDANCE_RANGE_DAYS || 62);
+
+function validateAttendanceRange(start, end, label = "date range") {
+  if (!start || !end) return null;
+  const startDate = parseDateStr(start);
+  const endDate = parseDateStr(end);
+  if (!startDate || !endDate || endDate < startDate) {
+    return `${label} is invalid`;
+  }
+  const days = Math.floor((endDate - startDate) / 86400000) + 1;
+  if (days > MAX_ATTENDANCE_RANGE_DAYS) {
+    return `${label} cannot exceed ${MAX_ATTENDANCE_RANGE_DAYS} days`;
+  }
+  return null;
+}
+
+function timeToSqlMinutesExpr(startColumn = "start_time", endColumn = "end_time") {
+  return `GREATEST(EXTRACT(EPOCH FROM (($endColumn$)::time - ($startColumn$)::time)) / 60, 0)::int`
+    .replace("$endColumn$", endColumn)
+    .replace("$startColumn$", startColumn);
+}
+
+async function setNamedBreakTime({ userId, dateStr, breakType, action, timeStr }) {
+  const existingResult = await pool.query(
+    `SELECT start_time, end_time
+     FROM employee_breaks
+     WHERE user_id = $1 AND date = $2::date AND break_type = $3`,
+    [userId, dateStr, breakType]
+  );
+  const existing = existingResult.rows[0] || {};
+
+  if (action === "start") {
+    if (existing.start_time && !existing.end_time) {
+      const err = new Error(`${breakType} is already active`);
+      err.statusCode = 409;
+      throw err;
+    }
+    if (existing.start_time && existing.end_time) {
+      const err = new Error(`${breakType} is already completed`);
+      err.statusCode = 409;
+      throw err;
+    }
+    await pool.query(
+      `INSERT INTO employee_breaks (user_id, date, break_type, start_time)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (user_id, date, break_type) DO UPDATE SET
+         start_time = EXCLUDED.start_time,
+         end_time = NULL,
+         duration_minutes = NULL`,
+      [userId, dateStr, breakType, timeStr]
+    );
+    return;
+  }
+
+  if (!existing.start_time) {
+    const err = new Error(`${breakType} cannot end before it starts`);
+    err.statusCode = 400;
+    throw err;
+  }
+  if (existing.end_time) {
+    const err = new Error(`${breakType} is already ended`);
+    err.statusCode = 409;
+    throw err;
+  }
+
+  await pool.query(
+    `UPDATE employee_breaks
+     SET end_time = $1,
+         duration_minutes = ${timeToSqlMinutesExpr("start_time", "$1")},
+         updated_at = NOW()
+     WHERE user_id = $2 AND date = $3::date AND break_type = $4`,
+    [timeStr, userId, dateStr, breakType]
+  );
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // MATERIALIZED VIEW REFRESH (throttled)
@@ -78,6 +156,16 @@ async function fetchHolidaySet(year) {
     `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date FROM company_holidays
      WHERE EXTRACT(YEAR FROM date) = $1`,
     [year]
+  );
+  return new Set(res.rows.map((r) => r.date));
+}
+
+async function fetchHolidaySetForDateRange(startDate, endDate) {
+  const res = await pool.query(
+    `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date
+     FROM company_holidays
+     WHERE date BETWEEN $1::date AND $2::date`,
+    [startDate, endDate]
   );
   return new Set(res.rows.map((r) => r.date));
 }
@@ -179,6 +267,31 @@ function hasOfficeEndPassed() {
   return nowSec !== null && officeEndSec !== null && nowSec >= officeEndSec;
 }
 
+function isBeforeOfficeEndForDate(dateStr) {
+  const today = todayLocalDateStr();
+  if (dateStr < today) return false;
+  if (dateStr > today) return true;
+  return !hasOfficeEndPassed();
+}
+
+function isPastAttendanceDate(dateStr) {
+  return Boolean(dateStr) && dateStr < todayLocalDateStr();
+}
+
+function isSundayDate(dateStr) {
+  if (!dateStr) return false;
+  const [year, month, day] = dateStr.split("-").map(Number);
+  return new Date(year, month - 1, day).getDay() === 0;
+}
+
+function getDisplayAttendanceStatus(record = {}, dateStr = null) {
+  return getComputedAttendanceStatus(record, { dateStr }).computed_status;
+}
+
+function withDisplayAttendanceStatus(row = {}, dateStr = null, context = {}) {
+  return withComputedAttendanceStatus(row, { ...context, dateStr });
+}
+
 function buildLiveLog(log) {
   if (!log?.office_in || log?.office_out) return log;
   return {
@@ -196,12 +309,11 @@ function buildOfficeEndCutoffLog(log) {
 }
 
 function isAttendanceInProgress(dateStr, log) {
-  return (
-    dateStr === todayLocalDateStr() &&
-    Boolean(log?.office_in) &&
-    !log?.office_out &&
-    !hasOfficeEndPassed()
-  );
+  return false;
+}
+
+function isAttendanceMissingCheckout(dateStr, log) {
+  return false;
 }
 
 function shouldUseOfficeEndCutoff(dateStr, log) {
@@ -281,12 +393,20 @@ async function classifyAttendanceForResponse(user, dateStr, att, holidaySet) {
   const lateLoginMeta = buildLateLoginPolicyMeta(log, monthlyLateStats, dateStr);
 
   if (inProgress) {
+    const computed = getComputedAttendanceStatus(
+      { ...(att || {}), ...log, date: dateStr, check_out_time: null },
+      { dateStr, holidaySet, monthlyLateStats, logsByDate: logsByDateExtended }
+    );
     return {
       ...user,
       ...(att || {}),
-      status: "in_progress",
-      policy_bucket: "in_progress",
-      policy_reason: "Checked in; attendance day still in progress",
+      status: computed.computed_status,
+      computed_status: computed.computed_status,
+      display_status: computed.display_status,
+      policy_status: computed.policy_status,
+      policy_bucket: computed.policy_status,
+      policy_reason: computed.policy_reason,
+      policy_flags: computed.policy_flags,
       half_day_slot: att?.half_day_slot || null,
       production_hours: Number(((liveNetMs || 0) / 3_600_000).toFixed(2)),
       total_break_minutes: Math.round((liveBreakMs || 0) / 60000),
@@ -294,6 +414,33 @@ async function classifyAttendanceForResponse(user, dateStr, att, holidaySet) {
       check_in_time: att?.check_in_time ?? log?.office_in ?? null,
       check_out_time: null,
       is_in_progress: true,
+      ...lateLoginMeta,
+    };
+  }
+
+  if (isAttendanceMissingCheckout(dateStr, log)) {
+    const computed = getComputedAttendanceStatus(
+      { ...(att || {}), ...log, date: dateStr, check_out_time: null },
+      { dateStr, holidaySet, monthlyLateStats, logsByDate: logsByDateExtended }
+    );
+    return {
+      ...user,
+      ...(att || {}),
+      status: computed.computed_status,
+      computed_status: computed.computed_status,
+      display_status: computed.display_status,
+      policy_status: computed.policy_status,
+      policy_bucket: computed.policy_status,
+      policy_reason: computed.policy_reason,
+      policy_flags: computed.policy_flags,
+      half_day_slot: att?.half_day_slot || null,
+      production_hours: Number(att?.production_hours || 0),
+      total_break_minutes: Number(att?.total_break_minutes || 0),
+      late_minutes: att?.late_minutes ?? calculateLateMinutes(log?.office_in),
+      check_in_time: att?.check_in_time ?? log?.office_in ?? null,
+      check_out_time: null,
+      is_in_progress: false,
+      is_missing_checkout: true,
       ...lateLoginMeta,
     };
   }
@@ -306,6 +453,10 @@ async function classifyAttendanceForResponse(user, dateStr, att, holidaySet) {
     logsByDate: logsByDateExtended,
   });
   const status = mapPolicyBucketToStatus(policy.bucket);
+  const computed = getComputedAttendanceStatus(
+    { ...(att || {}), ...log, date: dateStr },
+    { dateStr, holidaySet, monthlyLateStats, logsByDate: logsByDateExtended }
+  );
 
   if (shouldLogPolicyDebug(dateStr, user.full_name)) {
     console.log(
@@ -322,68 +473,121 @@ async function classifyAttendanceForResponse(user, dateStr, att, holidaySet) {
   return {
     ...user,
     ...(att || {}),
-    status,
-    policy_bucket: policy.bucket,
-    policy_reason: policy.reason,
+    status: computed.computed_status || status,
+    computed_status: computed.computed_status || status,
+    display_status: computed.display_status,
+    policy_status: computed.policy_status || policy.bucket,
+    policy_bucket: computed.policy_status || policy.bucket,
+    policy_reason: computed.policy_reason || policy.reason,
+    policy_flags: computed.policy_flags || policy.flags || [],
     half_day_slot: policy.half_day_slot || att?.half_day_slot || null,
     half_day_effective_minutes: policy.half_day_effective_minutes ?? null,
     half_day_slot_checked: policy.half_day_slot_checked ?? null,
     half_day_invalid_reason: policy.half_day_invalid_reason ?? null,
-    production_hours: Number(policy.net_hours ?? att?.production_hours ?? 0),
-    total_break_minutes: Number(policy.total_break_minutes ?? att?.total_break_minutes ?? 0),
-    late_minutes: att?.late_minutes ?? calculateLateMinutes(log?.office_in),
+    production_hours: Number(computed.production_hours ?? policy.net_hours ?? att?.production_hours ?? 0),
+    total_break_minutes: Number(computed.total_break_minutes ?? policy.total_break_minutes ?? att?.total_break_minutes ?? 0),
+    late_minutes: computed.late_minutes ?? att?.late_minutes ?? calculateLateMinutes(log?.office_in),
     check_in_time: att?.check_in_time ?? rawLog?.office_in ?? null,
     check_out_time: att?.check_out_time ?? rawLog?.office_out ?? null,
     ...lateLoginMeta,
   };
 }
 
-const MANUAL_STATUS_VALUES = new Set([
-  "full_day",
-  "half_day",
-  "absent",
-  "leave",
-  "holiday",
-  "present",
-  "late",
-]);
-
-function normalizeManualStatusOverride(status) {
-  const value = String(status || "").trim().toLowerCase();
-  if (!value || value === "auto" || value === "auto_calculate") return null;
-  return MANUAL_STATUS_VALUES.has(value) ? value : null;
+async function finalizeForgottenCheckoutsBeforeToday() {
+  const today = todayLocalDateStr();
+  const result = await pool.query(
+    `UPDATE attendance_records
+     SET status = 'absent',
+         production_hours = 0,
+         half_day_slot = NULL,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE date < $1::date
+       AND check_in_time IS NOT NULL
+       AND check_out_time IS NULL
+       AND COALESCE(status, '') NOT IN ('leave', 'holiday', 'absent')`,
+    [today]
+  );
+  if (result.rowCount > 0) {
+    invalidateCache("summary");
+    scheduleViewRefresh();
+  }
 }
 
-async function getLatestManualStatusOverride(userId, dateStr) {
-  try {
-    const result = await pool.query(
-      `SELECT ah.snapshot_metadata #>> '{requestedValues,status}' AS requested_status
-       FROM attendance_history ah
-       JOIN users u ON u.email = ah.employee_email
-       WHERE u.id = $1
-         AND ah.date = $2::date
-       ORDER BY ah.edited_at DESC
-       LIMIT 1`,
-      [userId, dateStr]
-    );
-
-    return normalizeManualStatusOverride(result.rows[0]?.requested_status);
-  } catch (err) {
-    console.warn(
-      "Manual attendance override lookup skipped during recalculation:",
-      err.message
-    );
-    return null;
-  }
+function logAttendanceRecalculation(event = {}) {
+  console.info("[AttendanceRecalc]", {
+    user_id: event.userId,
+    date: event.dateStr,
+    source: event.source || "recalculate",
+    previous_status: event.previousStatus || null,
+    new_status: event.newStatus || null,
+    production_hours: Number(event.productionHours || 0),
+    overtime_hours: event.overtimeHours ?? null,
+    late_minutes: Number(event.lateMinutes || 0),
+    attendance_rule_applied: event.ruleApplied || null,
+    policy_flags: event.policyFlags || [],
+    recalculated_at: new Date().toISOString(),
+  });
 }
 
 /**
  * Re-classify and persist a single day using the policy engine.
  * Called after check-in, check-out, or break edits.
  */
-async function recalcAttendanceForUserDate(userId, dateStr) {
+async function recalcAttendanceForUserDate(userId, dateStr, options = {}) {
+  const {
+    source = "recalculate",
+    logResult = false,
+    forceManualOverride = false,
+  } = options;
   const [year, month] = dateStr.split("-").map(Number);
   const dim = daysInMonth(year, month);
+
+  const previousRecord = await pool.query(
+    `SELECT id, status, production_hours, late_minutes, check_in_time, check_out_time
+     FROM attendance_records
+     WHERE user_id = $1 AND date = $2::date`,
+    [userId, dateStr]
+  );
+  const previousAttendanceId = previousRecord.rows[0]?.id || null;
+  const previousStatus = previousRecord.rows[0]?.status || null;
+  if (!forceManualOverride && previousAttendanceId) {
+    const manualRes = await pool.query(
+      `SELECT id, edited_by_email
+       FROM attendance_history
+       WHERE original_attendance_id = $1
+          OR (date = $2::date AND employee_email = (SELECT email FROM users WHERE id = $3))
+       ORDER BY id DESC
+       LIMIT 1`,
+      [previousAttendanceId, dateStr, userId]
+    );
+    if (manualRes.rows.length) {
+      console.info(
+        `[attendance-policy] Skipped auto recalc for user ${userId} on ${dateStr}: manual override by ${manualRes.rows[0].edited_by_email || "unknown"}`
+      );
+      return { skipped: true, reason: "manual_override" };
+    }
+  }
+  await pool.query(
+    `UPDATE employee_breaks
+     SET duration_minutes = ${timeToSqlMinutesExpr("start_time", "end_time")},
+         updated_at = NOW()
+     WHERE user_id = $1
+       AND date = $2::date
+       AND duration_minutes IS NULL
+       AND start_time IS NOT NULL
+       AND end_time IS NOT NULL`,
+    [userId, dateStr]
+  );
+
+  const breakTotalResult = await pool.query(
+    `SELECT COALESCE(SUM(
+       COALESCE(duration_minutes, ${timeToSqlMinutesExpr("start_time", "end_time")}, 0)
+     ), 0)::int AS total_break_minutes
+     FROM employee_breaks
+     WHERE user_id = $1 AND date = $2::date`,
+    [userId, dateStr]
+  );
+  const latestBreakMinutes = Number(breakTotalResult.rows[0]?.total_break_minutes || 0);
 
   // Fetch extended logs (M-1 to M+1) for Sunday logic
   const logsByDateExtended = await fetchExtendedLogsByDate(userId, year, month);
@@ -404,9 +608,58 @@ async function recalcAttendanceForUserDate(userId, dateStr) {
     ? buildOfficeEndCutoffLog(rawLog)
     : rawLog;
   if (log) {
+    log.total_break_minutes = latestBreakMinutes;
     logsByDateExtended[dateStr] = log;
     if (dateStr >= monthStart && dateStr <= monthEnd) logsByDate[dateStr] = log;
   }
+
+  if (log?.office_in && !log?.office_out) {
+    const statusResult = await pool.query(
+      `SELECT status
+       FROM attendance_records
+       WHERE user_id = $1 AND date = $2::date`,
+      [userId, dateStr]
+    );
+    const currentStatus = String(statusResult.rows[0]?.status || "").toLowerCase();
+
+    if (isPastAttendanceDate(dateStr) && !["leave", "holiday"].includes(currentStatus)) {
+      await pool.query(
+        `UPDATE attendance_records
+         SET status = 'absent',
+             late_minutes = $1,
+             production_hours = 0,
+             half_day_slot = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = $2 AND date = $3`,
+        [calculateLateMinutes(log.office_in), userId, dateStr]
+      );
+      return;
+    }
+
+    const openStatus = ["leave", "holiday"].includes(currentStatus)
+      ? currentStatus
+      : "absent";
+
+    await pool.query(
+      `UPDATE attendance_records
+       SET status = $1,
+           late_minutes = $2,
+           production_hours = 0,
+           total_break_minutes = $3,
+           half_day_slot = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = $4 AND date = $5`,
+      [
+        openStatus,
+        calculateLateMinutes(log.office_in),
+        latestBreakMinutes,
+        userId,
+        dateStr,
+      ]
+    );
+    return;
+  }
+
   const result = classifyDayPolicy({
     dateStr,
     log,
@@ -418,9 +671,7 @@ async function recalcAttendanceForUserDate(userId, dateStr) {
   const storedBreakMs = getStoredBreakMillis(log);
   const calculatedBreakMs = log ? calculateBreakMillis(log) : 0;
   const breakMs = storedBreakMs ?? calculatedBreakMs;
-  const grossMs = log ? calculateGrossMillisFromLog(log) : 0;
-  const netMs = Math.max(0, grossMs - breakMs);
-  const netHours = netMs / 3_600_000;
+  const productionHours = Number(result.net_hours || 0);
   const totalBreakMinutes = Math.round(breakMs / 60000);
   const lateMinutes = calculateLateMinutes(log?.office_in);
 
@@ -432,12 +683,8 @@ async function recalcAttendanceForUserDate(userId, dateStr) {
     holiday: "holiday",
     absent: "absent",
   };
-  const manualStatusOverride = await getLatestManualStatusOverride(userId, dateStr);
-  const legacyStatus = manualStatusOverride || statusMap[result.bucket] || "absent";
-  const halfDaySlot =
-    legacyStatus === "half_day"
-      ? result.half_day_slot || "INVALID"
-      : null;
+  const legacyStatus = statusMap[result.bucket] || "absent";
+  const halfDaySlot = result.half_day_slot || null;
 
   await pool.query(
     `UPDATE attendance_records
@@ -451,13 +698,27 @@ async function recalcAttendanceForUserDate(userId, dateStr) {
     [
       legacyStatus,
       lateMinutes,
-      parseFloat(netHours.toFixed(2)),
+      parseFloat(productionHours.toFixed(2)),
       totalBreakMinutes,
       halfDaySlot,
       userId,
       dateStr,
     ]
   );
+
+  if (logResult) {
+    logAttendanceRecalculation({
+      userId,
+      dateStr,
+      source,
+      previousStatus,
+      newStatus: legacyStatus,
+      productionHours: parseFloat(productionHours.toFixed(2)),
+      lateMinutes,
+      ruleApplied: result.reason,
+      policyFlags: result.flags,
+    });
+  }
 }
 
 async function recalcAttendanceForUserDateIfFinal(userId, dateStr) {
@@ -480,9 +741,13 @@ async function recalcAttendanceForUserDateIfFinal(userId, dateStr) {
   }
 }
 
-export { recalcAttendanceForUserDate };
+export {
+  finalizeForgottenCheckoutsBeforeToday,
+  getDisplayAttendanceStatus,
+  recalcAttendanceForUserDate,
+};
 
-async function recalcAttendanceForUserMonth(userId, year, month) {
+async function recalcAttendanceForUserMonth(userId, year, month, options = {}) {
   const dim = daysInMonth(year, month);
   const monthStart = `${year}-${String(month).padStart(2, "0")}-01`;
   const monthEnd = `${year}-${String(month).padStart(2, "0")}-${String(dim).padStart(2, "0")}`;
@@ -495,7 +760,7 @@ async function recalcAttendanceForUserMonth(userId, year, month) {
   );
 
   for (const row of records.rows) {
-    await recalcAttendanceForUserDate(userId, row.date);
+    await recalcAttendanceForUserDate(userId, row.date, options);
   }
 }
 
@@ -507,6 +772,33 @@ async function recalcAttendanceForUserMonth(userId, year, month) {
 // GET /api/my-attendance?month=YYYY-MM
 // Returns current + next month logs (for cross-month Sunday edge cases).
 // ───────────────────────────────────────────────────────────────────
+let lastForgottenCheckoutMiddlewareRun = 0;
+let forgottenCheckoutMiddlewareRunning = false;
+const FORGOTTEN_CHECKOUT_MIDDLEWARE_INTERVAL_MS = Number(
+  process.env.FORGOTTEN_CHECKOUT_MIDDLEWARE_INTERVAL_MS || 5 * 60 * 1000
+);
+
+router.use(async (_req, _res, next) => {
+  const now = Date.now();
+  if (
+    forgottenCheckoutMiddlewareRunning ||
+    now - lastForgottenCheckoutMiddlewareRun < FORGOTTEN_CHECKOUT_MIDDLEWARE_INTERVAL_MS
+  ) {
+    return next();
+  }
+
+  forgottenCheckoutMiddlewareRunning = true;
+  try {
+    await finalizeForgottenCheckoutsBeforeToday();
+    lastForgottenCheckoutMiddlewareRun = Date.now();
+    next();
+  } catch (err) {
+    next(err);
+  } finally {
+    forgottenCheckoutMiddlewareRunning = false;
+  }
+});
+
 router.get("/my-attendance", verifyToken, async (req, res) => {
   try {
     const { month } = req.query;
@@ -527,9 +819,12 @@ router.get("/my-attendance", verifyToken, async (req, res) => {
     const nextEnd   = `${nextYear}-${String(nextMon).padStart(2,"0")}-${String(daysInMonth(nextYear, nextMon)).padStart(2,"0")}`;
 
     const logs = await fetchLogsByDate(req.user.id, curStart, nextEnd);
+    const holidaySet = await fetchHolidaySetForDateRange(curStart, nextEnd);
 
     // Normalize to array sorted by date
-    const rows = Object.values(logs).sort((a, b) => a.date.localeCompare(b.date));
+    const rows = Object.values(logs)
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((row) => withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate: logs }));
 
     res.json(rows);
   } catch (err) {
@@ -762,7 +1057,7 @@ router.post("/attendance", verifyToken, async (req, res) => {
 
     const userId    = req.user.id;
     const now       = new Date();
-    const today     = now.toISOString().slice(0, 10);
+    const today     = todayLocalDateStr(now);
     const timeStr   = now.toTimeString().slice(0, 8);   // "HH:MM:SS"
 
     const userRes = await pool.query(
@@ -784,15 +1079,8 @@ router.post("/attendance", verifyToken, async (req, res) => {
     switch (action) {
       // ── Office in/out ────────────────────────────────────────
       case "office_in": {
-        const existing = await pool.query(
-          `SELECT check_in_time FROM attendance_records WHERE user_id=$1 AND date=$2`,
-          [userId, today]
-        );
-        if (existing.rows[0]?.check_in_time) {
-          return res.status(400).json({ message: "Already checked in today" });
-        }
         const lateMinutes = calculateLateMinutes(timeStr);
-        await pool.query(
+        const updateResult = await pool.query(
           `UPDATE attendance_records
            SET check_in_time=$1,
                check_out_time=NULL,
@@ -802,91 +1090,81 @@ router.post("/attendance", verifyToken, async (req, res) => {
                total_break_minutes=0,
                half_day_slot=NULL,
                updated_at=CURRENT_TIMESTAMP
-           WHERE user_id=$2 AND date=$3`,
+           WHERE user_id=$2 AND date=$3 AND check_in_time IS NULL
+           RETURNING id`,
           [timeStr, userId, today, lateMinutes]
         );
+        if (!updateResult.rowCount) {
+          return res.status(409).json({ message: "Already checked in today" });
+        }
 
         // Notifications
-        const attRow = await pool.query(
-          `SELECT id FROM attendance_records WHERE user_id=$1 AND date=$2`,
-          [userId, today]
-        );
-        const attId = attRow.rows[0]?.id;
-        await notifyCheckin({ id: userId, full_name, branch, department }, timeStr, lateMinutes, attId);
+        const attId = updateResult.rows[0]?.id;
+        notifyCheckin({ id: userId, full_name, branch, department }, timeStr, lateMinutes, attId)
+          .catch((err) => console.error("Check-in notification error:", err));
         if (lateMinutes > 0) {
-          await notifyLateLogin({ id: userId, full_name, branch, department }, lateMinutes, attId);
+          notifyLateLogin({ id: userId, full_name, branch, department }, lateMinutes, attId)
+            .catch((err) => console.error("Late-login notification error:", err));
         }
         break;
       }
 
       case "office_out": {
-        const existing = await pool.query(
-          `SELECT check_in_time, check_out_time FROM attendance_records WHERE user_id=$1 AND date=$2`,
-          [userId, today]
-        );
-        if (!existing.rows[0]?.check_in_time) {
-          return res.status(400).json({ message: "Check in first" });
-        }
-        if (existing.rows[0]?.check_out_time) {
-          return res.status(400).json({ message: "Already checked out" });
-        }
-        await pool.query(
-          `UPDATE attendance_records SET check_out_time=$1 WHERE user_id=$2 AND date=$3`,
+        const updateResult = await pool.query(
+          `UPDATE attendance_records
+           SET check_out_time=$1, updated_at=CURRENT_TIMESTAMP
+           WHERE user_id=$2 AND date=$3
+             AND check_in_time IS NOT NULL
+             AND check_out_time IS NULL
+           RETURNING id`,
           [timeStr, userId, today]
         );
-        await recalcAttendanceForUserDate(userId, today);
+        if (!updateResult.rowCount) {
+          const existing = await pool.query(
+            `SELECT check_in_time, check_out_time FROM attendance_records WHERE user_id=$1 AND date=$2`,
+            [userId, today]
+          );
+          if (existing.rows[0]?.check_out_time) {
+            return res.status(409).json({ message: "Already checked out" });
+          }
+          return res.status(400).json({ message: "Check in first" });
+        }
+        await recalcAttendanceForUserDate(userId, today, {
+          source: "attendance_action_checkout",
+          logResult: true,
+        });
 
         const attRow = await pool.query(
           `SELECT id, production_hours FROM attendance_records WHERE user_id=$1 AND date=$2`,
           [userId, today]
         );
-        await notifyCheckout(
+        notifyCheckout(
           { id: userId, full_name, branch, department },
           timeStr,
           attRow.rows[0]?.production_hours || 0,
           attRow.rows[0]?.id
-        );
+        ).catch((err) => console.error("Checkout notification error:", err));
         break;
       }
 
       // ── Named breaks via employee_breaks table ───────────────
       case "break_in":
       case "break_out": {
-        const breakType = "break1";
-        const col       = action === "break_in" ? "start_time" : "end_time";
-        await pool.query(
-          `INSERT INTO employee_breaks (user_id, date, break_type, ${col})
-           VALUES ($1,$2,$3,$4)
-           ON CONFLICT (user_id, date, break_type) DO UPDATE SET ${col}=EXCLUDED.${col}`,
-          [userId, today, breakType, timeStr]
-        );
+        await setNamedBreakTime({ userId, dateStr: today, breakType: "break1", action: action === "break_in" ? "start" : "end", timeStr });
         await recalcAttendanceForUserDateIfFinal(userId, today);
         break;
       }
 
       case "break_in_2":
       case "break_out_2": {
-        const breakType = "break2";
-        const col       = action === "break_in_2" ? "start_time" : "end_time";
-        await pool.query(
-          `INSERT INTO employee_breaks (user_id, date, break_type, ${col})
-           VALUES ($1,$2,$3,$4)
-           ON CONFLICT (user_id, date, break_type) DO UPDATE SET ${col}=EXCLUDED.${col}`,
-          [userId, today, breakType, timeStr]
-        );
+        await setNamedBreakTime({ userId, dateStr: today, breakType: "break2", action: action === "break_in_2" ? "start" : "end", timeStr });
         await recalcAttendanceForUserDateIfFinal(userId, today);
         break;
       }
 
       case "lunch_in":
       case "lunch_out": {
-        const col = action === "lunch_in" ? "start_time" : "end_time";
-        await pool.query(
-          `INSERT INTO employee_breaks (user_id, date, break_type, ${col})
-           VALUES ($1,$2,'lunch',$3)
-           ON CONFLICT (user_id, date, break_type) DO UPDATE SET ${col}=EXCLUDED.${col}`,
-          [userId, today, timeStr]
-        );
+        await setNamedBreakTime({ userId, dateStr: today, breakType: "lunch", action: action === "lunch_in" ? "start" : "end", timeStr });
         await recalcAttendanceForUserDateIfFinal(userId, today);
         break;
       }
@@ -1150,6 +1428,8 @@ router.get("/attendance/stats", verifyToken, async (req, res) => {
     );
     const attMap = new Map(attResult.rows.map((r) => [r.user_id, r]));
     let present = 0;
+    let absent = 0;
+    let leave = 0;
     let lateCount = 0;
 
     for (const user of usersResult.rows) {
@@ -1159,18 +1439,27 @@ router.get("/attendance/stats", verifyToken, async (req, res) => {
         attMap.get(user.user_id),
         holidaySet
       );
-      if (["full_day", "half_day", "leave", "in_progress", "working"].includes(row.status)) {
+      if (["full_day", "in_progress", "working"].includes(row.status)) {
         present += 1;
+      } else if (row.status === "half_day") {
+        present += 0.5;
+      } else if (row.status === "leave") {
+        leave += 1;
+      } else if (row.status === "absent") {
+        absent += 1;
       }
       if (row.late_login_status === "Late") lateCount += 1;
     }
 
-    const attendanceRate = totalEmployees > 0
-      ? Math.round((present / totalEmployees) * 100) : 0;
+    const attendanceDenominator = present + absent;
+    const attendanceRate = attendanceDenominator > 0
+      ? Math.round((present / attendanceDenominator) * 100) : 0;
 
     res.json({
       attendanceRate: isSunday || isHoliday ? 100 : attendanceRate,
       dailyPresent: present,
+      dailyAbsent: absent,
+      dailyLeave: leave,
       totalActive:  totalEmployees,
       lateToday:    lateCount,
       isSunday,
@@ -1186,7 +1475,7 @@ router.post("/attendance/checkin", verifyToken, async (req, res) => {
   try {
     const userId  = req.user.id;
     const now     = new Date();
-    const today   = now.toISOString().slice(0, 10);
+    const today   = todayLocalDateStr(now);
     const timeStr = now.toTimeString().slice(0, 8);
 
     const userRes = await pool.query(
@@ -1195,17 +1484,9 @@ router.post("/attendance/checkin", verifyToken, async (req, res) => {
     if (!userRes.rows.length) return res.status(404).json({ message: "User not found" });
     const { branch, department, full_name } = userRes.rows[0];
 
-    const existing = await pool.query(
-      `SELECT check_in_time FROM attendance_records WHERE user_id=$1 AND date=$2`,
-      [userId, today]
-    );
-    if (existing.rows.length && existing.rows[0].check_in_time) {
-      return res.status(400).json({ message: "Already checked in today" });
-    }
-
     const lateMinutes = calculateLateMinutes(timeStr);
 
-    await pool.query(
+    const insertResult = await pool.query(
       `INSERT INTO attendance_records
          (user_id, date, check_in_time, status, branch, department,
           late_minutes, production_hours, total_break_minutes,
@@ -1219,17 +1500,21 @@ router.post("/attendance/checkin", verifyToken, async (req, res) => {
          production_hours=0,
          total_break_minutes=0,
          half_day_slot=NULL,
-         updated_at=CURRENT_TIMESTAMP`,
+         updated_at=CURRENT_TIMESTAMP
+       WHERE attendance_records.check_in_time IS NULL
+       RETURNING id`,
       [userId, today, timeStr, branch, department, lateMinutes]
     );
+    if (!insertResult.rowCount) {
+      return res.status(409).json({ message: "Already checked in today" });
+    }
 
-    const attRow = await pool.query(
-      `SELECT id FROM attendance_records WHERE user_id=$1 AND date=$2`, [userId, today]
-    );
-    const attId = attRow.rows[0]?.id;
-    await notifyCheckin({ id: userId, full_name, branch, department }, timeStr, lateMinutes, attId);
+    const attId = insertResult.rows[0]?.id;
+    notifyCheckin({ id: userId, full_name, branch, department }, timeStr, lateMinutes, attId)
+      .catch((err) => console.error("Legacy check-in notification error:", err));
     if (lateMinutes > 0) {
-      await notifyLateLogin({ id: userId, full_name, branch, department }, lateMinutes, attId);
+      notifyLateLogin({ id: userId, full_name, branch, department }, lateMinutes, attId)
+        .catch((err) => console.error("Legacy late-login notification error:", err));
     }
 
     invalidateCache("summary");
@@ -1239,7 +1524,10 @@ router.post("/attendance/checkin", verifyToken, async (req, res) => {
     const record = await pool.query(
       `SELECT * FROM attendance_records WHERE user_id=$1 AND date=$2`, [userId, today]
     );
-    res.json({ message: "Checked in", record: record.rows[0] });
+    res.json({
+      message: "Checked in",
+      record: withDisplayAttendanceStatus(record.rows[0], today),
+    });
   } catch (err) {
     console.error("/attendance/checkin error:", err);
     res.status(500).json({ message: err.message });
@@ -1251,25 +1539,33 @@ router.post("/attendance/checkout", verifyToken, async (req, res) => {
   try {
     const userId  = req.user.id;
     const now     = new Date();
-    const today   = now.toISOString().slice(0, 10);
+    const today   = todayLocalDateStr(now);
     const timeStr = now.toTimeString().slice(0, 8);
 
-    const existing = await pool.query(
-      `SELECT * FROM attendance_records WHERE user_id=$1 AND date=$2`, [userId, today]
-    );
-    if (!existing.rows.length || !existing.rows[0].check_in_time) {
-      return res.status(400).json({ message: "Check in first" });
-    }
-    if (existing.rows[0].check_out_time) {
-      return res.status(400).json({ message: "Already checked out" });
-    }
-
-    await pool.query(
-      `UPDATE attendance_records SET check_out_time=$1 WHERE user_id=$2 AND date=$3`,
+    const updateResult = await pool.query(
+      `UPDATE attendance_records
+       SET check_out_time=$1, updated_at=CURRENT_TIMESTAMP
+       WHERE user_id=$2 AND date=$3
+         AND check_in_time IS NOT NULL
+         AND check_out_time IS NULL
+       RETURNING id`,
       [timeStr, userId, today]
     );
+    if (!updateResult.rowCount) {
+      const existing = await pool.query(
+        `SELECT check_in_time, check_out_time FROM attendance_records WHERE user_id=$1 AND date=$2`,
+        [userId, today]
+      );
+      if (existing.rows[0]?.check_out_time) {
+        return res.status(409).json({ message: "Already checked out" });
+      }
+      return res.status(400).json({ message: "Check in first" });
+    }
 
-    await recalcAttendanceForUserDate(userId, today);
+    await recalcAttendanceForUserDate(userId, today, {
+      source: "legacy_attendance_checkout",
+      logResult: true,
+    });
 
     const record = await pool.query(
       `SELECT * FROM attendance_records WHERE user_id=$1 AND date=$2`, [userId, today]
@@ -1289,7 +1585,11 @@ router.post("/attendance/checkout", verifyToken, async (req, res) => {
     invalidateCache(`individual|${userId}|${today.slice(0,7)}`);
     scheduleViewRefresh();
 
-    res.json({ message: "Checked out", record: record.rows[0] });
+    const holidaySet = await fetchHolidaySetForDateRange(today, today);
+    res.json({
+      message: "Checked out",
+      record: withDisplayAttendanceStatus(record.rows[0], today, { holidaySet }),
+    });
   } catch (err) {
     console.error("/attendance/checkout error:", err);
     res.status(500).json({ message: err.message });
@@ -1299,7 +1599,7 @@ router.post("/attendance/checkout", verifyToken, async (req, res) => {
 // GET /api/attendance/self/today
 router.get("/attendance/self/today", verifyToken, async (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayLocalDateStr();
     const userResult = await pool.query(
       `SELECT id AS user_id, full_name, department, branch
        FROM users
@@ -1331,7 +1631,7 @@ router.get("/attendance/self/today", verifyToken, async (req, res) => {
 
     res.json(row);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.statusCode || 500).json({ message: err.message });
   }
 });
 
@@ -1339,17 +1639,23 @@ router.get("/attendance/self/today", verifyToken, async (req, res) => {
 router.get("/attendance/self/history", verifyToken, async (req, res) => {
   try {
     const { start, end } = req.query;
+    const rangeError = validateAttendanceRange(start, end, "Attendance history range");
+    if (rangeError) return res.status(400).json({ message: rangeError });
     if (!start || !end) return res.status(400).json({ message: "start and end required" });
     const result = await pool.query(
       `SELECT TO_CHAR(ar.date,'YYYY-MM-DD') AS date,
               ar.check_in_time, ar.check_out_time, ${normalizedAttendanceStatusSql("ar")} AS status,
-              ar.late_minutes, ar.production_hours, ar.total_break_minutes
+              ar.late_minutes, ar.production_hours, ar.total_break_minutes,
+              ar.half_day_slot, ar.leave_type, ar.leave_status,
+              ar.post_login_idle_minutes, ar.misuse_of_time
        FROM attendance_records ar
        WHERE ar.user_id=$1 AND ar.date BETWEEN $2 AND $3
        ORDER BY ar.date ASC`,
       [req.user.id, start, end]
     );
-    res.json(result.rows);
+    const holidaySet = await fetchHolidaySetForDateRange(start, end);
+    const logsByDate = Object.fromEntries(result.rows.map((row) => [row.date, row]));
+    res.json(result.rows.map((row) => withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate })));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -1359,6 +1665,8 @@ router.get("/attendance/self/history", verifyToken, async (req, res) => {
 router.get("/attendance/range", verifyToken, async (req, res) => {
   try {
     const { start, end, branch } = req.query;
+    const rangeError = validateAttendanceRange(start, end, "Attendance range");
+    if (rangeError) return res.status(400).json({ message: rangeError });
 
     if (!start || !end) {
       return res.status(400).json({ message: "start and end required" });
@@ -1375,8 +1683,17 @@ router.get("/attendance/range", verifyToken, async (req, res) => {
       SELECT
         u.id AS user_id,
         d.day::date AS date,
+        a.check_in_time,
+        a.check_out_time,
         ${normalizedAttendanceStatusSql("a")} AS status,
         COALESCE(a.late_minutes, 0) AS late_minutes,
+        COALESCE(a.production_hours, 0) AS production_hours,
+        COALESCE(a.total_break_minutes, 0) AS total_break_minutes,
+        a.half_day_slot,
+        a.leave_type,
+        a.leave_status,
+        a.post_login_idle_minutes,
+        a.misuse_of_time,
         u.branch,
         u.department
       FROM generate_series($1::date, $2::date, interval '1 day') d(day)
@@ -1400,14 +1717,25 @@ router.get("/attendance/range", verifyToken, async (req, res) => {
     query += ` ORDER BY d.day ASC, u.id ASC`;
 
     const result = await pool.query(query, params);
+    const holidaySet = await fetchHolidaySetForDateRange(start, end);
+    const logsByDate = Object.fromEntries(
+      result.rows.map((r) => {
+        const dateStr = r.date.toISOString ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10);
+        return [`${r.user_id}|${dateStr}`, { ...r, date: dateStr }];
+      })
+    );
 
     res.json(
-      result.rows.map((r) => ({
-        ...r,
-        date: r.date.toISOString
+      result.rows.map((r) => {
+        const dateStr = r.date.toISOString
           ? r.date.toISOString().slice(0, 10)
-          : String(r.date).slice(0, 10),
-      }))
+          : String(r.date).slice(0, 10);
+        return withDisplayAttendanceStatus(
+          { ...r, date: dateStr },
+          dateStr,
+          { holidaySet, logsByDate }
+        );
+      })
     );
   } catch (err) {
     console.error("GET /attendance/range error:", err);
@@ -1419,6 +1747,8 @@ router.get("/attendance/range", verifyToken, async (req, res) => {
 router.get("/attendance/range/summary", verifyToken, async (req, res) => {
   try {
     const { start, end, branch } = req.query;
+    const rangeError = validateAttendanceRange(start, end, "Attendance summary range");
+    if (rangeError) return res.status(400).json({ message: rangeError });
 
     if (!start || !end) {
       return res.status(400).json({ message: "start and end required" });
@@ -1443,29 +1773,18 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
     const query = `
       SELECT
         TO_CHAR(d.day::date, 'YYYY-MM-DD') AS date,
-
-        COUNT(u.id) AS total,
-
-        COUNT(u.id) FILTER (
-          WHERE ${normalizedAttendanceStatusSql("a")} = 'full_day'
-        ) AS present,
-
-        COUNT(u.id) FILTER (
-          WHERE ${normalizedAttendanceStatusSql("a")} = 'half_day'
-        ) AS half_day,
-
-        COUNT(u.id) FILTER (
-          WHERE ${normalizedAttendanceStatusSql("a")} = 'leave'
-        ) AS leave,
-
-        COUNT(u.id) FILTER (
-          WHERE a.check_in_time >= TIME '10:15:00'
-            AND a.check_in_time < TIME '10:30:00'
-        ) AS late,
-
-        COUNT(u.id) FILTER (
-          WHERE ${normalizedAttendanceStatusSql("a")} = 'absent'
-        ) AS absent
+        u.id AS user_id,
+        a.check_in_time,
+        a.check_out_time,
+        ${normalizedAttendanceStatusSql("a")} AS status,
+        a.late_minutes,
+        a.production_hours,
+        a.total_break_minutes,
+        a.half_day_slot,
+        a.leave_type,
+        a.leave_status,
+        a.post_login_idle_minutes,
+        a.misuse_of_time
 
       FROM generate_series($1::date, $2::date, interval '1 day') d(day)
 
@@ -1479,23 +1798,43 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
         AND COALESCE(u.status, 'active') = 'active'
       ${branchCondition}
 
-      GROUP BY d.day::date
-      ORDER BY d.day::date ASC
+      ORDER BY d.day::date ASC, u.id ASC
     `;
 
     const result = await pool.query(query, params);
+    const holidaySet = await fetchHolidaySetForDateRange(start, end);
+    const summary = new Map();
 
-    res.json(
-      result.rows.map((r) => ({
-        date: r.date,
-        present: Number(r.present) || 0,
-        halfDay: Number(r.half_day) || 0,
-        absent: Number(r.absent) || 0,
-        leave: Number(r.leave) || 0,
-        late: Number(r.late) || 0,
-        total: Number(r.total) || 0,
-      }))
-    );
+    for (const row of result.rows) {
+      if (!summary.has(row.date)) {
+        summary.set(row.date, {
+          date: row.date,
+          present: 0,
+          halfDay: 0,
+          absent: 0,
+          leave: 0,
+          late: 0,
+          total: 0,
+        });
+      }
+
+      const item = summary.get(row.date);
+      item.total += 1;
+      const computed = getComputedAttendanceStatus(row, {
+        dateStr: row.date,
+        holidaySet,
+        noRecordStatus: "absent",
+      });
+
+      if (computed.computed_status === "full_day") item.present += 1;
+      else if (computed.computed_status === "half_day") item.halfDay += 1;
+      else if (computed.computed_status === "leave") item.leave += 1;
+      else if (computed.computed_status === "absent") item.absent += 1;
+
+      if (evaluateLateLogin({ office_in: row.check_in_time }).is_late) item.late += 1;
+    }
+
+    res.json([...summary.values()]);
   } catch (err) {
     console.error("GET /attendance/range/summary error:", err);
     res.status(500).json({ message: err.message });
@@ -1506,6 +1845,8 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
 router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
   try {
     const { start, end, branch } = req.query;
+    const rangeError = validateAttendanceRange(start, end, "Bulk monthly attendance range");
+    if (rangeError) return res.status(400).json({ message: rangeError });
     if (!start || !end) return res.status(400).json({ message: "start and end required" });
     const effectiveBranch = isBranchRestrictedOperationalRole(req.user) ? req.user.branch
       : branch && branch !== "all" ? branch : null;
@@ -1513,7 +1854,9 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
     let query = `
       SELECT a.user_id, TO_CHAR(a.date,'YYYY-MM-DD') AS date,
              a.status, a.late_minutes, a.check_in_time, a.check_out_time,
-             a.production_hours, a.total_break_minutes
+             a.production_hours, a.total_break_minutes,
+             a.half_day_slot, a.leave_type, a.leave_status,
+             a.post_login_idle_minutes, a.misuse_of_time
       FROM attendance_records a JOIN users u ON a.user_id=u.id
       WHERE a.date BETWEEN $1 AND $2 AND u.role!='SUPER_ADMIN'`;
     const params = [start, end]; let idx = 3;
@@ -1521,10 +1864,12 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
     query += ` ORDER BY a.user_id, a.date ASC`;
 
     const result = await pool.query(query, params);
+    const holidaySet = await fetchHolidaySetForDateRange(start, end);
+    const logsByDate = Object.fromEntries(result.rows.map((row) => [row.date, row]));
     const grouped = {};
     for (const row of result.rows) {
       if (!grouped[row.user_id]) grouped[row.user_id] = [];
-      grouped[row.user_id].push(row);
+      grouped[row.user_id].push(withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate }));
     }
     res.json(grouped);
   } catch (err) {
@@ -1586,7 +1931,6 @@ router.put(
           ? toTime(req.body.break3_out)
           : undefined,
       };
-      const manualStatus = req.body.status || null;   // null means auto-calculate
       const editSource = String(req.body.source || "").toLowerCase();
 
       const employeeRes = await client.query(
@@ -1723,7 +2067,10 @@ router.put(
 
       if (nextMainValues.check_in_time && nextMainValues.check_out_time) {
         const [editYear, editMonth] = date.split("-").map(Number);
-        await recalcAttendanceForUserMonth(userId, editYear, editMonth);
+        await recalcAttendanceForUserMonth(userId, editYear, editMonth, {
+          source: "manual_attendance_edit",
+          forceManualOverride: true,
+        });
       } else if (requestedTimes.check_in_time !== undefined) {
         await pool.query(
           `UPDATE attendance_records
@@ -1734,19 +2081,14 @@ router.put(
       }
 
       // ── 6. If admin forced a status, override policy result ───
-      if (manualStatus) {
-        await pool.query(
-          `UPDATE attendance_records SET status = $1 WHERE user_id = $2 AND date = $3`,
-          [manualStatus, userId, date]
-        );
-      }
-
       // ── 7. Return updated record ──────────────────────────────
       const updated = await pool.query(
         `SELECT
            id, user_id, TO_CHAR(date,'YYYY-MM-DD') AS date,
            check_in_time, check_out_time,
-           status, late_minutes, production_hours
+           status, late_minutes, production_hours, total_break_minutes,
+           half_day_slot, leave_type, leave_status,
+           post_login_idle_minutes, misuse_of_time
          FROM attendance_records
          WHERE user_id = $1 AND date = $2::date`,
         [userId, date]
@@ -1756,7 +2098,8 @@ router.put(
       invalidateCache(`individual|${userId}|${date.slice(0, 7)}`);
       scheduleViewRefresh();
 
-      const updatedRecord = updated.rows[0];
+      const holidaySet = await fetchHolidaySetForDateRange(date, date);
+      const updatedRecord = withDisplayAttendanceStatus(updated.rows[0], date, { holidaySet });
       const newValues = {
         check_in_time: updatedRecord?.check_in_time || null,
         check_out_time: updatedRecord?.check_out_time || null,
@@ -1814,7 +2157,9 @@ router.put(
         data: updatedRecord,
       });
     } catch (err) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch((rollbackErr) => {
+        console.error("PUT /attendance/:userId rollback failed:", rollbackErr);
+      });
       console.error("PUT /attendance/:userId error:", err);
       res.status(500).json({ message: err.message });
     } finally {
@@ -1829,28 +2174,33 @@ router.post(
   verifyToken,
   authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
-    const { date } = req.body;
-    if (!date) return res.status(400).json({ message: "date required" });
-    const holiday = await pool.query(
-      `SELECT * FROM company_holidays WHERE date=$1`, [date]
-    );
-    if (!holiday.rows.length) return res.status(400).json({ message: "Not a holiday" });
-    await pool.query(
-      `UPDATE attendance_records SET status='holiday', late_minutes=0,
-              production_hours=0 WHERE date=$1`,
-      [date]
-    );
-    await pool.query(
-      `INSERT INTO attendance_records (user_id, date, status, branch, department,
-         extra_break_ins, extra_break_outs)
-       SELECT u.id,$1,'holiday',u.branch,u.department,'[]','[]' FROM users u
-       WHERE u.role!='SUPER_ADMIN'
-       AND NOT EXISTS (SELECT 1 FROM attendance_records a2 WHERE a2.user_id=u.id AND a2.date=$1)`,
-      [date]
-    );
-    invalidateCache("summary");
-    scheduleViewRefresh();
-    res.json({ message: `Holiday applied for ${date}` });
+    try {
+      const { date } = req.body;
+      if (!date) return res.status(400).json({ message: "date required" });
+      const holiday = await pool.query(
+        `SELECT * FROM company_holidays WHERE date=$1`, [date]
+      );
+      if (!holiday.rows.length) return res.status(400).json({ message: "Not a holiday" });
+      await pool.query(
+        `UPDATE attendance_records SET status='holiday', late_minutes=0,
+                production_hours=0 WHERE date=$1`,
+        [date]
+      );
+      await pool.query(
+        `INSERT INTO attendance_records (user_id, date, status, branch, department,
+           extra_break_ins, extra_break_outs)
+         SELECT u.id,$1,'holiday',u.branch,u.department,'[]','[]' FROM users u
+         WHERE u.role!='SUPER_ADMIN'
+         AND NOT EXISTS (SELECT 1 FROM attendance_records a2 WHERE a2.user_id=u.id AND a2.date=$1)`,
+        [date]
+      );
+      invalidateCache("summary");
+      scheduleViewRefresh();
+      res.json({ message: `Holiday applied for ${date}` });
+    } catch (err) {
+      console.error("POST /attendance/apply-holiday error:", err);
+      res.status(500).json({ message: err.message || "Failed to apply holiday" });
+    }
   }
 );
 
@@ -1863,11 +2213,20 @@ router.post(
     try {
       const { start, end } = req.body;
       if (!start || !end) return res.status(400).json({ message: "start and end required" });
+      const rangeError = validateAttendanceRange(start, end, "recalculate range");
+      if (rangeError) return res.status(400).json({ message: rangeError });
       const records = await pool.query(
         `SELECT user_id, TO_CHAR(date,'YYYY-MM-DD') AS date
          FROM attendance_records WHERE date BETWEEN $1 AND $2 ORDER BY date ASC`,
         [start, end]
       );
+      const maxRecords = Number(process.env.MAX_ATTENDANCE_RECALC_RECORDS || 2000);
+      if (records.rows.length > maxRecords) {
+        return res.status(413).json({
+          message: `Too many records to recalculate in one request. Limit is ${maxRecords}.`,
+          records: records.rows.length,
+        });
+      }
       let updated = 0;
       for (const row of records.rows) {
         await recalcAttendanceForUserDate(row.user_id, row.date);
@@ -1926,20 +2285,33 @@ router.get("/attendance/department-leaderboard", verifyToken, async (req, res) =
     const [year] = date.split("-").map(Number);
     const holidaySet = await fetchHolidaySet(year);
     const presentMap = new Map();
+    const absentMap = new Map();
+    const leaveMap = new Map();
 
     for (const user of usersRes.rows) {
       const row = await classifyAttendanceForResponse(user, date, attMap.get(user.user_id), holidaySet);
-      if (["full_day", "half_day", "leave", "in_progress", "working"].includes(row.status)) {
+      if (["full_day", "in_progress", "working"].includes(row.status)) {
         presentMap.set(user.department, (presentMap.get(user.department) || 0) + 1);
+      } else if (row.status === "half_day") {
+        presentMap.set(user.department, (presentMap.get(user.department) || 0) + 0.5);
+      } else if (row.status === "leave") {
+        leaveMap.set(user.department, (leaveMap.get(user.department) || 0) + 1);
+      } else if (row.status === "absent") {
+        absentMap.set(user.department, (absentMap.get(user.department) || 0) + 1);
       }
     }
 
     const leaderboard = [];
     for (const [dept, total] of deptTotals.entries()) {
       const present = presentMap.get(dept) || 0;
+      const absent = absentMap.get(dept) || 0;
+      const leave = leaveMap.get(dept) || 0;
       leaderboard.push({
         name: dept,
-        percent: total > 0 ? Math.round((present / total) * 100) : 0,
+        present,
+        absent,
+        leave,
+        percent: present + absent > 0 ? Math.round((present / (present + absent)) * 100) : 0,
       });
     }
     leaderboard.sort((a, b) => b.percent - a.percent);
@@ -1984,7 +2356,12 @@ router.get("/attendance/employee/:userId", verifyToken, async (req, res) => {
          ar.production_hours,
          ar.total_break_minutes,
          ar.is_paid_leave,
-         lr.leave_type,
+         ar.half_day_slot,
+         ar.leave_type,
+         ar.leave_status,
+         ar.post_login_idle_minutes,
+         ar.misuse_of_time,
+         lr.leave_type AS request_leave_type,
          lr.leave_category,
          lr.paid_days,
          b1.start_time   AS break1_in,
@@ -2014,7 +2391,9 @@ router.get("/attendance/employee/:userId", verifyToken, async (req, res) => {
       [userId, start, end]
     );
 
-    res.json(result.rows);
+    const holidaySet = await fetchHolidaySetForDateRange(start, end);
+    const logsByDate = Object.fromEntries(result.rows.map((row) => [row.date, row]));
+    res.json(result.rows.map((row) => withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate })));
   } catch (err) {
     console.error("GET /attendance/employee/:userId error:", err);
     res.status(500).json({ message: err.message });
@@ -2034,11 +2413,15 @@ router.get(
       const result = await pool.query(
         `SELECT TO_CHAR(ar.date,'YYYY-MM-DD') AS date,
                 ar.check_in_time, ar.check_out_time, ${normalizedAttendanceStatusSql("ar")} AS status,
-                ar.late_minutes, ar.production_hours, ar.total_break_minutes
+                ar.late_minutes, ar.production_hours, ar.total_break_minutes,
+                ar.half_day_slot, ar.leave_type, ar.leave_status,
+                ar.post_login_idle_minutes, ar.misuse_of_time
          FROM attendance_records ar WHERE ar.user_id=$1 AND ar.date BETWEEN $2 AND $3 ORDER BY ar.date ASC`,
         [userId, start, end]
       );
-      res.json(result.rows);
+      const holidaySet = await fetchHolidaySetForDateRange(start, end);
+      const logsByDate = Object.fromEntries(result.rows.map((row) => [row.date, row]));
+      res.json(result.rows.map((row) => withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate })));
     } catch (err) {
       res.status(500).json({ message: err.message });
     }
@@ -2079,7 +2462,8 @@ router.get("/attendance/paged", verifyToken, async (req, res) => {
   try {
     const { date, department, search, branch, page = 1, limit = 25 } = req.query;
     if (!date) return res.status(400).json({ message: "date required" });
-    const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(limit);
+    const pageSize = Math.min(Math.max(1, parseInt(limit, 10) || 25), 100);
+    const offset = (Math.max(1, parseInt(page, 10) || 1) - 1) * pageSize;
     const effectiveBranch = (req.user.role === "MANAGER") ? req.user.branch
       : branch && branch !== "all" ? branch : null;
 
@@ -2094,23 +2478,33 @@ router.get("/attendance/paged", verifyToken, async (req, res) => {
       pool.query(
         `SELECT u.id AS user_id, u.full_name, u.department, u.branch,
                 a.check_in_time, a.check_out_time, ${normalizedAttendanceStatusSql("a")} AS status, a.late_minutes,
-                a.production_hours, a.total_break_minutes
+                a.production_hours, a.total_break_minutes,
+                a.half_day_slot, a.leave_type, a.leave_status,
+                a.post_login_idle_minutes, a.misuse_of_time
          FROM users u
          LEFT JOIN attendance_records a ON a.user_id=u.id AND a.date=$${idx}
          WHERE ${baseWhere}
          ORDER BY u.full_name ASC LIMIT $${idx+1} OFFSET $${idx+2}`,
-        [...params, date, parseInt(limit), offset]
+        [...params, date, pageSize, offset]
       ),
     ]);
 
+    const [year] = date.split("-").map(Number);
+    const holidaySet = await fetchHolidaySet(year);
     res.json({
-      data: dataRes.rows.map((r) => ({
-        ...r,
-        status:              r.status              || "absent",
-        late_minutes:        r.late_minutes        || 0,
-        production_hours:    r.production_hours    || "0.00",
-        total_break_minutes: r.total_break_minutes || 0,
-      })),
+      data: dataRes.rows.map((r) =>
+        withDisplayAttendanceStatus(
+          {
+            ...r,
+            date,
+            late_minutes: r.late_minutes || 0,
+            production_hours: r.production_hours || "0.00",
+            total_break_minutes: r.total_break_minutes || 0,
+          },
+          date,
+          { holidaySet }
+        )
+      ),
       total: Number(countRes.rows[0].total),
       page:  parseInt(page),
       limit: parseInt(limit),
@@ -2129,30 +2523,74 @@ router.get("/departments", verifyToken, async (req, res) => {
     const effectiveBranch = (req.user.role === "MANAGER") ? req.user.branch
       : branch && branch !== "all" ? branch : null;
 
-    let query = `
-      SELECT u.department AS name,
-             UPPER(LEFT(REPLACE(u.department,' ',''),3)) AS code,
-             COUNT(u.id) AS employees,
-             SUM(CASE WHEN ${normalizedAttendanceStatusSql("a")} IN ('full_day','half_day','leave') THEN 1 ELSE 0 END) AS present,
-             COUNT(u.id)-SUM(CASE WHEN ${normalizedAttendanceStatusSql("a")} IN ('full_day','half_day','leave') THEN 1 ELSE 0 END) AS absent,
-             MAX(CASE WHEN u.role='MANAGER' THEN u.full_name ELSE NULL END) AS head
-      FROM users u LEFT JOIN attendance_records a ON u.id=a.user_id AND a.date=$1
+    let userQuery = `
+      SELECT u.id AS user_id, u.full_name, u.department, u.branch, u.role
+      FROM users u
       WHERE u.department IS NOT NULL
         AND u.role != 'SUPER_ADMIN'
         AND COALESCE(u.status, 'active') = 'active'`;
-    const params = [date]; let idx = 2;
-    if (effectiveBranch) { query += ` AND u.branch=$${idx}`; params.push(effectiveBranch); idx++; }
-    query += ` GROUP BY u.department ORDER BY u.department`;
+    const params = [];
+    if (effectiveBranch) {
+      userQuery += " AND u.branch=$1";
+      params.push(effectiveBranch);
+    }
+    userQuery += " ORDER BY u.department, u.full_name";
 
-    const result = await pool.query(query, params);
-    res.json(result.rows.map((r) => ({
-      name:      r.name,
-      code:      r.code,
-      employees: Number(r.employees),
-      present:   Number(r.present),
-      absent:    Number(r.absent),
-      head:      r.head || "Not Assigned",
-    })));
+    const [usersResult, attResult] = await Promise.all([
+      pool.query(userQuery, params),
+      pool.query(
+        `SELECT
+           ar.user_id,
+           ar.check_in_time,
+           ar.check_out_time,
+           ${normalizedAttendanceStatusSql("ar")} AS status,
+           ar.late_minutes,
+           ar.production_hours,
+           ar.total_break_minutes,
+           ar.half_day_slot,
+           ar.leave_type,
+           ar.leave_status,
+           ar.post_login_idle_minutes,
+           ar.misuse_of_time
+         FROM attendance_records ar
+         WHERE ar.date=$1::date`,
+        [date]
+      ),
+    ]);
+    const attMap = new Map(attResult.rows.map((r) => [r.user_id, r]));
+    const [year] = date.split("-").map(Number);
+    const holidaySet = await fetchHolidaySet(year);
+    const departments = new Map();
+
+    for (const user of usersResult.rows) {
+      if (!departments.has(user.department)) {
+        departments.set(user.department, {
+          name: user.department,
+          code: user.department ? user.department.replace(/\s/g, "").slice(0, 3).toUpperCase() : "",
+          employees: 0,
+          present: 0,
+          absent: 0,
+          leave: 0,
+          head: "Not Assigned",
+        });
+      }
+      const dept = departments.get(user.department);
+      dept.employees += 1;
+      if (user.role === "MANAGER") dept.head = user.full_name;
+
+      const computed = await classifyAttendanceForResponse(user, date, attMap.get(user.user_id), holidaySet);
+      if (["full_day", "in_progress", "working"].includes(computed.status)) {
+        dept.present += 1;
+      } else if (computed.status === "half_day") {
+        dept.present += 0.5;
+      } else if (computed.status === "leave") {
+        dept.leave += 1;
+      } else if (computed.status === "absent") {
+        dept.absent += 1;
+      }
+    }
+
+    res.json([...departments.values()].sort((a, b) => a.name.localeCompare(b.name)));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

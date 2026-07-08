@@ -38,7 +38,8 @@ const OfferLetterModel = {
 
   async findAll() {
     return await pool.query(
-      `SELECT * FROM offer_letters ORDER BY created_at DESC`
+      `SELECT * FROM offer_letters ORDER BY created_at DESC LIMIT $1`,
+      [Number(process.env.MAX_OFFER_LETTERS_LIST || 200)]
     );
   },
 

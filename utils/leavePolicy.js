@@ -251,3 +251,55 @@ export async function deductApprovedLeave(userId, days, leaveType, targetDate = 
     unpaid_days: requestedDays,
   };
 }
+
+export async function deductApprovedLeaveSplit(userId, paidDays = 0, unpaidDays = 0, targetDate = new Date()) {
+  targetDate = capAtCurrentMonth(targetDate);
+  const { year, month } = getYearMonth(targetDate);
+  const paid = Number(paidDays || 0);
+  const unpaid = Number(unpaidDays || 0);
+
+  await ensureMonthlyPaidLeaveCredit(userId, targetDate);
+
+  if (paid > 0) {
+    const balance = await getProfessionalLeaveBalance(userId, targetDate);
+    if (paid > Number(balance.paid_leave_balance || 0)) {
+      throw new Error(
+        `Insufficient paid leave balance. Available: ${balance.paid_leave_balance}`
+      );
+    }
+
+    await pool.query(
+      `
+      UPDATE leave_balance
+      SET
+        paid_leave_used = COALESCE(paid_leave_used, 0) + $1,
+        balance = GREATEST(COALESCE(balance, 0) - $1, 0),
+        updated_at = NOW()
+      WHERE user_id = $2
+        AND year = $3
+        AND month = $4
+      `,
+      [paid, userId, year, month]
+    );
+  }
+
+  if (unpaid > 0) {
+    await pool.query(
+      `
+      UPDATE leave_balance
+      SET
+        unpaid_leave_used = COALESCE(unpaid_leave_used, 0) + $1,
+        updated_at = NOW()
+      WHERE user_id = $2
+        AND year = $3
+        AND month = $4
+      `,
+      [unpaid, userId, year, month]
+    );
+  }
+
+  return {
+    paid_days: paid,
+    unpaid_days: unpaid,
+  };
+}

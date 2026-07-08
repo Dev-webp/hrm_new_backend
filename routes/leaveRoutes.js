@@ -6,7 +6,7 @@ import { getClientIp, logActivity } from "../utils/activityLogger.js";
 import {
   evaluateLeaveOnApproval,
   getProfessionalLeaveBalance,
-  deductApprovedLeave,
+  deductApprovedLeaveSplit,
 } from "../utils/leavePolicy.js";
 import {
   notifyLeaveApply,
@@ -18,6 +18,7 @@ import {
   attendanceStatusForLeave,
   halfDaySlotForSession,
 } from "../utils/leaveRequestPolicy.js";
+import { recalcAttendanceForUserDate } from "./attendanceRoutes.js";
 
 const router = express.Router();
 
@@ -31,13 +32,13 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
 
   const balance = await getProfessionalLeaveBalance(leave.user_id, fromDate);
   const requestedDays = Number(leave.requested_days ?? leave.days ?? 0);
-  const finalCategory =
-    leave.leave_category ||
-    (leave.leave_type === "Paid" || leave.leave_type === "Earned" ? "Paid" : "Unpaid");
+  const employeeUsePaidLeave = leave.use_paid_leave === true || leave.use_paid_leave === "true";
   const availablePaid = Number(balance.paid_leave_balance || 0);
-  const canApprove = finalCategory !== "Paid" || availablePaid >= requestedDays;
-  const paidDays = finalCategory === "Paid" && canApprove ? requestedDays : 0;
-  const unpaidDays = finalCategory === "Unpaid" ? requestedDays : 0;
+  const paidDays = employeeUsePaidLeave ? Math.min(requestedDays, availablePaid) : 0;
+  const unpaidDays = Math.max(0, requestedDays - paidDays);
+  const remainingPaidBalance = Math.max(0, availablePaid - paidDays);
+  const finalCategory = paidDays > 0 ? "Paid" : "Unpaid";
+  const canApprove = true;
 
   const monthLeaves = await pool.query(
     `SELECT id, from_date FROM leave_requests
@@ -53,6 +54,7 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
   if (flags.is_sudden) reasons.push("Sudden leave penalty applied");
   if (flags.sat_mon_exceeded) reasons.push("Saturday/Monday monthly limit exceeded");
   if (sundayPenalty) reasons.push("Sunday penalty included");
+  reasons.push(employeeUsePaidLeave ? "Employee chose to use paid leave" : "Employee chose not to use paid leave");
   if (!reasons.length) reasons.push("Normal leave approval");
 
   return {
@@ -70,9 +72,12 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
     current_status: leave.status,
     applied_date: leave.created_at,
     reason: leave.reason?.trim() || "No reason provided.",
+    use_paid_leave: employeeUsePaidLeave,
+    employee_use_paid_leave: employeeUsePaidLeave,
     available_paid_balance: availablePaid,
     paid_days: paidDays,
     unpaid_days: unpaidDays,
+    remaining_paid_balance: remainingPaidBalance,
     salary_deduction_days: unpaidDays,
     include_sunday_penalty: sundayPenalty,
     sudden_leave_penalty: Boolean(flags.is_sudden),
@@ -101,40 +106,75 @@ async function getScopedLeave(req, id) {
 }
 
 async function syncApprovedLeaveAttendance(leave, deduction) {
-  const isPaid = Number(deduction.paid_days || 0) > 0;
   const durationType = leave.leave_duration_type || "full_day";
   const attendanceStatus = attendanceStatusForLeave(durationType);
   const halfDaySlot = halfDaySlotForSession(leave.half_day_session);
-  const leaveLabel = isPaid ? "Paid" : "Unpaid";
-
-  await pool.query(
-    `INSERT INTO attendance_records (
-       user_id, date, status, leave_type, leave_status, is_paid_leave,
-       leave_request_id, half_day_slot, branch, department
-     )
-     SELECT l.user_id, dates.day::date, $2, $3, 'approved', $4,
-            l.id, $5, u.branch, u.department
-     FROM leave_requests l
-     JOIN users u ON u.id = l.user_id
-     CROSS JOIN LATERAL generate_series(l.from_date, l.to_date, interval '1 day') dates(day)
-     WHERE l.id = $1
-       AND EXTRACT(DOW FROM dates.day) <> 0
-       AND NOT EXISTS (
-         SELECT 1 FROM company_holidays h
-         WHERE h.date = dates.day::date
-           AND h.type = 'holiday'
-           AND (LOWER(COALESCE(h.branch, 'all')) = 'all' OR h.branch = u.branch)
-       )
-     ON CONFLICT (user_id, date) DO UPDATE SET
-       status = EXCLUDED.status,
-       leave_type = EXCLUDED.leave_type,
-       leave_status = EXCLUDED.leave_status,
-       is_paid_leave = EXCLUDED.is_paid_leave,
-       leave_request_id = EXCLUDED.leave_request_id,
-       half_day_slot = EXCLUDED.half_day_slot,
-       updated_at = CURRENT_TIMESTAMP`,
-    [leave.id, attendanceStatus, leaveLabel, isPaid, halfDaySlot]
+  const from = new Date(String(leave.from_date).slice(0, 10));
+  const to = new Date(String(leave.to_date).slice(0, 10));
+  const userResult = await pool.query(
+    "SELECT branch, department FROM users WHERE id = $1",
+    [leave.user_id]
   );
+  const user = userResult.rows[0] || {};
+  let paidRemaining = Number(deduction.paid_days || 0);
+
+  const holidays = await pool.query(
+    `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date
+     FROM company_holidays
+     WHERE date BETWEEN $1 AND $2
+       AND type = 'holiday'
+       AND (LOWER(COALESCE(branch, 'all')) = 'all' OR branch = $3)`,
+    [leave.from_date, leave.to_date, user.branch]
+  );
+  const holidayDates = new Set(holidays.rows.map((row) => row.date));
+
+  for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
+    const dateStr = d.toISOString().slice(0, 10);
+    if (d.getDay() === 0 || holidayDates.has(dateStr)) continue;
+
+    const dayWeight = durationType === "half_day" ? 0.5 : 1;
+    const isPaid = paidRemaining > 0;
+    const paidForDay = isPaid ? Math.min(dayWeight, paidRemaining) : 0;
+    paidRemaining = Math.max(0, paidRemaining - paidForDay);
+
+    await pool.query(
+      `INSERT INTO attendance_records (
+         user_id, date, status, leave_type, leave_status, is_paid_leave,
+         leave_request_id, half_day_slot, branch, department
+       )
+       VALUES ($1,$2,$3,$4,'approved',$5,$6,$7,$8,$9)
+       ON CONFLICT (user_id, date) DO UPDATE SET
+         status = EXCLUDED.status,
+         leave_type = EXCLUDED.leave_type,
+         leave_status = EXCLUDED.leave_status,
+         is_paid_leave = EXCLUDED.is_paid_leave,
+         leave_request_id = EXCLUDED.leave_request_id,
+         half_day_slot = EXCLUDED.half_day_slot,
+         updated_at = CURRENT_TIMESTAMP`,
+      [
+        leave.user_id,
+        dateStr,
+        attendanceStatus,
+        isPaid ? "Paid" : "Unpaid",
+        isPaid,
+        leave.id,
+        halfDaySlot,
+        user.branch || leave.branch || null,
+        user.department || leave.department || null,
+      ]
+    );
+  }
+}
+
+async function recalcLeaveAttendanceDates(leave, source) {
+  const from = new Date(String(leave.from_date).slice(0, 10));
+  const to = new Date(String(leave.to_date).slice(0, 10));
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return;
+
+  for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
+    const dateStr = d.toISOString().slice(0, 10);
+    await recalcAttendanceForUserDate(leave.user_id, dateStr, { source });
+  }
 }
 
 /* ✅ GET leave balance */
@@ -184,6 +224,11 @@ router.get(
           requested_days,
           leave_duration_type,
           half_day_session,
+          use_paid_leave,
+          balance_at_application,
+          paid_days,
+          unpaid_days,
+          remaining_paid_balance,
           reason,
           status,
           approved_by,
@@ -252,8 +297,11 @@ router.get(
           l.requested_days,
           l.leave_duration_type,
           l.half_day_session,
+          l.use_paid_leave,
+          l.balance_at_application,
           l.paid_days,
           l.unpaid_days,
+          l.remaining_paid_balance,
           l.reason,
           l.status,
           l.created_at,
@@ -304,8 +352,11 @@ router.get(
           l.requested_days,
           l.leave_duration_type,
           l.half_day_session,
+          l.use_paid_leave,
+          l.balance_at_application,
           l.paid_days,
           l.unpaid_days,
+          l.remaining_paid_balance,
           l.reason,
           l.status,
           l.created_at,
@@ -627,10 +678,10 @@ const changeLeaveStatus = async (req, res) => {
           return res.status(409).json({ message: "leave_category changed; refresh the approval preview" });
         }
 
-        deduction = await deductApprovedLeave(
+        deduction = await deductApprovedLeaveSplit(
           leave.user_id,
-          approvedPreview.requested_days,
-          leave.leave_type,
+          approvedPreview.paid_days,
+          approvedPreview.unpaid_days,
           fromDateObj
         );
 
@@ -647,6 +698,7 @@ const changeLeaveStatus = async (req, res) => {
           , penalty_days = $${paramIndex + 7}
           , include_sunday_penalty = $${paramIndex + 8}
           , policy_reason = $${paramIndex + 9}
+          , remaining_paid_balance = $${paramIndex + 10}
         `;
 
         params.push(
@@ -659,10 +711,11 @@ const changeLeaveStatus = async (req, res) => {
           approvedPreview.penalty_days > 0,
           approvedPreview.penalty_days,
           approvedPreview.include_sunday_penalty,
-          approvedPreview.policy_reason
+          approvedPreview.policy_reason,
+          approvedPreview.remaining_paid_balance
         );
 
-        paramIndex += 10;
+        paramIndex += 11;
       }
 
       if (status === "rejected") {
@@ -684,6 +737,9 @@ const changeLeaveStatus = async (req, res) => {
 
       if (status === "approved") {
         await syncApprovedLeaveAttendance(leave, deduction);
+        await recalcLeaveAttendanceDates(leave, "leave_approval");
+      } else if (status === "rejected") {
+        await recalcLeaveAttendanceDates(leave, "leave_rejection");
       }
 
       const actorResult = await pool.query(

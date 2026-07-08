@@ -74,7 +74,9 @@ const OfferLetterController = {
       });
     } catch (err) {
       console.error(err);
-      res.status(500).json({ error: "Failed to generate PDF" });
+      res.status(err.statusCode || 500).json({
+        error: err.statusCode ? err.message : "Failed to generate PDF",
+      });
     }
   },
 

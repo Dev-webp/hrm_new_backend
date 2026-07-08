@@ -22,6 +22,30 @@ const statusMap = {
   absent: "absent",
 };
 
+async function getManualOverrideEvidence(userId, dateStr) {
+  const result = await pool.query(
+    `SELECT ah.id, ah.edited_by_email, ah.edit_reason
+     FROM attendance_records ar
+     JOIN users u ON u.id = ar.user_id
+     JOIN attendance_history ah
+       ON ah.date = ar.date
+      AND (
+        ah.original_attendance_id = ar.id
+        OR ah.employee_email = u.email
+      )
+     WHERE ar.user_id = $1
+       AND ar.date = $2::date
+     ORDER BY ah.id DESC
+     LIMIT 1`,
+    [userId, dateStr]
+  );
+  return result.rows[0] || null;
+}
+
+export function shouldSkipAutoClassification(extras = {}, manualEvidence = null) {
+  return !extras.forceManualOverride && Boolean(manualEvidence);
+}
+
 export async function upsertMonthlyLateCount(userId, year, month, permittedLateCount) {
   const monthKey = `${year}-${String(month).padStart(2, "0")}`;
   await pool.query(
@@ -35,6 +59,14 @@ export async function upsertMonthlyLateCount(userId, year, month, permittedLateC
 }
 
 export async function persistDayClassification(userId, dateStr, result, extras = {}) {
+  const manualEvidence = await getManualOverrideEvidence(userId, dateStr);
+  if (shouldSkipAutoClassification(extras, manualEvidence)) {
+    console.info(
+      `[attendance-policy] Skipped auto recalc for user ${userId} on ${dateStr}: manual override by ${manualEvidence.edited_by_email || "unknown"}`
+    );
+    return { skipped: true, reason: "manual_override", manualEvidence };
+  }
+
   const legacyStatus = statusMap[result.bucket] || "absent";
   const lateMinutes = extras.lateMinutes ?? 0;
   const netHours = result.net_hours ?? 0;
@@ -68,6 +100,8 @@ export async function persistDayClassification(userId, dateStr, result, extras =
       [userId, dateStr]
     );
   }
+
+  return { skipped: false };
 }
 
 /**
@@ -116,6 +150,7 @@ export async function classifyAndPersistUserDate(
     lateMinutes,
     halfDaySlot: slotForDb,
     misuseOfTime: rowExtras.misuse_of_time,
+    forceManualOverride: rowExtras.forceManualOverride,
   });
 
   return { result, lateMinutes, halfDaySlot: slotForDb };
