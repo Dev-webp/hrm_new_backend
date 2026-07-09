@@ -249,8 +249,20 @@ const policyBucketStatusMap = {
   absent: "absent",
 };
 
+const policyBucketDisplayStatusMap = {
+  full_day: "Present",
+  half_day: "Half Day",
+  leave: "Leave",
+  holiday: "Holiday",
+  absent: "Absent",
+};
+
 function mapPolicyBucketToStatus(bucket) {
   return policyBucketStatusMap[bucket] || "absent";
+}
+
+function mapPolicyBucketToDisplayStatus(bucket) {
+  return policyBucketDisplayStatusMap[bucket] || "Absent";
 }
 
 function todayLocalDateStr() {
@@ -453,10 +465,7 @@ async function classifyAttendanceForResponse(user, dateStr, att, holidaySet) {
     logsByDate: logsByDateExtended,
   });
   const status = mapPolicyBucketToStatus(policy.bucket);
-  const computed = getComputedAttendanceStatus(
-    { ...(att || {}), ...log, date: dateStr },
-    { dateStr, holidaySet, monthlyLateStats, logsByDate: logsByDateExtended }
-  );
+  const displayStatus = mapPolicyBucketToDisplayStatus(policy.bucket);
 
   if (shouldLogPolicyDebug(dateStr, user.full_name)) {
     console.log(
@@ -473,20 +482,20 @@ async function classifyAttendanceForResponse(user, dateStr, att, holidaySet) {
   return {
     ...user,
     ...(att || {}),
-    status: computed.computed_status || status,
-    computed_status: computed.computed_status || status,
-    display_status: computed.display_status,
-    policy_status: computed.policy_status || policy.bucket,
-    policy_bucket: computed.policy_status || policy.bucket,
-    policy_reason: computed.policy_reason || policy.reason,
-    policy_flags: computed.policy_flags || policy.flags || [],
+    status,
+    computed_status: status,
+    display_status: displayStatus,
+    policy_status: policy.bucket,
+    policy_bucket: policy.bucket,
+    policy_reason: policy.reason,
+    policy_flags: policy.flags || [],
     half_day_slot: policy.half_day_slot || att?.half_day_slot || null,
     half_day_effective_minutes: policy.half_day_effective_minutes ?? null,
     half_day_slot_checked: policy.half_day_slot_checked ?? null,
     half_day_invalid_reason: policy.half_day_invalid_reason ?? null,
-    production_hours: Number(computed.production_hours ?? policy.net_hours ?? att?.production_hours ?? 0),
-    total_break_minutes: Number(computed.total_break_minutes ?? policy.total_break_minutes ?? att?.total_break_minutes ?? 0),
-    late_minutes: computed.late_minutes ?? att?.late_minutes ?? calculateLateMinutes(log?.office_in),
+    production_hours: Number(policy.net_hours ?? att?.production_hours ?? 0),
+    total_break_minutes: Number(policy.total_break_minutes ?? att?.total_break_minutes ?? 0),
+    late_minutes: att?.late_minutes ?? calculateLateMinutes(log?.office_in),
     check_in_time: att?.check_in_time ?? rawLog?.office_in ?? null,
     check_out_time: att?.check_out_time ?? rawLog?.office_out ?? null,
     ...lateLoginMeta,
@@ -744,6 +753,8 @@ async function recalcAttendanceForUserDateIfFinal(userId, dateStr) {
 export {
   finalizeForgottenCheckoutsBeforeToday,
   getDisplayAttendanceStatus,
+  mapPolicyBucketToDisplayStatus,
+  mapPolicyBucketToStatus,
   recalcAttendanceForUserDate,
 };
 

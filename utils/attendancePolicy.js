@@ -505,9 +505,9 @@ export function classifyDayPolicy({
     );
   }
 
-  if (netHours < MIN_HALF_DAY_HOURS) {
-    flags.push("less_than_4_net_hours");
-    return result("absent", "Less than 4 net production hours", netHours, flags, {
+  if (grossHours < MIN_HALF_DAY_HOURS) {
+    flags.push("less_than_4_gross_hours");
+    return result("absent", "Less than 4 gross hours", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
       gross_hours: Number(grossHours.toFixed(2)),
       attendance_track: "full_day_morning_half_day",
@@ -529,25 +529,25 @@ export function classifyDayPolicy({
   }
 
   let baseBucket = "absent";
-  let reason = "Less than 9 net production hours";
+  let reason = "Less than 9 gross hours";
 
   if (inSec !== null && inSec < T_HALF_DAY_LOGIN_START) {
-    if (netHours >= MIN_FULL_DAY_HOURS) {
+    if (grossHours >= MIN_FULL_DAY_HOURS) {
       baseBucket = "full_day";
-      reason = "9+ net production hours completed before half-day login cutoff";
+      reason = "9+ gross hours completed before half-day login cutoff";
       flags.push("full_day_policy_satisfied");
-    } else if (netHours >= MIN_HALF_DAY_HOURS) {
+    } else if (grossHours >= MIN_HALF_DAY_HOURS) {
       baseBucket = "half_day";
-      reason = "Early login with at least 4 and less than 9 net production hours";
+      reason = "Early login with at least 4 and less than 9 gross hours";
       flags.push("early_login_morning_half_day");
     } else {
-      flags.push("less_than_9_net_hours");
+      flags.push("less_than_9_gross_hours");
     }
-  } else if (netHours >= MIN_HALF_DAY_HOURS) {
+  } else if (grossHours >= MIN_HALF_DAY_HOURS) {
     baseBucket = "half_day";
-    reason = "Login at or after 10:30 AM and at least 4 net production hours completed";
+    reason = "Login at or after 10:30 AM and at least 4 gross hours completed";
   } else {
-    flags.push("less_than_4_net_hours");
+    flags.push("less_than_4_gross_hours");
   }
 
   if (totalBreakMinutes > MAX_BREAK_MINUTES) {
