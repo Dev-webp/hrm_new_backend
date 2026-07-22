@@ -35,6 +35,7 @@ import notificationRoutes from "./routes/notificationRoutes.js";
 import activityRoutes from "./routes/activityRoutes.js";
 import profileRoutes from "./routes/profileRoutes.js";
 import offerLetterRoutes from "./routes/offerLetterRoutes.js";
+import letterRoutes from "./routes/letterRoutes.js";
 import { initSocket } from "./socketManager.js";
 
 const app = express();
@@ -130,6 +131,7 @@ app.use("/api", notificationRoutes);
 app.use("/api", profileRoutes);
 app.use("/api/activity-logs", activityRoutes);
 app.use("/api/offer-letters", offerLetterRoutes);
+app.use("/api/letters", letterRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ message: `Route not found: ${req.method} ${req.originalUrl}` });

@@ -481,16 +481,41 @@ router.get("/employee/my-leaves", verifyToken, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────
-// PAYSLIP: employee's own payslip for a month
-// GET /api/employee/my-payslip?month=YYYY-MM-DD&userId=X
+// PAYSLIP: employee's own payslip for one month
+// GET /api/employee/my-payslip?month=YYYY-MM
 // ──────────────────────────────────────────────
 router.get("/employee/my-payslip", verifyToken, async (req, res) => {
   try {
     const userId = Number(req.user.id);
-    const { month } = req.query;
-    if (!month) return res.status(400).json({ message: "month required" });
-    const requestedMonth = String(month).slice(0, 7) + "-01";
-    const requestedYear = Number(requestedMonth.slice(0, 4));
+    const rawMonth = String(req.query.month || "").trim();
+
+    if (!rawMonth) {
+      return res.status(400).json({
+        message: "month required",
+      });
+    }
+
+    const match = rawMonth.match(
+      /^(\d{4})-(\d{2})(?:-\d{2})?$/
+    );
+
+    if (!match) {
+      return res.status(400).json({
+        message: "Invalid month format. Use YYYY-MM or YYYY-MM-DD",
+      });
+    }
+
+    const year = Number(match[1]);
+    const monthNumber = Number(match[2]);
+
+    if (monthNumber < 1 || monthNumber > 12) {
+      return res.status(400).json({
+        message: "Invalid month value",
+      });
+    }
+
+    const requestedMonth =
+      `${year}-${String(monthNumber).padStart(2, "0")}-01`;
 
     const result = await pool.query(
       `SELECT
@@ -501,40 +526,48 @@ router.get("/employee/my-payslip", verifyToken, async (req, res) => {
          p.payment_status AS status,
          p.created_at AS generated_at,
          CONCAT('/api/payroll/payslip/', p.id, '/download') AS pdf_url,
-         u.full_name, u.department, u.branch, u.email
+         u.full_name,
+         u.department,
+         u.branch,
+         u.email
        FROM payslip_records p
        JOIN users u ON p.user_id = u.id
        WHERE p.user_id = $1
          AND p.month = $2::date
-         AND EXTRACT(YEAR FROM p.month)::int = $3
        ORDER BY p.created_at DESC
        LIMIT 1`,
-      [userId, requestedMonth, requestedYear]
+      [userId, requestedMonth]
     );
 
     console.log("[EmployeePayslip] GET /employee/my-payslip", {
       loggedInUserId: userId,
+      rawMonth,
       requestedMonth,
-      requestedYear,
-      sqlResultCount: result.rows.length,
-      returnedPayslipCount: result.rows.length ? 1 : 0,
-      pdfPath: result.rows[0]?.pdf_url || null,
+      returnedPayslipCount: result.rows.length,
     });
 
-    res.json(result.rows[0] || null);
+    return res.json(result.rows[0] || null);
   } catch (err) {
-    console.error("[EmployeePayslip] GET /employee/my-payslip error:", err);
-    res.status(500).json({ message: err.message });
+    console.error(
+      "[EmployeePayslip] GET /employee/my-payslip error:",
+      err
+    );
+
+    return res.status(500).json({
+      message: err.message,
+    });
   }
 });
 
+
 // ──────────────────────────────────────────────
-// PAYSLIP: all payslips for an employee
-// GET /api/employee/my-payslips?userId=X
+// PAYSLIP: all payslips for logged-in employee
+// GET /api/employee/my-payslips
 // ──────────────────────────────────────────────
 router.get("/employee/my-payslips", verifyToken, async (req, res) => {
   try {
     const userId = Number(req.user.id);
+
     const result = await pool.query(
       `SELECT
          p.*,
@@ -544,7 +577,10 @@ router.get("/employee/my-payslips", verifyToken, async (req, res) => {
          p.payment_status AS status,
          p.created_at AS generated_at,
          CONCAT('/api/payroll/payslip/', p.id, '/download') AS pdf_url,
-         u.full_name, u.department, u.branch, u.email
+         u.full_name,
+         u.department,
+         u.branch,
+         u.email
        FROM payslip_records p
        JOIN users u ON p.user_id = u.id
        WHERE p.user_id = $1
@@ -554,19 +590,26 @@ router.get("/employee/my-payslips", verifyToken, async (req, res) => {
 
     console.log("[EmployeePayslip] GET /employee/my-payslips", {
       loggedInUserId: userId,
-      requestedMonth: req.query.month || null,
-      requestedYear: req.query.year || null,
-      sqlResultCount: result.rows.length,
       returnedPayslipCount: result.rows.length,
-      pdfPath: result.rows[0]?.pdf_url || null,
     });
 
-    res.json(result.rows);
+    return res.json(result.rows);
   } catch (err) {
-    console.error("[EmployeePayslip] GET /employee/my-payslips error:", err);
-    res.status(500).json({ message: err.message });
+    console.error(
+      "[EmployeePayslip] GET /employee/my-payslips error:",
+      err
+    );
+
+    return res.status(500).json({
+      message: err.message,
+    });
   }
 });
+
+
+
+
+
 
 // ──────────────────────────────────────────────
 // BREAKS: employee's own breaks for a date

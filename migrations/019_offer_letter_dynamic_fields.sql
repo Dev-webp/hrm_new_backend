@@ -1,0 +1,6 @@
+ALTER TABLE offer_letters
+  ADD COLUMN IF NOT EXISTS job_title TEXT,
+  ADD COLUMN IF NOT EXISTS job_description TEXT,
+  ADD COLUMN IF NOT EXISTS office_location TEXT,
+  ADD COLUMN IF NOT EXISTS joining_time VARCHAR(20),
+  ADD COLUMN IF NOT EXISTS salary_in_words TEXT;

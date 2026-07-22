@@ -107,14 +107,15 @@ export function calculateBreakMillis(log) {
 
   let breakSec = 0;
   let hasBreakPairs = false;
-  for (const [rawIn, rawOut] of collectBreakPairs(log)) {
+for (const [rawIn, rawOut] of collectBreakPairs(log)) {
     const bIn = timeToSeconds(rawIn);
     const bOut = timeToSeconds(rawOut);
+
     if (bIn !== null && bOut !== null && bOut > bIn) {
-      hasBreakPairs = true;
-      breakSec += overlapSeconds(bIn, bOut, workStart, workEnd);
+        hasBreakPairs = true;
+        breakSec += overlapSeconds(bIn, bOut, workStart, workEnd);
     }
-  }
+}
 
   if (!hasBreakPairs) {
     const storedBreakMinutes = Number(log?.total_break_minutes);
