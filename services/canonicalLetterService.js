@@ -54,9 +54,11 @@ export async function saveCanonicalLetter(letterType, data, userId) {
 }
 
 export async function renderCanonicalLetter(letterType, request = null) {
-  const letter = request || (await getCanonicalLetter(letterType));
+  console.time(`[LETTER_PERF][${letterType}] render-html`);
+  try {
+    const letter = request || (await getCanonicalLetter(letterType));
 
-  if (!letter) throw notFound();
+    if (!letter) throw notFound();
 
   console.log("========== PREVIEW DATA ==========");
   console.log(letter);
@@ -66,13 +68,18 @@ export async function renderCanonicalLetter(letterType, request = null) {
   console.log("document_data =", letter.document_data);
   console.log("=================================");
 
-  return previewLetter(letterType, letter);
+    return await previewLetter(letterType, letter);
+  } finally {
+    console.timeEnd(`[LETTER_PERF][${letterType}] render-html`);
+  }
 }
 
 export async function createCanonicalLetterPdf(letterType, request = null) {
-  const letter = request || (await getCanonicalLetter(letterType));
+  console.time(`[LETTER_PERF][${letterType}] create-pdf`);
+  try {
+    const letter = request || (await getCanonicalLetter(letterType));
 
-  if (!letter) throw notFound();
+    if (!letter) throw notFound();
 
   console.log("========= DOWNLOAD LETTER =========");
   console.log(letter);
@@ -82,9 +89,11 @@ export async function createCanonicalLetterPdf(letterType, request = null) {
   console.log("document_data =", letter.document_data);
   console.log("===================================");
 
-  const html = await renderCanonicalLetter(letterType, letter);
-
-  return createPdf(html);
+    const html = await renderCanonicalLetter(letterType, letter);
+    return await createPdf(html);
+  } finally {
+    console.timeEnd(`[LETTER_PERF][${letterType}] create-pdf`);
+  }
 }
 
 export async function setCanonicalLetterStatus(letterType, status) {
@@ -96,9 +105,19 @@ export async function emailCanonicalLetter(
   letterType,
   { to, subject, text, userId }
 ) {
-  const request = await getCanonicalLetter(letterType);
+  console.time(`[LETTER_PERF][${letterType}] send-email-total`);
+  console.time(`[LETTER_PERF][${letterType}] database-load-letter`);
+  let request;
+  try {
+    request = await getCanonicalLetter(letterType);
+  } finally {
+    console.timeEnd(`[LETTER_PERF][${letterType}] database-load-letter`);
+  }
 
-  if (!request) throw notFound();
+  if (!request) {
+    console.timeEnd(`[LETTER_PERF][${letterType}] send-email-total`);
+    throw notFound();
+  }
 
   const recipient = String(
     to ||
@@ -108,15 +127,15 @@ export async function emailCanonicalLetter(
   ).trim();
 
   if (!recipient || !subject) {
+    console.timeEnd(`[LETTER_PERF][${letterType}] send-email-total`);
     throw Object.assign(
       new Error("Recipient email and subject are required"),
       { statusCode: 400 }
     );
   }
 
-  const pdf = await createCanonicalLetterPdf(letterType, request);
-
   try {
+    const pdf = await createCanonicalLetterPdf(letterType, request);
     await sendLetterEmail({
       to: recipient,
       subject,
@@ -141,5 +160,7 @@ export async function emailCanonicalLetter(
     });
 
     throw error;
+  } finally {
+    console.timeEnd(`[LETTER_PERF][${letterType}] send-email-total`);
   }
 }

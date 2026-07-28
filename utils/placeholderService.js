@@ -27,18 +27,53 @@ const hasValue = (value) => value !== null && value !== undefined && String(valu
 
 function salaryInWords(value) {
   if (!hasValue(value)) return "";
+
   const amount = Number(String(value ?? "").replace(/[₹,\s]/g, ""));
   if (!Number.isFinite(amount) || amount < 0) return "";
-  const ones = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
-  const tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
-  const underThousand = (number) => number >= 100 ? `${ones[Math.floor(number / 100)]} Hundred${number % 100 ? ` ${underThousand(number % 100)}` : ""}` : number >= 20 ? `${tens[Math.floor(number / 10)]}${number % 10 ? ` ${ones[number % 10]}` : ""}` : ones[number];
+
+  const ones = [
+    "", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
+    "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen",
+    "Seventeen", "Eighteen", "Nineteen"
+  ];
+
+  const tens = [
+    "", "", "Twenty", "Thirty", "Fourty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"
+  ];
+
+  const underThousand = (number) =>
+    number >= 100
+      ? `${ones[Math.floor(number / 100)]} Hundred${number % 100 ? ` ${underThousand(number % 100)}` : ""}`
+      : number >= 20
+      ? `${tens[Math.floor(number / 10)]}${number % 10 ? ` ${ones[number % 10]}` : ""}`
+      : ones[number];
+
   const integer = Math.floor(amount);
-  if (integer === 0) return "Zero";
-  const parts = [[10000000, "Crore"], [100000, "Lakh"], [1000, "Thousand"]];
-  let remaining = integer; const words = [];
-  for (const [unit, label] of parts) { const count = Math.floor(remaining / unit); if (count) words.push(`${underThousand(count)} ${label}`); remaining %= unit; }
-  if (remaining) words.push(underThousand(remaining));
-  return words.join(" ");
+
+  if (integer === 0) return "Zero Rupees Only";
+
+  const parts = [
+    [10000000, "Crore"],
+    [100000, "Lakh"],
+    [1000, "Thousand"]
+  ];
+
+  let remaining = integer;
+  const words = [];
+
+  for (const [unit, label] of parts) {
+    const count = Math.floor(remaining / unit);
+    if (count) {
+      words.push(`${underThousand(count)} ${label}`);
+    }
+    remaining %= unit;
+  }
+
+  if (remaining) {
+    words.push(underThousand(remaining));
+  }
+
+  return `${words.join(" ")} Rupees Only`;
 }
 
 export function extractTemplatePlaceholders(template) {

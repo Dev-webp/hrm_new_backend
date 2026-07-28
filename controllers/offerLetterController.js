@@ -346,8 +346,11 @@ const controller = {
   },
 
   async sendEmail(req, res) {
+    let timing;
     try {
       const id = parseId(req.params.id);
+      timing = `[LETTER_PERF][legacy-offer:${id ?? "invalid"}] request-total`;
+      console.time(timing);
       if (id === null) {
         return res.status(400).json({ success: false, message: "Invalid offer letter ID" });
       }
@@ -355,6 +358,8 @@ const controller = {
       return res.status(200).json({ success: true, offer: result.rows[0] });
     } catch (error) {
       return sendError(res, error, "Failed to send offer letter email");
+    } finally {
+      if (timing) console.timeEnd(timing);
     }
   },
 };

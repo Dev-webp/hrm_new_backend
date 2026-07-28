@@ -11,20 +11,16 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-async function sendMail() {
-  try {
-    const info = await transporter.sendMail({
-      from: process.env.SMTP_FROM,
-      to: "your-email@example.com", // Replace with the recipient
-      subject: "HRMS Test Email",
-      text: "This is a test email from the HRMS application.",
-    });
+console.time("MAIL");
 
-    console.log("Email sent successfully!");
-    console.log("Message ID:", info.messageId);
-  } catch (err) {
-    console.error(err);
-  }
-}
+const info = await transporter.sendMail({
+  from: process.env.SMTP_FROM,
+  to: process.env.SMTP_USER, // or your test email
+  subject: "Test",
+  text: "Hello",
+});
 
-sendMail();
+console.timeEnd("MAIL");
+
+console.log("Email sent successfully!");
+console.log("Message ID:", info.messageId);

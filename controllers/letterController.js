@@ -167,17 +167,63 @@ const request = await saveCanonicalLetter(
   }
 },
  
-  async download(type, _req, res)
-   { try {
-     const pdf=await createCanonicalLetterPdf(type);
-      res.set({"Content-Type":"application/pdf","Content-Disposition":`attachment; filename="${type.toLowerCase()}-letter.pdf"`,"Content-Length":pdf.length}).send(pdf); } 
-      
-      catch(e){ return fail(res,e);
-        
-       } },
+async download(type, req, res) {
+  try {
+    requirePayload(type, req.body);
 
+    let current = { ...req.body };
 
+    if (type === "EXPERIENCE_RELIEVING") {
+      const employee = await getEmployeeLetterData(
+        Number(req.body.employee_id)
+      );
 
-  async sendEmail(type, req, res) { try { await emailCanonicalLetter(type, { to: req.body.recipient_email, subject: req.body.subject, text: req.body.message, userId: userId(req) }); res.json({success:true}); } catch(e){ return fail(res,e); } },
+      if (!employee) {
+        throw Object.assign(
+          new Error("Employee was not found"),
+          { statusCode: 404 }
+        );
+      }
+
+      current = {
+        ...req.body,
+        employee_id: employee.employee_id,
+        employee_name: employee.full_name,
+        full_name: employee.full_name,
+        designation: employee.designation,
+        department: employee.department,
+        branch: employee.employee_branch,
+        joining_date: employee.joining_date,
+        recipient_email: employee.employee_email,
+      };
+    }
+
+    const pdf = await createCanonicalLetterPdf(type, current);
+
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="${type.toLowerCase()}-letter.pdf"`,
+      "Content-Length": pdf.length,
+    });
+
+    res.send(pdf);
+
+  } catch (e) {
+    return fail(res, e);
+  }
+},
+
+  async sendEmail(type, req, res) {
+    const timing = `[LETTER_PERF][${type}] canonical-request-total`;
+    console.time(timing);
+    try {
+      await emailCanonicalLetter(type, { to: req.body.recipient_email, subject: req.body.subject, text: req.body.message, userId: userId(req) });
+      res.json({success:true});
+    } catch(e) {
+      return fail(res,e);
+    } finally {
+      console.timeEnd(timing);
+    }
+  },
 };
 export default controller;

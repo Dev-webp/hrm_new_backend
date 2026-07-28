@@ -221,13 +221,17 @@ await writeFile(
 
 console.log("I AM PDF SERVICE");
 
-  const pdfPath = path.join(outputDir, `${name}.pdf`);
-  await page.pdf({
-    path: pdfPath,
+await page.pdf({
+    format: "A4",
     printBackground: true,
     preferCSSPageSize: true,
-    margin: { top: "0", right: "0", bottom: "0", left: "0" },
-  });
+    margin: {
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
+    }
+});
   await page.screenshot({ path: path.join(outputDir, `${name}.png`), fullPage: true });
   await page.screenshot({
     path: path.join(outputDir, `${name}-header.png`),

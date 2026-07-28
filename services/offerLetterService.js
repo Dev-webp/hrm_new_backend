@@ -4,6 +4,7 @@ import puppeteer from "puppeteer";
 import { fileURLToPath } from "url";
 import { PDFDocument } from "pdf-lib";
 
+
 import OfferLetterModel from "../models/offerLetterModel.js";
 import { createCanonicalLetterPdf, emailCanonicalLetter, getCanonicalLetter, getCanonicalLetterById, renderCanonicalLetter, saveCanonicalLetter, setCanonicalLetterStatus } from "./canonicalLetterService.js";
 import { previewLetter } from "./previewService.js";
@@ -445,6 +446,8 @@ async function generatePdfBuffer(offer) {
     /* -----------------------------------------
        LOAD HTML ONCE
     ----------------------------------------- */
+fs.writeFileSync("debug.html", html);
+
 
     await page.setContent(html, {
       waitUntil: "load",

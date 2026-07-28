@@ -1,7 +1,10 @@
 import puppeteer from "puppeteer";
 import { PDFDocument } from "pdf-lib";
-
-import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { readFile, writeFile, mkdir } from "fs/promises";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const config = Object.freeze({
   concurrency: Math.max(1, Number(process.env.PDF_CONCURRENCY || 2)),
@@ -18,6 +21,7 @@ let launchPromise = null;
 let activeJobs = 0;
 let idleTimer = null;
 const queue = [];
+let pdfJobSequence = 0;
 
 export class PdfGenerationError extends Error {
   constructor(code, message, { statusCode = 500, cause } = {}) {
@@ -57,31 +61,82 @@ function invalidateBrowser(instance) {
 }
 
 async function forceClose(instance) {
+  console.time("[LETTER_PERF] chromium-browser-close");
   try { await timeout(instance.close(), config.shutdownTimeoutMs, "BROWSER_SHUTDOWN_TIMEOUT", "Browser shutdown timed out."); }
   catch {
     try { instance.process()?.kill("SIGKILL"); } catch { /* best-effort process cleanup */ }
-  } finally { invalidateBrowser(instance); }
+  } finally {
+    console.timeEnd("[LETTER_PERF] chromium-browser-close");
+    invalidateBrowser(instance);
+  }
 }
 
-async function getBrowser() {
-  if (browser?.connected) return browser;
+async function getBrowser(jobLabel) {
+  console.log("PID:", process.pid);
+  console.log("Browser exists:", !!browser);
+  console.log("Browser connected:", browser?.connected);
+
+  if (browser?.connected) {
+    console.info("[LETTER_PERF] browser-reused", { job: jobLabel });
+    console.log("♻️ Reusing existing browser");
+    return browser;
+  }
+
   if (!launchPromise) {
-    const pendingLaunch = puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"],
-    });
-    launchPromise = timeout(pendingLaunch, config.launchTimeoutMs, "BROWSER_LAUNCH_TIMEOUT", "Browser launch timed out.")
+    console.log("🚀 Launching new browser");
+
+    console.time(`${jobLabel} chromium-launch`);
+    launchPromise = timeout(
+      puppeteer.launch({
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-gpu",
+        ],
+      }),
+      config.launchTimeoutMs,
+      "BROWSER_LAUNCH_TIMEOUT",
+      "Browser launch timed out."
+    )
       .then((instance) => {
         browser = instance;
-        instance.once("disconnected", () => invalidateBrowser(instance));
+
+        const proc = instance.process();
+
+if (proc) {
+  console.log("🟢 Chromium launched:", proc.pid);
+
+  proc.on("exit", (code, signal) => {
+    console.log("🟥 Chromium process exited");
+    console.log("Exit code:", code);
+    console.log("Signal:", signal);
+  });
+
+  proc.on("error", (err) => {
+    console.error("🟥 Chromium process error:", err);
+  });
+}
+
+instance.once("disconnected", async () => {
+  console.log("❌ Browser disconnected");
+
+  try {
+    console.log("Connected before disconnect:", instance.connected);
+  } catch {}
+
+  console.trace("Disconnect stack");
+
+  invalidateBrowser(instance);
+});
         return instance;
       })
-      .catch(async (error) => {
-        pendingLaunch.then((instance) => forceClose(instance)).catch(() => {});
-        throw error instanceof PdfGenerationError ? error : new PdfGenerationError("BROWSER_LAUNCH_FAILED", "Browser launch failed.", { cause: error });
-      })
-      .finally(() => { launchPromise = null; });
+      .finally(() => {
+        console.timeEnd(`${jobLabel} chromium-launch`);
+        launchPromise = null;
+      });
   }
+
   return launchPromise;
 }
 
@@ -111,135 +166,275 @@ function drainQueue() {
   }
 }
 
-async function verifyDocument(page) {
-  const assets = await page.evaluate(async () => {
-    await document.fonts?.ready;
-    const images = [...document.images].map((image) => ({ src: image.getAttribute("src") || "", complete: image.complete, width: image.naturalWidth, height: image.naturalHeight }));
-    return {
-      readyState: document.readyState,
-      stylesheets: document.styleSheets.length,
-      fonts: document.fonts?.status || "unsupported",
-      images,
-    };
-  });
-  const failedImages = assets.images.filter((image) => !image.complete || !image.width || !image.height);
-  if (assets.readyState !== "complete" || !assets.stylesheets || assets.fonts === "loading") throw new PdfGenerationError("ASSET_VERIFICATION_FAILED", "Required document styles or fonts are unavailable.");
-  if (failedImages.length) throw new PdfGenerationError("ASSET_VERIFICATION_FAILED", "Required document assets are unavailable.");
-  return { imageCount: assets.images.length, fontStatus: assets.fonts };
+async function verifyDocument(page, jobLabel) {
+  console.time(`${jobLabel} image-verification`);
+
+  let assets;
+
+  try {
+    assets = await page.evaluate(() => {
+      const images = [...document.images].map(image => ({
+        src: image.getAttribute("src") || "",
+        complete: image.complete,
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+      }));
+
+      return {
+        readyState: document.readyState,
+        stylesheets: document.styleSheets.length,
+        fonts: document.fonts?.status || "unsupported",
+        images,
+      };
+    });
+  } finally {
+    console.timeEnd(`${jobLabel} image-verification`);
+  }
+
+  const failedImages = assets.images.filter(
+    image =>
+      image.src &&
+      (!image.complete ||
+       image.width === 0 ||
+       image.height === 0)
+  );
+
+  if (
+    assets.readyState !== "complete" ||
+    !assets.stylesheets ||
+    assets.fonts === "loading"
+  ) {
+    throw new PdfGenerationError(
+      "ASSET_VERIFICATION_FAILED",
+      "Required document styles or fonts are unavailable."
+    );
+  }
+
+  if (failedImages.length) {
+    console.log("========== FAILED IMAGES ==========");
+    console.table(failedImages);
+    console.log("===================================");
+
+    throw new PdfGenerationError(
+      "ASSET_VERIFICATION_FAILED",
+      "Required document assets are unavailable."
+    );
+  }
+
+  return {
+    imageCount: assets.images.length,
+    fontStatus: assets.fonts,
+  };
 }
 
-async function renderPdf(html) {
+
+async function renderPdf(html, jobLabel) {
   if (!String(html || "").trim()) throw new PdfGenerationError("TEMPLATE_ERROR", "PDF HTML is empty.", { statusCode: 422 });
   if (/\{\{\s*[A-Za-z0-9_]+\s*\}\}/.test(html)) throw new PdfGenerationError("PLACEHOLDER_VALIDATION_ERROR", "PDF HTML contains unresolved placeholders.", { statusCode: 422 });
   const startedAt = now();
   const details = templateDetails(html);
   const launchStartedAt = now();
-  const instance = await getBrowser();
+  const instance = await getBrowser(jobLabel);
   const browserLaunchDurationMs = duration(launchStartedAt);
   let page;
   try {
-    page = await timeout(
-    instance.newPage(),
-    config.renderTimeoutMs,
-    "RENDER_TIMEOUT",
-    "Page creation timed out."
-);
-
-// ADD THIS
-await page.setViewport({
-    width: 794,
-    height: 1123,
-    deviceScaleFactor: 1,
-});
-
-const renderStartedAt = now();
-
-await page.emulateMediaType("print");
-
-fs.writeFileSync("debug-experience.html", html);
-
-await timeout(
-    page.setContent(html, {
-        waitUntil: "networkidle0"
-    }),
-    config.renderTimeoutMs,
-    "RENDER_TIMEOUT",
-    "HTML rendering timed out."
-);
-
-await page.screenshot({
-    path: "puppeteer-render.png",
-    fullPage: true,
-});
-
-await page.evaluate(async () => {
-    await document.fonts.ready;
-});
-
-await page.evaluate(() => {
-    document.body.offsetHeight;
-});
-    if (details.letterType === "OFFER") {
-      // The legacy Offer template declares an A4 print page even though each
-      // of its fixed canvases is 1059.40625 x 1500.578125 CSS pixels. Override
-      // only the print page box at render time so Chromium fragments on the
-      // same boundaries as those canvases, without altering template markup.
-      await timeout(
-        page.addStyleTag({ content: "@page { size: 1059.40625px 1500.578125px !important; margin: 0 !important; }" }),
+    const renderStartedAt = now();
+    console.time(`${jobLabel} browser-new-page`);
+    try {
+      page = await timeout(
+        instance.newPage(),
         config.renderTimeoutMs,
         "RENDER_TIMEOUT",
-        "Offer print layout setup timed out."
+        "Page creation timed out."
       );
+    } finally {
+      console.timeEnd(`${jobLabel} browser-new-page`);
     }
 
+    console.time(`${jobLabel} viewport-and-print-media`);
+    try {
+await page.setViewport({
+    width:794,
+    height:1123,
+    deviceScaleFactor:1
+});
+
+      await page.emulateMediaType("print");
+    } finally {
+      console.timeEnd(`${jobLabel} viewport-and-print-media`);
+    }
+
+    console.time(`${jobLabel} set-content`);
+    try {
+      await timeout(
+        page.setContent(html, { waitUntil: "domcontentloaded" }),
+        config.renderTimeoutMs,
+        "RENDER_TIMEOUT",
+        "HTML rendering timed out."
+      );
+    } finally {
+      console.timeEnd(`${jobLabel} set-content`);
+    }
+
+
+
+
+
+
+
+
+
+
+    
+    console.time(`${jobLabel} font-loading`);
+    try {
+      await page.evaluate(async () => { await document.fonts.ready; });
+    } finally {
+      console.timeEnd(`${jobLabel} font-loading`);
+    }
+
+
+ 
+
      
-    const assets = await timeout(verifyDocument(page), config.renderTimeoutMs, "RENDER_TIMEOUT", "Asset verification timed out.");
+    console.time(`${jobLabel} document-verification`);
+    let assets;
+    try {
+      assets = await timeout(verifyDocument(page, jobLabel), config.renderTimeoutMs, "RENDER_TIMEOUT", "Asset verification timed out.");
+    } finally {
+      console.timeEnd(`${jobLabel} document-verification`);
+    }
     const renderDurationMs = duration(renderStartedAt);
     const pdfStartedAt = now();
 
     // Offer pages are fixed-size canvases. Printing them on A4 makes each
     // canvas overflow and split into an additional blank PDF page.
-    const pdfOptions = details.letterType === "OFFER"
-      ? {
-          printBackground: true,
-          preferCSSPageSize: true,
-          scale: 1,
-          margin: { top: "0px", right: "0px", bottom: "0px", left: "0px" },
-        }
-      : {
-          format: "A4",
-          printBackground: true,
-          preferCSSPageSize: true,
-          margin: { top: 0, right: 0, bottom: 0, left: 0 },
-        };
+  
+const pdfOptions = {
+  format: "A4",
+  printBackground: true,
+  preferCSSPageSize: true,
+  scale: 1,
+  margin: {
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+};
 
-    const pdf = await timeout(page.pdf(pdfOptions), config.generationTimeoutMs, "PDF_TIMEOUT", "PDF generation timed out.");
-    if (!pdf?.length) throw new PdfGenerationError("PDF_GENERATION_FAILED", "Generated PDF is empty.");
-    const pageCount = (await PDFDocument.load(pdf)).getPageCount();
-    console.info("[PDF_JOB_DIAGNOSTICS]", {
-      ...details,
-      placeholderCount: (html.match(/\{\{\s*[A-Za-z0-9_]+\s*\}\}/g) || []).length,
-      browserLaunchDurationMs,
-      renderDurationMs,
-      pdfDurationMs: duration(pdfStartedAt),
-      totalDurationMs: duration(startedAt),
-      pageCount,
-      generatedPdfBytes: pdf.length,
-      imageCount: assets.imageCount,
-      fontStatus: assets.fontStatus,
-      memoryRssBytes: process.memoryUsage?.().rss,
-    });
-    return Buffer.from(pdf);
-  } catch (error) {
-    if (error instanceof PdfGenerationError) throw error;
-    throw new PdfGenerationError("PDF_GENERATION_FAILED", "PDF generation failed.", { cause: error });
-  } finally {
-    if (page) await page.close().catch(() => {});
-  }
+// ---------------- PAGE METRICS ----------------
+const pageMetrics = await page.evaluate(() => {
+  const pageEl = document.querySelector(".page");
+
+  if (!pageEl) return null;
+
+  const rect = pageEl.getBoundingClientRect();
+
+  return {
+    width: rect.width,
+    height: rect.height,
+    clientWidth: pageEl.clientWidth,
+    clientHeight: pageEl.clientHeight,
+    scrollWidth: pageEl.scrollWidth,
+    scrollHeight: pageEl.scrollHeight,
+  };
+});
+
+console.log("========== PAGE METRICS ==========");
+console.table(pageMetrics);
+console.log("==================================");
+
+// ---------------- GENERATE PDF ----------------
+console.time(`${jobLabel} page-pdf`);
+
+let pdf;
+
+try {
+  pdf = await timeout(
+    page.pdf(pdfOptions),
+    config.generationTimeoutMs,
+    "PDF_TIMEOUT",
+    "PDF generation timed out."
+  );
+} finally {
+  console.timeEnd(`${jobLabel} page-pdf`);
 }
 
+if (!pdf || pdf.length === 0) {
+  throw new PdfGenerationError(
+    "PDF_GENERATION_FAILED",
+    "Generated PDF is empty."
+  );
+}
+
+// ---------------- CHECK PAGE COUNT ----------------
+console.time(`${jobLabel} pdf-buffer-inspection`);
+
+let pageCount;
+
+try {
+  const pdfDoc = await PDFDocument.load(pdf);
+  pageCount = pdfDoc.getPageCount();
+} finally {
+  console.timeEnd(`${jobLabel} pdf-buffer-inspection`);
+}
+
+// ---------------- DIAGNOSTICS ----------------
+console.info("[PDF_JOB_DIAGNOSTICS]", {
+  ...details,
+  placeholderCount:
+    (html.match(/\{\{\s*[A-Za-z0-9_]+\s*\}\}/g) || []).length,
+  browserLaunchDurationMs,
+  renderDurationMs,
+  pdfDurationMs: duration(pdfStartedAt),
+  totalDurationMs: duration(startedAt),
+  pageCount,
+  generatedPdfBytes: pdf.length,
+  imageCount: assets.imageCount,
+  fontStatus: assets.fontStatus,
+  memoryRssBytes: process.memoryUsage().rss,
+});
+
+// ---------------- RETURN BUFFER ----------------
+// ---------------- RETURN BUFFER ----------------
+console.time(`${jobLabel} buffer-conversion`);
+
+try {
+  return Buffer.from(pdf);
+} finally {
+  console.timeEnd(`${jobLabel} buffer-conversion`);
+}
+
+} catch (error) {
+  if (error instanceof PdfGenerationError) {
+    throw error;
+  }
+
+  throw new PdfGenerationError(
+    "PDF_GENERATION_FAILED",
+    "PDF generation failed.",
+    { cause: error }
+  );
+} finally {
+  if (page) {
+    console.time(`${jobLabel} browser-page-close`);
+    await page.close().catch(() => {});
+    console.timeEnd(`${jobLabel} browser-page-close`);
+  }
+}
+}
+
+
 /** Generates an A4 PDF while reusing a managed Chromium instance. */
-export function createPdf(html) { return enqueue(() => renderPdf(html)); }
+export function createPdf(html) {
+  const jobLabel = `[LETTER_PERF][pdf-${++pdfJobSequence}]`;
+  console.time(`${jobLabel} queue-wait`);
+  return enqueue(() => {
+    console.timeEnd(`${jobLabel} queue-wait`);
+    return renderPdf(html, jobLabel);
+  });
+}
 
 /** Allows graceful server shutdowns and tests to release Chromium deterministically. */
 export async function closePdfBrowser() {
