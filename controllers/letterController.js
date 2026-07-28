@@ -213,17 +213,35 @@ async download(type, req, res) {
   }
 },
 
-  async sendEmail(type, req, res) {
-    const timing = `[LETTER_PERF][${type}] canonical-request-total`;
-    console.time(timing);
-    try {
-      await emailCanonicalLetter(type, { to: req.body.recipient_email, subject: req.body.subject, text: req.body.message, userId: userId(req) });
-      res.json({success:true});
-    } catch(e) {
-      return fail(res,e);
-    } finally {
-      console.timeEnd(timing);
-    }
-  },
+async sendEmail(type, req, res) {
+  const timing = `[LETTER_PERF][${type}] canonical-request-total`;
+  console.time(timing);
+
+  try {
+    await emailCanonicalLetter(type, {
+      to: req.body.recipient_email,
+      subject: req.body.subject,
+      text: req.body.message,
+      userId: userId(req),
+    });
+
+    res.json({
+      success: true,
+      recipient: req.body.recipient_email,
+      referenceNumber: req.body.reference_number || "",
+      name:
+        type === "OFFER"
+          ? req.body.candidate_name
+          : req.body.employee_name,
+      sentAt: new Date().toISOString(),
+      type,
+    });
+
+  } catch (e) {
+    return fail(res, e);
+  } finally {
+    console.timeEnd(timing);
+  }
+},
 };
 export default controller;
