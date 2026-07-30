@@ -8,6 +8,7 @@ import {
 } from "../middleware/auth.js";
 import { recalcAttendanceForUserDate } from "./attendanceRoutes.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
+import { attachTotalBreakMinutes, calculateBreakMinutesFromRows } from "../utils/breakMinutes.js";
 
 const router = express.Router();
 
@@ -185,19 +186,13 @@ function validateBreakPolicy(breaks = {}) {
 }
 
 async function applyBreakAttendancePolicy(userId, date) {
-    const totalResult = await pool.query(
-        `SELECT COALESCE(SUM(
-            COALESCE(
-              duration_minutes,
-              GREATEST(EXTRACT(EPOCH FROM (end_time::time - start_time::time)) / 60, 0)::int,
-              0
-            )
-          ), 0)::int AS total_break_minutes
+    const breakRowsResult = await pool.query(
+        `SELECT break_type, start_time, end_time, duration_minutes, break3_sessions
          FROM employee_breaks
          WHERE user_id = $1 AND date = $2::date`,
         [userId, date]
     );
-    const totalBreakMinutes = Number(totalResult.rows[0]?.total_break_minutes || 0);
+    const totalBreakMinutes = calculateBreakMinutesFromRows(breakRowsResult.rows);
     const breakExceeded = totalBreakMinutes > MAX_BREAK_MINUTES;
 
     const attendanceResult = await pool.query(
@@ -327,7 +322,7 @@ router.get("/breaks", verifyToken, async (req, res) => {
                 assignBreakRow(grouped[row.user_id], row);
             }
 
-            return res.json(Object.values(grouped));
+            return res.json(Object.values(grouped).map(attachTotalBreakMinutes));
         }
 
         // ==========================================

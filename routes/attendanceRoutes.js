@@ -188,6 +188,10 @@ async function fetchLogsByDate(userId, startDate, endDate) {
        b2s.end_time                  AS break_out_2,
        ls.start_time                 AS lunch_in,
        ls.end_time                   AS lunch_out,
+       b3s.start_time                AS break3_in,
+       b3s.end_time                  AS break3_out,
+       b3s.duration_minutes          AS break3_duration_minutes,
+       b3s.break3_sessions           AS break3_sessions,
        a.total_break_minutes,
        a.extra_break_ins,
        a.extra_break_outs,
@@ -205,12 +209,16 @@ async function fetchLogsByDate(userId, startDate, endDate) {
        ON b2s.user_id = a.user_id
       AND b2s.date = a.date 
       AND b2s.break_type = 'break2'
-     LEFT JOIN employee_breaks ls  
-       ON ls.user_id = a.user_id
-      AND ls.date = a.date 
-      AND ls.break_type = 'lunch'
-     WHERE a.user_id = $1
-       AND a.date BETWEEN $2::date AND $3::date`,
+      LEFT JOIN employee_breaks ls  
+        ON ls.user_id = a.user_id
+       AND ls.date = a.date 
+       AND ls.break_type = 'lunch'
+      LEFT JOIN employee_breaks b3s
+        ON b3s.user_id = a.user_id
+       AND b3s.date = a.date
+       AND b3s.break_type = 'break3'
+      WHERE a.user_id = $1
+        AND a.date BETWEEN $2::date AND $3::date`,
     [userId, startDate, endDate]
   );
 
@@ -1347,11 +1355,19 @@ router.get("/attendance", verifyToken, async (req, res) => {
           b1.start_time AS break1_in,
           b1.end_time AS break1_out,
           b2.start_time AS break2_in,
-          b2.end_time AS break2_out,
-          ln.start_time AS lunch_in,
-          ln.end_time AS lunch_out,
-          COALESCE((
-            SELECT SUM(COALESCE(b.duration_minutes, 0))
+           b2.end_time AS break2_out,
+           ln.start_time AS lunch_in,
+           ln.end_time AS lunch_out,
+           b3.start_time AS break3_in,
+           b3.end_time AS break3_out,
+           b3.duration_minutes AS break3_duration_minutes,
+           b3.break3_sessions AS break3_sessions,
+           COALESCE((
+            SELECT SUM(COALESCE(
+              b.duration_minutes,
+              GREATEST(EXTRACT(EPOCH FROM (b.end_time::time - b.start_time::time)) / 60, 0)::int,
+              0
+            ))
             FROM employee_breaks b
             WHERE b.user_id = ar.user_id
               AND b.date = $1::date
@@ -1369,6 +1385,10 @@ router.get("/attendance", verifyToken, async (req, res) => {
          ON ln.user_id = ar.user_id
         AND ln.date = ar.date
         AND ln.break_type = 'lunch'
+       LEFT JOIN employee_breaks b3
+         ON b3.user_id = ar.user_id
+        AND b3.date = ar.date
+        AND b3.break_type = 'break3'
        WHERE ar.date = $1::date`,
       [date]
     );
@@ -1428,7 +1448,11 @@ router.get("/attendance/stats", verifyToken, async (req, res) => {
           ar.post_login_idle_minutes,
           ar.misuse_of_time,
           COALESCE((
-            SELECT SUM(COALESCE(b.duration_minutes, 0))
+            SELECT SUM(COALESCE(
+              b.duration_minutes,
+              GREATEST(EXTRACT(EPOCH FROM (b.end_time::time - b.start_time::time)) / 60, 0)::int,
+              0
+            ))
             FROM employee_breaks b
             WHERE b.user_id = ar.user_id
               AND b.date = $1::date

@@ -1,6 +1,8 @@
 // VJC Overseas attendance policy engine.
 // Pure functions only: no database calls in this file.
 
+import { calculateBreakMinutes } from "./breakMinutes.js";
+
 export const OFFICE_START = "10:00:00";
 export const OFFICE_END = "19:00:00";
 export const ON_TIME_GRACE_END = "10:14:59";
@@ -71,60 +73,8 @@ function secondsToTimeString(seconds) {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-function overlapSeconds(startA, endA, startB, endB) {
-  const start = Math.max(startA, startB);
-  const end = Math.min(endA, endB);
-  return Math.max(0, end - start);
-}
-
-function collectBreakPairs(log) {
-  const pairs = [
-    [log?.break_in, log?.break_out],
-    [log?.lunch_in, log?.lunch_out],
-    [log?.break_in_2, log?.break_out_2],
-  ];
-
-  const extraIns = Array.isArray(log?.extra_break_ins) ? log.extra_break_ins : [];
-  const extraOuts = Array.isArray(log?.extra_break_outs) ? log.extra_break_outs : [];
-  const pairCount = Math.min(extraIns.length, extraOuts.length);
-
-  for (let i = 0; i < pairCount; i += 1) {
-    pairs.push([extraIns[i], extraOuts[i]]);
-  }
-
-  return pairs;
-}
-
 export function calculateBreakMillis(log) {
-  const inSec = timeToSeconds(log?.office_in);
-  const outSec = timeToSeconds(log?.office_out);
-
-  if (inSec === null || outSec === null) return 0;
-
-  const workStart = inSec;
-  const workEnd = outSec;
-  if (workEnd <= workStart) return 0;
-
-  let breakSec = 0;
-  let hasBreakPairs = false;
-for (const [rawIn, rawOut] of collectBreakPairs(log)) {
-    const bIn = timeToSeconds(rawIn);
-    const bOut = timeToSeconds(rawOut);
-
-    if (bIn !== null && bOut !== null && bOut > bIn) {
-        hasBreakPairs = true;
-        breakSec += overlapSeconds(bIn, bOut, workStart, workEnd);
-    }
-}
-
-  if (!hasBreakPairs) {
-    const storedBreakMinutes = Number(log?.total_break_minutes);
-    if (Number.isFinite(storedBreakMinutes) && storedBreakMinutes > 0) {
-      return storedBreakMinutes * 60_000;
-    }
-  }
-
-  return breakSec * 1000;
+  return calculateBreakMinutes(log) * 60_000;
 }
 
 export function calculateNetWorkMillis(log) {

@@ -9,6 +9,7 @@ import { verifyToken, authorizeRoles } from "../middleware/auth.js";
 import { formatTime12Hour } from "../utils/timeFormat.js";
 import { getComputedAttendanceStatus } from "../utils/computedAttendanceStatus.js";
 import { formatDateStr } from "../utils/attendancePolicy.js";
+import { calculateBreakMinutesFromRows } from "../utils/breakMinutes.js";
 
 const router = express.Router();
 
@@ -172,10 +173,9 @@ router.get(
         ),
         pool.query(
           `SELECT user_id, TO_CHAR(date,'YYYY-MM-DD') AS date,
-                  SUM(COALESCE(duration_minutes, 0)) AS total_break_minutes
+                  break_type, start_time, end_time, duration_minutes, break3_sessions
            FROM employee_breaks
-           WHERE date BETWEEN $1::date AND $2::date
-           GROUP BY user_id, date`,
+           WHERE date BETWEEN $1::date AND $2::date`,
           [start, end]
         ),
         pool.query(
@@ -187,8 +187,14 @@ router.get(
       ]);
 
       const holidaySet = new Set(holidayRes.rows.map((r) => r.date));
+      const breakRowsByKey = new Map();
+      for (const row of breakRes.rows) {
+        const key = `${row.user_id}|${row.date}`;
+        if (!breakRowsByKey.has(key)) breakRowsByKey.set(key, []);
+        breakRowsByKey.get(key).push(row);
+      }
       const breakMap = new Map(
-        breakRes.rows.map((r) => [`${r.user_id}|${r.date}`, Number(r.total_break_minutes || 0)])
+        Array.from(breakRowsByKey.entries()).map(([key, rows]) => [key, calculateBreakMinutesFromRows(rows)])
       );
       const attMap = new Map();
       for (const row of attRes.rows) {
@@ -404,7 +410,7 @@ router.get(
           b3Count: break3Sessions.length,
           b3History: break3Sessions,
         };
-        const totalBreak = breakMins.b1 + breakMins.lunch + breakMins.b2 + breakMins.b3;
+        const totalBreak = calculateBreakMinutesFromRows(Object.values(dayBreaks));
 
         let workHours = 0;
         if (rawCheckIn !== "--" && rawCheckOut !== "--") {
@@ -423,6 +429,10 @@ router.get(
             lunch_out: lunch.end_time,
             break2_in: b2.start_time,
             break2_out: b2.end_time,
+            break3_in: b3.start_time,
+            break3_out: b3.end_time,
+            break3_duration_minutes: b3.duration_minutes,
+            break3_sessions: b3.break3_sessions,
             total_break_minutes: totalBreak,
           },
           {
@@ -518,10 +528,9 @@ router.get(
           ),
           pool.query(
             `SELECT user_id, TO_CHAR(date,'YYYY-MM-DD') AS date,
-                    SUM(COALESCE(duration_minutes, 0)) AS total_break_minutes
+                    break_type, start_time, end_time, duration_minutes, break3_sessions
              FROM employee_breaks
-             WHERE date BETWEEN $1::date AND $2::date
-             GROUP BY user_id, date`,
+             WHERE date BETWEEN $1::date AND $2::date`,
             [start, end]
           ),
           pool.query(
@@ -533,8 +542,14 @@ router.get(
         ]);
 
         const holidaySet = new Set(holidayRes.rows.map((r) => r.date));
+        const breakRowsByKey = new Map();
+        for (const row of breakRes.rows) {
+          const key = `${row.user_id}|${row.date}`;
+          if (!breakRowsByKey.has(key)) breakRowsByKey.set(key, []);
+          breakRowsByKey.get(key).push(row);
+        }
         const breakMap = new Map(
-          breakRes.rows.map((r) => [`${r.user_id}|${r.date}`, Number(r.total_break_minutes || 0)])
+          Array.from(breakRowsByKey.entries()).map(([key, rows]) => [key, calculateBreakMinutesFromRows(rows)])
         );
         const attMap = new Map();
         for (const row of attRes.rows) {

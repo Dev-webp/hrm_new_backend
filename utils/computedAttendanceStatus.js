@@ -64,6 +64,10 @@ function buildPolicyLog(record = {}) {
     break_out_2: normalizeTime(record.break_out_2 ?? record.break2_out),
     lunch_in: normalizeTime(record.lunch_in),
     lunch_out: normalizeTime(record.lunch_out),
+    break3_in: normalizeTime(record.break3_in),
+    break3_out: normalizeTime(record.break3_out),
+    break3_duration_minutes: Number(record.break3_duration_minutes || 0),
+    break3_sessions: record.break3_sessions || record.break3Sessions || [],
     total_break_minutes: Number(record.total_break_minutes || 0),
   };
 }

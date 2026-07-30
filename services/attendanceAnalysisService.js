@@ -7,6 +7,7 @@ import { pool } from "../middleware/db.js";
 import { monthRange, heatmapStatus } from "./attendanceAnalysisPure.js";
 import { getComputedAttendanceStatus } from "../utils/computedAttendanceStatus.js";
 import { formatDateStr } from "../utils/attendancePolicy.js";
+import { calculateBreakMinutesFromRows } from "../utils/breakMinutes.js";
 
 export { monthRange, heatmapStatus };
 
@@ -204,7 +205,7 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
       b3History: break3Sessions,
     };
     const totalDayBreak =
-      breakMins.b1 + breakMins.lunch + breakMins.b2 + breakMins.b3 ||
+      calculateBreakMinutesFromRows(Object.values(dayBreaks)) ||
       Number(att?.total_break_minutes) ||
       0;
 
@@ -218,6 +219,10 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
         lunch_out: lunch.end_time,
         break2_in: b2.start_time,
         break2_out: b2.end_time,
+        break3_in: b3.start_time,
+        break3_out: b3.end_time,
+        break3_duration_minutes: b3.duration_minutes,
+        break3_sessions: b3.break3_sessions,
         total_break_minutes: totalDayBreak,
       },
       {

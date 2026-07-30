@@ -24,6 +24,7 @@
  */
 
 import { getComputedAttendanceStatus } from "../utils/computedAttendanceStatus.js";
+import { calculateBreakMinutesFromRows } from "../utils/breakMinutes.js";
 
 // ─── Constants ────────────────────────────────────────────────
 const PAID_LEAVE_ELIGIBILITY_MONTHS = 3;
@@ -164,7 +165,7 @@ async function fetchPayrollData(pool, userId, year, month) {
   const joiningDate = safeDateString(userRes.rows[0].joining_date, monthStart);
   const effectiveStartDate = joiningDate > monthStart ? joiningDate : monthStart;
 
-  const [holidayRes, attRes, leaveRes] = await Promise.all([
+  const [holidayRes, attRes, breakRes, leaveRes] = await Promise.all([
     pool.query(
       `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date, name, type
        FROM company_holidays
@@ -182,6 +183,15 @@ async function fetchPayrollData(pool, userId, year, month) {
        FROM attendance_records
        WHERE user_id = $1 AND date BETWEEN $2 AND $3
        ORDER BY date`,
+      [userId, effectiveStartDate, monthEnd]
+    ),
+    pool.query(
+      `SELECT
+         TO_CHAR(date,'YYYY-MM-DD') AS date,
+         break_type, start_time, end_time, duration_minutes, break3_sessions
+       FROM employee_breaks
+       WHERE user_id = $1 AND date BETWEEN $2 AND $3
+       ORDER BY date, break_type`,
       [userId, effectiveStartDate, monthEnd]
     ),
     pool.query(
@@ -206,10 +216,25 @@ WHERE user_id = $1
     ),
   ]);
 
+  const breakRowsByDate = new Map();
+  for (const row of breakRes.rows) {
+    if (!breakRowsByDate.has(row.date)) breakRowsByDate.set(row.date, []);
+    breakRowsByDate.get(row.date).push(row);
+  }
+  const attendance = attRes.rows
+    .map(normalizeAttendanceRow)
+    .filter(row => row.date)
+    .map(row => ({
+      ...row,
+      total_break_minutes: breakRowsByDate.has(row.date)
+        ? calculateBreakMinutesFromRows(breakRowsByDate.get(row.date))
+        : row.total_break_minutes,
+    }));
+
   return {
     employee        : userRes.rows[0],
     holidays        : holidayRes.rows,
-    attendance      : attRes.rows.map(normalizeAttendanceRow).filter(row => row.date),
+    attendance,
     leaves          : leaveRes.rows,
     year, month,
     monthStart, monthEnd,
