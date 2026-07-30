@@ -22,6 +22,24 @@ import { recalcAttendanceForUserDate } from "./attendanceRoutes.js";
 
 const router = express.Router();
 
+function normalizeLeaveApprovalMetadata(row) {
+  const approvedByUserId = row.approved_by_user_id ?? row.approved_by ?? null;
+  const approvedByName = row.approved_by_name || row.approver_name || null;
+  const approvedByRole = row.approved_by_role || row.approver_role || null;
+  const approvedAt = row.approved_at || null;
+
+  return {
+    ...row,
+    approved_by_user_id: approvedByUserId,
+    approved_by_name: approvedByName,
+    approved_by_role: approvedByRole,
+    approvedByUserId,
+    approvedBy: approvedByName,
+    approvedRole: approvedByRole,
+    approvedAt,
+  };
+}
+
 function sameNumber(left, right) {
   return Math.abs(Number(left || 0) - Number(right || 0)) < 0.001;
 }
@@ -216,32 +234,36 @@ router.get(
       const result = await pool.query(
         `
         SELECT 
-          id,
-          leave_type,
-          from_date,
-          to_date,
-          days,
-          requested_days,
-          leave_duration_type,
-          half_day_session,
-          use_paid_leave,
-          balance_at_application,
-          paid_days,
-          unpaid_days,
-          remaining_paid_balance,
-          reason,
-          status,
-          approved_by,
-          approved_at,
-          rejection_reason
-        FROM leave_requests
-        WHERE user_id = $1
-        ORDER BY created_at DESC
+          l.id,
+          l.leave_type,
+          l.from_date,
+          l.to_date,
+          l.days,
+          l.requested_days,
+          l.leave_duration_type,
+          l.half_day_session,
+          l.use_paid_leave,
+          l.balance_at_application,
+          l.paid_days,
+          l.unpaid_days,
+          l.remaining_paid_balance,
+          l.reason,
+          l.status,
+          l.approved_by,
+          COALESCE(l.approved_by_user_id, l.approved_by) AS approved_by_user_id,
+          COALESCE(l.approved_by_name, approver.full_name) AS approved_by_name,
+          COALESCE(l.approved_by_role, approver.role) AS approved_by_role,
+          l.approved_at,
+          l.rejection_reason
+        FROM leave_requests l
+        LEFT JOIN users approver ON approver.id = COALESCE(l.approved_by_user_id, l.approved_by)
+        WHERE l.user_id = $1
+        ORDER BY l.created_at DESC
         `,
         [req.user.id]
       );
 
-      res.json(result.rows);
+      res.json(result.rows.map(normalizeLeaveApprovalMetadata));
     } catch (error) {
       console.error("My leaves fetch error:", error);
       res.status(500).json({
@@ -306,12 +328,14 @@ router.get(
           l.status,
           l.created_at,
           l.approved_by,
-          approver.full_name AS approved_by_name,
+          COALESCE(l.approved_by_user_id, l.approved_by) AS approved_by_user_id,
+          COALESCE(l.approved_by_name, approver.full_name) AS approved_by_name,
+          COALESCE(l.approved_by_role, approver.role) AS approved_by_role,
           l.approved_at,
           l.rejection_reason
         FROM leave_requests l
         JOIN users u ON u.id = l.user_id
-        LEFT JOIN users approver ON approver.id = l.approved_by
+        LEFT JOIN users approver ON approver.id = COALESCE(l.approved_by_user_id, l.approved_by)
         WHERE l.user_id = $1
           AND l.status = 'approved'
           AND l.from_date <= $3
@@ -321,7 +345,7 @@ router.get(
         [userId, monthStart, monthEnd]
       );
 
-      res.json(result.rows);
+      res.json(result.rows.map(normalizeLeaveApprovalMetadata));
     } catch (error) {
       console.error("Monthly approved leaves fetch error:", error);
       res.status(500).json({ message: "Failed to fetch monthly approved leaves" });
@@ -361,12 +385,14 @@ router.get(
           l.status,
           l.created_at,
           l.approved_by,
-          approver.full_name AS approved_by_name,
+          COALESCE(l.approved_by_user_id, l.approved_by) AS approved_by_user_id,
+          COALESCE(l.approved_by_name, approver.full_name) AS approved_by_name,
+          COALESCE(l.approved_by_role, approver.role) AS approved_by_role,
           l.approved_at,
           l.rejection_reason
         FROM leave_requests l
         JOIN users u ON u.id = l.user_id
-        LEFT JOIN users approver ON approver.id = l.approved_by
+        LEFT JOIN users approver ON approver.id = COALESCE(l.approved_by_user_id, l.approved_by)
         WHERE 1 = 1
       `;
 
@@ -400,7 +426,7 @@ router.get(
       query += ` ORDER BY l.created_at DESC`;
 
       const result = await pool.query(query, values);
-      res.json(result.rows);
+      res.json(result.rows.map(normalizeLeaveApprovalMetadata));
     } catch (error) {
       console.error("Fetch leave requests error:", error);
       res.status(500).json({
@@ -636,13 +662,27 @@ const changeLeaveStatus = async (req, res) => {
         });
       }
 
+      const actorResult = await pool.query(
+        "SELECT id, full_name, email, role, branch FROM users WHERE id = $1",
+        [req.user.id]
+      );
+      const actor = actorResult.rows[0] || req.user;
+      const actorId = actor.id || req.user.id;
+      const actorName = actor.full_name || actor.email || "Unknown user";
+      const actorRole = actor.role || req.user.role || null;
+
       let updateFields = `
         status = $1,
-        updated_at = CURRENT_TIMESTAMP
+        updated_at = CURRENT_TIMESTAMP,
+        approved_by = $2,
+        approved_by_user_id = $3,
+        approved_by_name = $4,
+        approved_by_role = $5,
+        approved_at = CURRENT_TIMESTAMP
       `;
 
-      const params = [status];
-      let paramIndex = 2;
+      const params = [status, actorId, actorId, actorName, actorRole];
+      let paramIndex = 6;
       let deduction = null;
       let approvedPreview = null;
 
@@ -686,23 +726,20 @@ const changeLeaveStatus = async (req, res) => {
         );
 
         updateFields += `
-          , approved_by = $${paramIndex}
-          , approved_at = CURRENT_TIMESTAMP
           , rejection_reason = NULL
-          , leave_category = $${paramIndex + 1}
-          , is_paid_leave = $${paramIndex + 2}
-          , paid_days = $${paramIndex + 3}
-          , unpaid_days = $${paramIndex + 4}
-          , salary_deduction_days = $${paramIndex + 5}
-          , penalty_applied = $${paramIndex + 6}
-          , penalty_days = $${paramIndex + 7}
-          , include_sunday_penalty = $${paramIndex + 8}
-          , policy_reason = $${paramIndex + 9}
-          , remaining_paid_balance = $${paramIndex + 10}
+          , leave_category = $${paramIndex}
+          , is_paid_leave = $${paramIndex + 1}
+          , paid_days = $${paramIndex + 2}
+          , unpaid_days = $${paramIndex + 3}
+          , salary_deduction_days = $${paramIndex + 4}
+          , penalty_applied = $${paramIndex + 5}
+          , penalty_days = $${paramIndex + 6}
+          , include_sunday_penalty = $${paramIndex + 7}
+          , policy_reason = $${paramIndex + 8}
+          , remaining_paid_balance = $${paramIndex + 9}
         `;
 
         params.push(
-          req.user.id,
           approvedPreview.final_category,
           approvedPreview.paid_days > 0,
           approvedPreview.paid_days,
@@ -715,7 +752,7 @@ const changeLeaveStatus = async (req, res) => {
           approvedPreview.remaining_paid_balance
         );
 
-        paramIndex += 11;
+        paramIndex += 10;
       }
 
       if (status === "rejected") {
@@ -742,11 +779,6 @@ const changeLeaveStatus = async (req, res) => {
         await recalcLeaveAttendanceDates(leave, "leave_rejection");
       }
 
-      const actorResult = await pool.query(
-        "SELECT id, full_name, email, role, branch FROM users WHERE id = $1",
-        [req.user.id]
-      );
-      const actor = actorResult.rows[0] || req.user;
       const changeReason = status === "rejected"
         ? (rejection_reason || "No rejection reason supplied")
         : (approvedPreview?.policy_reason || "Leave request approved");
@@ -779,6 +811,14 @@ const changeLeaveStatus = async (req, res) => {
         message: "Leave status updated",
         leave_request_id: leave.id,
         status,
+        approved_by_user_id: actorId,
+        approved_by_name: actorName,
+        approved_by_role: actorRole,
+        approved_at: new Date().toISOString(),
+        approvedByUserId: actorId,
+        approvedBy: actorName,
+        approvedRole: actorRole,
+        approvedAt: new Date().toISOString(),
         calculation: approvedPreview,
       });
 
@@ -985,4 +1025,3 @@ router.delete(
 );
 
 export default router;
-
