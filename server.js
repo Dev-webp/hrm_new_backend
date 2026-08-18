@@ -9,6 +9,10 @@ import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import { verifyToken } from "./middleware/auth.js";
 import { pool } from "./middleware/db.js";
+import { desktopOnly } from "./middleware/desktopOnly.js";
+
+
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -37,6 +41,8 @@ import profileRoutes from "./routes/profileRoutes.js";
 import offerLetterRoutes from "./routes/offerLetterRoutes.js";
 import letterRoutes from "./routes/letterRoutes.js";
 import { initSocket } from "./socketManager.js";
+import { desktopOnly } from "./middleware/desktopOnly.js";
+
 
 const app = express();
 let httpServer;
