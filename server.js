@@ -41,7 +41,6 @@ import profileRoutes from "./routes/profileRoutes.js";
 import offerLetterRoutes from "./routes/offerLetterRoutes.js";
 import letterRoutes from "./routes/letterRoutes.js";
 import { initSocket } from "./socketManager.js";
-import { desktopOnly } from "./middleware/desktopOnly.js";
 
 
 const app = express();
@@ -118,7 +117,7 @@ const apiLimiter = rateLimit({
   message: { message: "Too many requests, please slow down" },
 });
 app.use("/api/", apiLimiter);
-
+app.use("/api", desktopOnly);
 app.use("/api", authRoutes);
 app.use("/api", employeeRoutes);
 app.use("/api", departmentRoutes);
