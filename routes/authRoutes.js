@@ -6,6 +6,21 @@ import { verifyToken } from "../middleware/auth.js";
 import { emitNotification } from "../socketManager.js";
 
 const router = express.Router();
+
+// ▼▼▼ NEW — notify invoice-backend of login/logout for round-robin online status ▼▼▼
+const INVOICE_BACKEND_URL = "https://vjc-invoice-backend-main.vercel.app";
+async function notifyInvoiceOnlineStatus(email, isOnline) {
+  try {
+    await fetch(`${INVOICE_BACKEND_URL}/api/departments/staff/${isOnline ? "online" : "offline"}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+  } catch (err) {
+    console.error("Invoice online-status sync error (non-fatal):", err.message);
+  }
+}
+// ▲▲▲ NEW block ends here ▲▲▲
 const DUMMY_BCRYPT_HASH = "$2b$10$7EqJtq98hPqEX7fNZaFWoOhiCwN2kgeJXgsF5fV7oJd6mJ0Bla6D6";
 
 
@@ -56,7 +71,7 @@ router.post("/login", async (req, res) => {
       { expiresIn: "12h" }
     );
 
-    // 🔔 LOGIN NOTIFICATION
+// 🔔 LOGIN NOTIFICATION
     emitNotification({
       userId: user.id,
       actionType: "login",
@@ -65,6 +80,9 @@ router.post("/login", async (req, res) => {
    targetRole: "BOTH",
       branch: user.branch,
     }).catch((err) => console.error("Login notification error:", err));
+
+    // 🔄 SYNC — mark this employee online for invoice round-robin
+    notifyInvoiceOnlineStatus(user.email, true);
 
     res.json({
       token,
@@ -95,7 +113,7 @@ router.post("/logout", verifyToken, async (req, res) => {
 
   try {
 
-    // 🔔 LOGOUT NOTIFICATION
+// 🔔 LOGOUT NOTIFICATION
     emitNotification({
       userId: req.user.id,
       actionType: "logout",
@@ -105,6 +123,8 @@ router.post("/logout", verifyToken, async (req, res) => {
       branch: req.user.branch,
     }).catch((err) => console.error("Logout notification error:", err));
 
+    // 🔄 SYNC — mark this employee offline for invoice round-robin
+    notifyInvoiceOnlineStatus(req.user.email, false);
     res.json({
       message: "Logged out"
     });
