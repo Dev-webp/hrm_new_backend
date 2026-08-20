@@ -8,7 +8,7 @@ import { emitNotification } from "../socketManager.js";
 const router = express.Router();
 
 // ▼▼▼ NEW — notify invoice-backend of login/logout for round-robin online status ▼▼▼
-const INVOICE_BACKEND_URL = "https://vjc-invoice-backend-main.vercel.app";
+const INVOICE_BACKEND_URL = "https://invoice.vjcoverseas.com";
 async function notifyInvoiceOnlineStatus(email, isOnline) {
   try {
     await fetch(`${INVOICE_BACKEND_URL}/api/departments/staff/${isOnline ? "online" : "offline"}`, {
@@ -72,19 +72,19 @@ router.post("/login", async (req, res) => {
     );
 
 // 🔔 LOGIN NOTIFICATION
-    emitNotification({
-      userId: user.id,
-      actionType: "login",
-      description:
-        `${user.full_name} (${user.role}) logged in from ${user.branch || "Unknown"} branch`,
-   targetRole: "BOTH",
-      branch: user.branch,
-    }).catch((err) => console.error("Login notification error:", err));
+emitNotification({
+  userId: user.id,
+  actionType: "login",
+  description:
+    `${user.full_name} (${user.role}) logged in from ${user.branch || "Unknown"} branch`,
+  targetRole: "BOTH",
+  branch: user.branch,
+}).catch((err) => console.error("Login notification error:", err));
 
-    // 🔄 SYNC — mark this employee online for invoice round-robin
-    notifyInvoiceOnlineStatus(user.email, true);
+// 🔄 SYNC — mark this employee online for invoice round-robin
+notifyInvoiceOnlineStatus(user.email, true);
 
-    res.json({
+res.json({
       token,
       user: {
         id: user.id,
@@ -114,18 +114,19 @@ router.post("/logout", verifyToken, async (req, res) => {
   try {
 
 // 🔔 LOGOUT NOTIFICATION
-    emitNotification({
-      userId: req.user.id,
-      actionType: "logout",
-      description:
-        `${req.user.full_name} (${req.user.role}) logged out`,
-    targetRole: "BOTH",
-      branch: req.user.branch,
-    }).catch((err) => console.error("Logout notification error:", err));
+emitNotification({
+  userId: req.user.id,
+  actionType: "logout",
+  description:
+    `${req.user.full_name} (${req.user.role}) logged out`,
+  targetRole: "BOTH",
+  branch: req.user.branch,
+}).catch((err) => console.error("Logout notification error:", err));
 
-    // 🔄 SYNC — mark this employee offline for invoice round-robin
-    notifyInvoiceOnlineStatus(req.user.email, false);
-    res.json({
+// 🔄 SYNC — mark this employee offline for invoice round-robin
+notifyInvoiceOnlineStatus(req.user.email, false);
+
+res.json({
       message: "Logged out"
     });
 
