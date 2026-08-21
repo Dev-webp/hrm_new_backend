@@ -1117,7 +1117,7 @@ router.post("/attendance", verifyToken, async (req, res) => {
           return res.status(409).json({ message: "Already checked in today" });
         }
 
-        // Notifications
+                // Notifications
         const attId = updateResult.rows[0]?.id;
         notifyCheckin({ id: userId, full_name, branch, department }, timeStr, lateMinutes, attId)
           .catch((err) => console.error("Check-in notification error:", err));
@@ -1125,6 +1125,13 @@ router.post("/attendance", verifyToken, async (req, res) => {
           notifyLateLogin({ id: userId, full_name, branch, department }, lateMinutes, attId)
             .catch((err) => console.error("Late-login notification error:", err));
         }
+
+        // 🔄 SYNC — mark this employee online for invoice round-robin
+        fetch("https://invoice.vjcoverseas.com/api/departments/staff/online", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: req.user.email }),
+        }).catch((err) => console.error("Invoice online-status sync error (non-fatal):", err.message));
         break;
       }
 
@@ -1153,7 +1160,7 @@ router.post("/attendance", verifyToken, async (req, res) => {
           logResult: true,
         });
 
-        const attRow = await pool.query(
+                const attRow = await pool.query(
           `SELECT id, production_hours FROM attendance_records WHERE user_id=$1 AND date=$2`,
           [userId, today]
         );
@@ -1163,6 +1170,13 @@ router.post("/attendance", verifyToken, async (req, res) => {
           attRow.rows[0]?.production_hours || 0,
           attRow.rows[0]?.id
         ).catch((err) => console.error("Checkout notification error:", err));
+
+        // 🔄 SYNC — mark this employee offline for invoice round-robin
+        fetch("https://invoice.vjcoverseas.com/api/departments/staff/offline", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: req.user.email }),
+        }).catch((err) => console.error("Invoice online-status sync error (non-fatal):", err.message));
         break;
       }
 
