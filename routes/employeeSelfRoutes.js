@@ -298,6 +298,12 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
         user.department
       ]
     );
+    // 🔄 SYNC — mark this employee online for invoice round-robin
+    fetch("https://invoice.vjcoverseas.com/api/departments/staff/online", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: req.user.email }),
+    }).catch((err) => console.error("Invoice online-status sync error (non-fatal):", err.message));
 
     res.json({ ...result.rows[0], status: "in_progress" });
 
@@ -366,7 +372,7 @@ router.post("/employee/check-out", verifyToken, async (req, res) => {
       logResult: true,
     });
 
-    const result = await pool.query(
+       const result = await pool.query(
       `
       SELECT *
       FROM attendance_records
@@ -376,12 +382,18 @@ router.post("/employee/check-out", verifyToken, async (req, res) => {
       [userId, date]
     );
 
+    // 🔄 SYNC — mark this employee offline for invoice round-robin
+    fetch("https://invoice.vjcoverseas.com/api/departments/staff/offline", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: req.user.email }),
+    }).catch((err) => console.error("Invoice online-status sync error (non-fatal):", err.message));
+
     res.json(result.rows[0]);
 
   } catch(err) {
 
     console.error("POST /employee/check-out error:", err);
-
     res.status(500).json({
       message: err.message
     });
