@@ -5,17 +5,60 @@ import { pool } from "../middleware/db.js";
 const router = express.Router();
 
 function livePresentSql(alias = "a") {
-  return `COALESCE(${alias}.status, '') IN ('full_day', 'present', 'half_day', 'in_progress', 'working')
-    OR (${alias}.check_in_time IS NOT NULL AND COALESCE(${alias}.status, '') NOT IN ('leave', 'holiday', 'absent'))`;
+  return `
+    (
+      COALESCE(${alias}.status, '') IN (
+        'full_day',
+        'present',
+        'half_day',
+        'in_progress',
+        'working'
+      )
+      OR
+      (
+        ${alias}.check_in_time IS NOT NULL
+        AND COALESCE(${alias}.status, '') NOT IN (
+          'leave',
+          'paid_leave',
+          'unpaid_leave',
+          'holiday',
+          'absent'
+        )
+      )
+    )
+  `;
 }
+
 
 function liveLeaveSql(alias = "a") {
-  return `COALESCE(${alias}.status, '') = 'leave'
-    AND COALESCE(${alias}.leave_status, 'approved') = 'approved'`;
+  return `
+    (
+      COALESCE(${alias}.status, '') IN (
+        'leave',
+        'paid_leave',
+        'unpaid_leave'
+      )
+      AND
+      (
+        COALESCE(${alias}.leave_status, 'approved') = 'approved'
+        OR COALESCE(${alias}.status, '') IN (
+          'paid_leave',
+          'unpaid_leave'
+        )
+      )
+    )
+  `;
 }
-
 function liveAbsentSql(alias = "a") {
-  return `COALESCE(${alias}.status, 'absent') = 'absent'`;
+  return `
+    (
+      COALESCE(${alias}.status, 'absent') = 'absent'
+      AND COALESCE(${alias}.leave_type, '') NOT IN (
+        'paid_leave',
+        'unpaid_leave'
+      )
+    )
+  `;
 }
 
 router.get("/admin-dashboard", verifyToken, authorizeRoles("SUPER_ADMIN"), (req, res) => {
@@ -154,4 +197,3 @@ router.get("/employee-dashboard", verifyToken, authorizeRoles("EMPLOYEE"), (req,
 });
 
 export default router;
-

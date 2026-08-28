@@ -2459,12 +2459,22 @@ router.put(
       const holidaySet =
         await fetchHolidaySetForDateRange(date, date);
 
-      const updatedRecord =
-        withDisplayAttendanceStatus(
-          updated.rows[0],
-          date,
-          { holidaySet }
-        );
+  const rawUpdatedRecord = updated.rows[0];
+
+const updatedRecord = rawUpdatedRecord
+  ? {
+      ...rawUpdatedRecord,
+
+      // IMPORTANT:
+      // If admin manually selected a status,
+      // preserve that exact status for the response,
+      // activity log, and frontend.
+      status:
+        manualStatus !== null
+          ? manualStatus
+          : rawUpdatedRecord.status,
+    }
+  : null;
 
       const newValues = {
         check_in_time:
