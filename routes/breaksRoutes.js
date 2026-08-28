@@ -9,6 +9,10 @@ import {
 import { recalcAttendanceForUserDate } from "./attendanceRoutes.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
 import { attachTotalBreakMinutes, calculateBreakMinutesFromRows } from "../utils/breakMinutes.js";
+import {
+    buildBreakChangeRows,
+    classifyBreakActivity,
+} from "../utils/breakActivityLog.js";
 
 const router = express.Router();
 
@@ -561,56 +565,86 @@ router.put(
                 );
             }
 
-            const breakPolicy = await applyBreakAttendancePolicy(userId, date);
+const breakPolicy = await applyBreakAttendancePolicy(userId, date);
 
-            await logActivity({
-                userId: editor.id,
-                userName: editor.full_name || editor.email || "Unknown user",
-                role: editor.role || req.user.role,
-                action: "BREAK_EDITED",
-                actionType: "break_changed",
-                moduleName: "Breaks",
-                details: `Breaks edited for ${employee.full_name} (${employee.email}) on ${date}. Reason: ${reason}.`,
-                ip: getClientIp(req),
-                branch: employee.branch || req.user.branch || "all",
-                department: employee.department || null,
-                metadata: {
-                    editedBy: {
-                        id: editor.id,
-                        name: editor.full_name || editor.email || "Unknown user",
-                        email: editor.email || null,
-                        role: editor.role || req.user.role
-                    },
-                    editedFor: {
-                        id: Number(userId),
-                        name: employee.full_name,
-                        email: employee.email
-                    },
-                    date,
-                    reason,
-                    oldValues,
-                    newValues,
-                    editedRecordId: updatedBreaksResult.rows.map((row) => row.id)
-                }
-            });
+// ======================================================
+// ACTIVITY LOG
+// Self break start/end:
+//   - Save break normally
+//   - Recalculate attendance normally
+//   - DO NOT create activity log
+//
+// Manager editing another employee:
+//   - Save break normally
+//   - Recalculate attendance normally
+//   - CREATE activity log
+// ======================================================
 
-            res.json({
-                message: breakPolicy.warning || "Breaks updated successfully",
-                ...breakPolicy,
-                breaks: updatedBreaksResult.rows
-            });
+const isSelfBreakUpdate = Number(editor.id) === Number(employee.id);
+
+if (!isSelfBreakUpdate) {
+    try {
+        const breakActivity = classifyBreakActivity(editor.id, employee.id);
+        const breakChanges = buildBreakChangeRows(oldValues, newValues);
+
+        await logActivity({
+            userId: editor.id,
+            userName: editor.full_name || editor.email || "Unknown user",
+            role: editor.role || req.user.role,
+            action: breakActivity.action,
+            actionType: breakActivity.actionType,
+            moduleName: "Breaks",
+            details: `Breaks updated for ${employee.full_name} on ${date}. Reason: ${reason}.`,
+            ip: getClientIp(req),
+            branch: employee.branch || req.user.branch || "all",
+            department: employee.department || null,
+            metadata: {
+                editedBy: {
+                    id: editor.id,
+                    name: editor.full_name || editor.email || "Unknown user",
+                    email: editor.email || null,
+                    role: editor.role || req.user.role
+                },
+                editedFor: {
+                    id: Number(userId),
+                    name: employee.full_name,
+                    email: employee.email
+                },
+                date,
+                reason,
+                oldValues,
+                newValues,
+                breakChanges,
+                isSelfAction: false,
+                editedRecordId: updatedBreaksResult.rows.map((row) => row.id)
+            }
+        });
+    } catch (activityLogError) {
+        // Activity logging must NEVER break the actual break update.
+        console.error(
+            "BREAK ACTIVITY LOG ERROR:",
+            activityLogError
+        );
+    }
+}
+return res.json({
+    message: "Breaks updated successfully",
+    userId: Number(userId),
+    date,
+    breaks: updatedBreaksResult.rows,
+    attendance: breakPolicy
+});
 
         } catch (error) {
-
             console.error("UPDATE BREAKS ERROR:", error);
 
-            res.status(500).json({
-                message: "Failed to update breaks"
+            return res.status(500).json({
+                message: error.message || "Failed to update breaks"
             });
         }
     }
 );
-
+            
 // ======================================================
 // EMPLOYEE BREAK HISTORY
 // (for Chairman / Super Admin)

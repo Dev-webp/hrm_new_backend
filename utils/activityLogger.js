@@ -76,6 +76,7 @@ const SEVERITY_MAP = {
   BreakEnd: "info",      BreakExceeded: "warning", PayslipGen: "info",
   PayslipPaid: "info",   SettingsUpdate: "warning", FailedLogin: "critical",
   Suspicious: "critical", ATTENDANCE_EDITED: "warning", BREAK_EDITED: "warning",
+  BREAK_SELF_UPDATED: "info",
   EMPLOYEE_MARKED_INACTIVE: "warning", EMPLOYEE_STATUS_CHANGED: "warning",
   LEAVE_CHANGED: "warning",
 };
