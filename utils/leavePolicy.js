@@ -1,4 +1,8 @@
 import { pool } from "../middleware/db.js";
+import {
+  applyAttendanceLeaveBalanceDelta,
+  getAttendanceLeaveBalanceDelta,
+} from "./leaveBalanceTransition.js";
 
 export const SAT_MON_LIMIT_PER_MONTH = 1;
 
@@ -91,8 +95,8 @@ function monthsCompleted(joiningDate, targetDate = new Date()) {
   );
 }
 
-async function getPolicyNumber(key, fallback) {
-  const result = await pool.query(
+async function getPolicyNumber(key, fallback, db = pool) {
+  const result = await db.query(
     `SELECT config_value FROM policy_config WHERE config_key = $1`,
     [key]
   );
@@ -100,11 +104,11 @@ async function getPolicyNumber(key, fallback) {
   return result.rows.length ? Number(result.rows[0].config_value) : fallback;
 }
 
-export async function ensureMonthlyPaidLeaveCredit(userId, targetDate = new Date()) {
+export async function ensureMonthlyPaidLeaveCredit(userId, targetDate = new Date(), db = pool) {
   targetDate = capAtCurrentMonth(targetDate);
   const { year, month } = getYearMonth(targetDate);
 
-  const userRes = await pool.query(
+  const userRes = await db.query(
     `SELECT joining_date FROM users WHERE id = $1`,
     [userId]
   );
@@ -113,8 +117,8 @@ export async function ensureMonthlyPaidLeaveCredit(userId, targetDate = new Date
     throw new Error("User not found");
   }
 
-  const probationMonths = await getPolicyNumber("paid_leave_probation_months", 3);
-  const monthlyCredit = await getPolicyNumber("paid_leave_per_month", 1);
+  const probationMonths = await getPolicyNumber("paid_leave_probation_months", 3, db);
+  const monthlyCredit = await getPolicyNumber("paid_leave_per_month", 1, db);
 
   const completedMonths = monthsCompleted(
     userRes.rows[0].joining_date,
@@ -124,7 +128,7 @@ export async function ensureMonthlyPaidLeaveCredit(userId, targetDate = new Date
   const eligible = completedMonths >= probationMonths;
   const credit = eligible ? monthlyCredit : 0;
 
-  await pool.query(
+  await db.query(
     `
     INSERT INTO leave_balance (
       user_id,
@@ -249,6 +253,122 @@ export async function deductApprovedLeave(userId, days, leaveType, targetDate = 
   return {
     paid_days: 0,
     unpaid_days: requestedDays,
+  };
+}
+
+function parseAttendanceDate(attendanceDate) {
+  const dateString = String(attendanceDate || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
+    const err = new Error("Invalid attendance date");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const date = new Date(`${dateString}T00:00:00`);
+  if (Number.isNaN(date.getTime())) {
+    const err = new Error("Invalid attendance date");
+    err.statusCode = 400;
+    throw err;
+  }
+  return date;
+}
+
+function rejectFutureLeaveMonth(targetDate) {
+  const now = new Date();
+  const targetMonth = new Date(targetDate.getFullYear(), targetDate.getMonth(), 1);
+  const currentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  if (targetMonth > currentMonth) {
+    const err = new Error("Paid leave cannot be assigned for a future month");
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
+/**
+ * Applies exactly one manual attendance status transition to leave_balance.
+ * The caller must provide the same PostgreSQL transaction client used for the
+ * attendance update so either both writes commit or neither does.
+ */
+export async function adjustLeaveBalanceForAttendanceStatusChange({
+  userId,
+  attendanceDate,
+  oldStatus,
+  newStatus,
+  client,
+  skipAccounting = false,
+}) {
+  if (!client?.query) throw new Error("A transaction client is required");
+
+  const requestedDelta = getAttendanceLeaveBalanceDelta(oldStatus, newStatus);
+  if (skipAccounting || (!requestedDelta.paid_days && !requestedDelta.unpaid_days)) {
+    return {
+      applied: false,
+      skipped: Boolean(skipAccounting),
+      paid_days: 0,
+      unpaid_days: 0,
+    };
+  }
+
+  const targetDate = parseAttendanceDate(attendanceDate);
+  rejectFutureLeaveMonth(targetDate);
+  const { year, month } = getYearMonth(targetDate);
+
+  await ensureMonthlyPaidLeaveCredit(userId, targetDate, client);
+
+  const lockedBalances = await client.query(
+    `SELECT id, year, month, paid_leave_credited, paid_leave_used, unpaid_leave_used
+     FROM leave_balance
+     WHERE user_id = $1
+       AND (year < $2 OR (year = $2 AND month <= $3))
+     ORDER BY year, month
+     FOR UPDATE`,
+    [userId, year, month]
+  );
+
+  const targetBalance = lockedBalances.rows.find(
+    (row) => Number(row.year) === year && Number(row.month) === month
+  );
+  if (!targetBalance) throw new Error("Leave balance row could not be created");
+
+  const totalCredited = lockedBalances.rows.reduce(
+    (sum, row) => sum + Number(row.paid_leave_credited || 0),
+    0
+  );
+  const totalPaidUsed = lockedBalances.rows.reduce(
+    (sum, row) => sum + Number(row.paid_leave_used || 0),
+    0
+  );
+  const available = Math.max(0, totalCredited - totalPaidUsed);
+
+  const appliedDelta = applyAttendanceLeaveBalanceDelta({
+    oldStatus,
+    newStatus,
+    availablePaidBalance: available,
+    targetPaidUsed: targetBalance.paid_leave_used,
+    targetUnpaidUsed: targetBalance.unpaid_leave_used,
+  });
+
+  await client.query(
+    `UPDATE leave_balance
+     SET paid_leave_used = GREATEST(COALESCE(paid_leave_used, 0) + $1, 0),
+         unpaid_leave_used = GREATEST(COALESCE(unpaid_leave_used, 0) + $2, 0),
+         balance = $3,
+         updated_at = NOW()
+     WHERE id = $4`,
+    [
+      appliedDelta.paid_days,
+      appliedDelta.unpaid_days,
+      appliedDelta.available_after,
+      targetBalance.id,
+    ]
+  );
+
+  return {
+    applied: true,
+    skipped: false,
+    ...appliedDelta,
+    year,
+    month,
   };
 }
 

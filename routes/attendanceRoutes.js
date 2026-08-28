@@ -26,6 +26,7 @@ import {
   getComputedAttendanceStatus,
   withComputedAttendanceStatus,
 } from "../utils/computedAttendanceStatus.js";
+import { adjustLeaveBalanceForAttendanceStatusChange } from "../utils/leavePolicy.js";
 
 // ── Policy engine (pure functions, no DB calls) ──────────────────
 import {
@@ -521,7 +522,9 @@ async function finalizeForgottenCheckoutsBeforeToday() {
      WHERE date < $1::date
        AND check_in_time IS NOT NULL
        AND check_out_time IS NULL
-       AND COALESCE(status, '') NOT IN ('leave', 'holiday', 'absent')`,
+       AND COALESCE(status, '') NOT IN (
+         'leave', 'paid_leave', 'unpaid_leave', 'holiday', 'absent'
+       )`,
     [today]
   );
   if (result.rowCount > 0) {
@@ -639,7 +642,10 @@ async function recalcAttendanceForUserDate(userId, dateStr, options = {}) {
     );
     const currentStatus = String(statusResult.rows[0]?.status || "").toLowerCase();
 
-    if (isPastAttendanceDate(dateStr) && !["leave", "holiday"].includes(currentStatus)) {
+    if (
+      isPastAttendanceDate(dateStr) &&
+      !["leave", "paid_leave", "unpaid_leave", "holiday"].includes(currentStatus)
+    ) {
       await pool.query(
         `UPDATE attendance_records
          SET status = 'absent',
@@ -653,7 +659,7 @@ async function recalcAttendanceForUserDate(userId, dateStr, options = {}) {
       return;
     }
 
-    const openStatus = ["leave", "holiday"].includes(currentStatus)
+    const openStatus = ["leave", "paid_leave", "unpaid_leave", "holiday"].includes(currentStatus)
       ? currentStatus
       : "absent";
 
@@ -1946,41 +1952,99 @@ router.put(
       const date = rawDate ? String(rawDate).slice(0, 10) : null;
 
       if (!userId || !date) {
-        return res.status(400).json({ message: "userId and date are required" });
+        return res.status(400).json({
+          message: "userId and date are required",
+        });
       }
 
       const reason = String(req.body.reason || "").trim();
+
       if (reason.length < 5) {
         return res.status(400).json({
           message: "Please enter a reason of at least 5 characters.",
         });
       }
 
-      const hasBodyField = (name) => Object.prototype.hasOwnProperty.call(req.body, name);
+      const hasBodyField = (name) =>
+        Object.prototype.hasOwnProperty.call(req.body, name);
 
-      // Safely convert time strings. Empty values clear only the submitted field.
+      // ============================================================
+      // STATUS
+      // ============================================================
+
+      const requestedStatus = hasBodyField("status")
+        ? String(req.body.status || "").trim().toLowerCase()
+        : undefined;
+
+      const allowedStatuses = [
+        "auto",
+        "full_day",
+        "half_day",
+        "absent",
+        "paid_leave",
+        "unpaid_leave",
+        "leave",
+        "present",
+      ];
+
+      if (
+        requestedStatus !== undefined &&
+        !allowedStatuses.includes(requestedStatus)
+      ) {
+        return res.status(400).json({
+          message: `Invalid attendance status: ${requestedStatus}`,
+        });
+      }
+
+      // Safely convert time strings.
       const toTime = (v) =>
-        v && v !== "--" && String(v).trim() !== "" ? String(v).trim() : null;
+        v && v !== "--" && String(v).trim() !== ""
+          ? String(v).trim()
+          : null;
 
       const requestedTimes = {
-        check_in_time: hasBodyField("check_in_time") ? toTime(req.body.check_in_time) : undefined,
-        check_out_time: hasBodyField("check_out_time") ? toTime(req.body.check_out_time) : undefined,
-        break1_in: hasBodyField("break1_in") ? toTime(req.body.break1_in) : undefined,
-        break1_out: hasBodyField("break1_out") ? toTime(req.body.break1_out) : undefined,
-        break2_in: hasBodyField("break2_in") ? toTime(req.body.break2_in) : undefined,
-        break2_out: hasBodyField("break2_out") ? toTime(req.body.break2_out) : undefined,
+        check_in_time: hasBodyField("check_in_time")
+          ? toTime(req.body.check_in_time)
+          : undefined,
+
+        check_out_time: hasBodyField("check_out_time")
+          ? toTime(req.body.check_out_time)
+          : undefined,
+
+        break1_in: hasBodyField("break1_in")
+          ? toTime(req.body.break1_in)
+          : undefined,
+
+        break1_out: hasBodyField("break1_out")
+          ? toTime(req.body.break1_out)
+          : undefined,
+
+        break2_in: hasBodyField("break2_in")
+          ? toTime(req.body.break2_in)
+          : undefined,
+
+        break2_out: hasBodyField("break2_out")
+          ? toTime(req.body.break2_out)
+          : undefined,
+
         lunch_in: hasBodyField("lunch_in")
           ? toTime(req.body.lunch_in)
           : hasBodyField("break3_in")
           ? toTime(req.body.break3_in)
           : undefined,
+
         lunch_out: hasBodyField("lunch_out")
           ? toTime(req.body.lunch_out)
           : hasBodyField("break3_out")
           ? toTime(req.body.break3_out)
           : undefined,
       };
+
       const editSource = String(req.body.source || "").toLowerCase();
+
+      // ============================================================
+      // EMPLOYEE
+      // ============================================================
 
       const employeeRes = await client.query(
         `SELECT id, full_name, email, branch, department
@@ -1988,16 +2052,25 @@ router.put(
          WHERE id = $1`,
         [userId]
       );
+
       if (!employeeRes.rows.length) {
-        return res.status(404).json({ message: "User not found" });
+        return res.status(404).json({
+          message: "User not found",
+        });
       }
+
       const employee = employeeRes.rows[0];
 
       if (!canEditAttendance(req.user, employee)) {
         return res.status(403).json({
-          message: "You can only edit attendance for employees in your permitted branch",
+          message:
+            "You can only edit attendance for employees in your permitted branch",
         });
       }
+
+      // ============================================================
+      // EDITOR
+      // ============================================================
 
       const editorRes = await client.query(
         `SELECT id, full_name, email, role
@@ -2005,6 +2078,7 @@ router.put(
          WHERE id = $1`,
         [req.user.id]
       );
+
       const editor = editorRes.rows[0] || {
         id: req.user.id,
         full_name: req.user.full_name || req.user.email || "Unknown user",
@@ -2012,54 +2086,148 @@ router.put(
         role: req.user.role,
       };
 
+      // ============================================================
+      // OLD ATTENDANCE
+      // ============================================================
+
+      await client.query("BEGIN");
+      // A row lock cannot protect a not-yet-created attendance row. This
+      // transaction lock serializes concurrent edits for this employee/date.
+      await client.query(
+        "SELECT pg_advisory_xact_lock($1, $2)",
+        [userId, Number(date.replaceAll("-", ""))]
+      );
+
       const oldRes = await client.query(
-        `SELECT id, TO_CHAR(date,'YYYY-MM-DD') AS date,
-                check_in_time, check_out_time, status
+        `SELECT
+           id,
+           TO_CHAR(date,'YYYY-MM-DD') AS date,
+           check_in_time,
+           check_out_time,
+           status,
+           leave_type,
+           leave_status,
+           leave_request_id
          FROM attendance_records
-         WHERE user_id = $1 AND date = $2::date`,
+         WHERE user_id = $1
+           AND date = $2::date
+         FOR UPDATE`,
         [userId, date]
       );
+
       const oldRecord = oldRes.rows[0] || null;
+
       const oldValues = {
         check_in_time: oldRecord?.check_in_time || null,
         check_out_time: oldRecord?.check_out_time || null,
         status: oldRecord?.status || null,
+        leave_type: oldRecord?.leave_type || null,
+        leave_status: oldRecord?.leave_status || null,
       };
+
+      // ============================================================
+      // OLD BREAKS
+      // ============================================================
 
       const breakRes = await client.query(
         `SELECT break_type, start_time, end_time
          FROM employee_breaks
-         WHERE user_id = $1 AND date = $2::date
+         WHERE user_id = $1
+           AND date = $2::date
            AND break_type IN ('break1', 'break2', 'lunch')`,
         [userId, date]
       );
-      const oldBreaks = new Map(breakRes.rows.map((row) => [row.break_type, row]));
+
+      const oldBreaks = new Map(
+        breakRes.rows.map((row) => [row.break_type, row])
+      );
+
       const oldBreakValues = {
         break1_in: oldBreaks.get("break1")?.start_time || null,
         break1_out: oldBreaks.get("break1")?.end_time || null,
+
         break2_in: oldBreaks.get("break2")?.start_time || null,
         break2_out: oldBreaks.get("break2")?.end_time || null,
+
         lunch_in: oldBreaks.get("lunch")?.start_time || null,
         lunch_out: oldBreaks.get("lunch")?.end_time || null,
       };
+
+      // ============================================================
+      // NEXT VALUES
+      // ============================================================
+
       const nextMainValues = {
         check_in_time:
           requestedTimes.check_in_time !== undefined
             ? requestedTimes.check_in_time
             : oldValues.check_in_time,
+
         check_out_time:
           requestedTimes.check_out_time !== undefined
             ? requestedTimes.check_out_time
             : oldValues.check_out_time,
       };
 
-      await client.query("BEGIN");
+      /*
+       * IMPORTANT:
+       *
+       * "auto" means do not manually override the status.
+       * For every other status, save the admin-selected status.
+       */
+      const manualStatus =
+        requestedStatus !== undefined && requestedStatus !== "auto"
+          ? requestedStatus
+          : null;
+
+          console.log("🔥 MANUAL STATUS DEBUG:", {
+  userId,
+  date,
+  requestedStatus,
+  manualStatus,
+  body: req.body,
+});
+
+      const leaveBalanceAdjustment = await adjustLeaveBalanceForAttendanceStatusChange({
+        userId,
+        attendanceDate: date,
+        oldStatus: oldRecord?.status,
+        newStatus: manualStatus || oldRecord?.status,
+        client,
+        // Approved leave requests have already adjusted leave_balance before
+        // synchronizing their attendance row; calendar edits must not double count.
+        skipAccounting: Boolean(
+          oldRecord?.leave_request_id && oldRecord?.leave_status === "approved"
+        ),
+      });
+
+      // ============================================================
+      // ATTENDANCE HISTORY
+      // ============================================================
 
       await client.query(
         `INSERT INTO attendance_history
-           (original_attendance_id, date, employee_email, office_in, office_out,
-            edited_by_email, edit_reason, snapshot_metadata)
-         VALUES ($1, $2::date, $3, $4::time, $5::time, $6, $7, $8::jsonb)`,
+           (
+             original_attendance_id,
+             date,
+             employee_email,
+             office_in,
+             office_out,
+             edited_by_email,
+             edit_reason,
+             snapshot_metadata
+           )
+         VALUES
+           (
+             $1,
+             $2::date,
+             $3,
+             $4::time,
+             $5::time,
+             $6,
+             $7,
+             $8::jsonb
+           )`,
         [
           oldRecord?.id || null,
           date,
@@ -2069,148 +2237,386 @@ router.put(
           req.user.email || req.user.full_name || "unknown",
           reason,
           JSON.stringify({
-            oldValues: { ...oldValues, ...oldBreakValues },
+            oldValues: {
+              ...oldValues,
+              ...oldBreakValues,
+            },
             requestedValues: req.body,
+            leaveBalanceAdjustment: {
+              oldStatus: oldRecord?.status || null,
+              newStatus: manualStatus || oldRecord?.status || null,
+              ...leaveBalanceAdjustment,
+            },
           }),
         ]
       );
 
-      // ── 1. Upsert main attendance record ─────────────────────
+      // ============================================================
+      // 1. UPSERT ATTENDANCE
+      // ============================================================
+
       await client.query(
         `INSERT INTO attendance_records
-           (user_id, date, check_in_time, check_out_time, status,
-            extra_break_ins, extra_break_outs)
+           (
+             user_id,
+             date,
+             check_in_time,
+             check_out_time,
+             status,
+             extra_break_ins,
+             extra_break_outs
+           )
          VALUES
-           ($1, $2::date,
-            $3::time,
-            $4::time,
-            'absent', '[]'::jsonb, '[]'::jsonb)
-         ON CONFLICT (user_id, date) DO UPDATE SET
-           check_in_time  = EXCLUDED.check_in_time,
-           check_out_time = EXCLUDED.check_out_time,
-           updated_at     = CURRENT_TIMESTAMP`,
-        [userId, date, nextMainValues.check_in_time, nextMainValues.check_out_time]
+           (
+             $1,
+             $2::date,
+             $3::time,
+             $4::time,
+             COALESCE($5, 'absent'),
+             '[]'::jsonb,
+             '[]'::jsonb
+           )
+         ON CONFLICT (user_id, date)
+         DO UPDATE SET
+           check_in_time =
+             EXCLUDED.check_in_time,
+
+           check_out_time =
+             EXCLUDED.check_out_time,
+
+           status =
+             CASE
+               WHEN $5 IS NOT NULL
+                 THEN EXCLUDED.status
+               ELSE attendance_records.status
+             END,
+
+           updated_at = CURRENT_TIMESTAMP`,
+        [
+          userId,
+          date,
+          nextMainValues.check_in_time,
+          nextMainValues.check_out_time,
+          manualStatus,
+        ]
       );
 
+      // ============================================================
+      // 2. BREAKS
+      // ============================================================
+
       const upsertBreak = async (breakType, inKey, outKey) => {
-        if (requestedTimes[inKey] === undefined && requestedTimes[outKey] === undefined) return;
+        if (
+          requestedTimes[inKey] === undefined &&
+          requestedTimes[outKey] === undefined
+        ) {
+          return;
+        }
+
         const existing = oldBreaks.get(breakType) || {};
-        const nextIn = requestedTimes[inKey] !== undefined ? requestedTimes[inKey] : existing.start_time || null;
-        const nextOut = requestedTimes[outKey] !== undefined ? requestedTimes[outKey] : existing.end_time || null;
+
+        const nextIn =
+          requestedTimes[inKey] !== undefined
+            ? requestedTimes[inKey]
+            : existing.start_time || null;
+
+        const nextOut =
+          requestedTimes[outKey] !== undefined
+            ? requestedTimes[outKey]
+            : existing.end_time || null;
 
         await client.query(
-          `INSERT INTO employee_breaks (user_id, date, break_type, start_time, end_time)
-           VALUES ($1, $2::date, $3, $4::time, $5::time)
-           ON CONFLICT (user_id, date, break_type) DO UPDATE SET
+          `INSERT INTO employee_breaks
+             (
+               user_id,
+               date,
+               break_type,
+               start_time,
+               end_time
+             )
+           VALUES
+             (
+               $1,
+               $2::date,
+               $3,
+               $4::time,
+               $5::time
+             )
+           ON CONFLICT (user_id, date, break_type)
+           DO UPDATE SET
              start_time = EXCLUDED.start_time,
              end_time   = EXCLUDED.end_time`,
-          [userId, date, breakType, nextIn, nextOut]
+          [
+            userId,
+            date,
+            breakType,
+            nextIn,
+            nextOut,
+          ]
         );
       };
 
-      await upsertBreak("break1", "break1_in", "break1_out");
-      await upsertBreak("break2", "break2_in", "break2_out");
-      await upsertBreak("lunch", "lunch_in", "lunch_out");
+      await upsertBreak(
+        "break1",
+        "break1_in",
+        "break1_out"
+      );
+
+      await upsertBreak(
+        "break2",
+        "break2_in",
+        "break2_out"
+      );
+
+      await upsertBreak(
+        "lunch",
+        "lunch_in",
+        "lunch_out"
+      );
+
+      // ============================================================
+      // 3. COMMIT
+      // ============================================================
 
       await client.query("COMMIT");
 
-      if (nextMainValues.check_in_time && nextMainValues.check_out_time) {
-        const [editYear, editMonth] = date.split("-").map(Number);
-        await recalcAttendanceForUserMonth(userId, editYear, editMonth, {
-          source: "manual_attendance_edit",
-          forceManualOverride: true,
-        });
-      } else if (requestedTimes.check_in_time !== undefined) {
+      // ============================================================
+      // 4. RECALCULATE ONLY WHEN STATUS WAS NOT MANUALLY FORCED
+      // ============================================================
+
+      if (
+        !manualStatus &&
+        nextMainValues.check_in_time &&
+        nextMainValues.check_out_time
+      ) {
+        const [editYear, editMonth] = date
+          .split("-")
+          .map(Number);
+
+        await recalcAttendanceForUserMonth(
+          userId,
+          editYear,
+          editMonth,
+          {
+            source: "manual_attendance_edit",
+            forceManualOverride: true,
+          }
+        );
+      } else if (
+        !manualStatus &&
+        requestedTimes.check_in_time !== undefined
+      ) {
         await pool.query(
           `UPDATE attendance_records
-           SET late_minutes = $1, updated_at = CURRENT_TIMESTAMP
-           WHERE user_id = $2 AND date = $3::date`,
-          [calculateLateMinutes(nextMainValues.check_in_time), userId, date]
+           SET
+             late_minutes = $1,
+             updated_at = CURRENT_TIMESTAMP
+           WHERE user_id = $2
+             AND date = $3::date`,
+          [
+            calculateLateMinutes(
+              nextMainValues.check_in_time
+            ),
+            userId,
+            date,
+          ]
         );
       }
 
-      // ── 6. If admin forced a status, override policy result ───
-      // ── 7. Return updated record ──────────────────────────────
+      // ============================================================
+      // 5. FETCH UPDATED RECORD
+      // ============================================================
+
       const updated = await pool.query(
         `SELECT
-           id, user_id, TO_CHAR(date,'YYYY-MM-DD') AS date,
-           check_in_time, check_out_time,
-           status, late_minutes, production_hours, total_break_minutes,
-           half_day_slot, leave_type, leave_status,
-           post_login_idle_minutes, misuse_of_time
+           id,
+           user_id,
+           TO_CHAR(date,'YYYY-MM-DD') AS date,
+           check_in_time,
+           check_out_time,
+           status,
+           late_minutes,
+           production_hours,
+           total_break_minutes,
+           half_day_slot,
+           leave_type,
+           leave_status,
+           post_login_idle_minutes,
+           misuse_of_time
          FROM attendance_records
-         WHERE user_id = $1 AND date = $2::date`,
+         WHERE user_id = $1
+           AND date = $2::date`,
         [userId, date]
       );
 
       invalidateCache("summary");
-      invalidateCache(`individual|${userId}|${date.slice(0, 7)}`);
+      invalidateCache(
+        `individual|${userId}|${date.slice(0, 7)}`
+      );
+
       scheduleViewRefresh();
 
-      const holidaySet = await fetchHolidaySetForDateRange(date, date);
-      const updatedRecord = withDisplayAttendanceStatus(updated.rows[0], date, { holidaySet });
+      const holidaySet =
+        await fetchHolidaySetForDateRange(date, date);
+
+      const updatedRecord =
+        withDisplayAttendanceStatus(
+          updated.rows[0],
+          date,
+          { holidaySet }
+        );
+
       const newValues = {
-        check_in_time: updatedRecord?.check_in_time || null,
-        check_out_time: updatedRecord?.check_out_time || null,
-        status: updatedRecord?.status || null,
+        check_in_time:
+          updatedRecord?.check_in_time || null,
+
+        check_out_time:
+          updatedRecord?.check_out_time || null,
+
+        status:
+          updatedRecord?.status || null,
       };
+
+      // ============================================================
+      // 6. ACTIVITY LOG
+      // ============================================================
 
       await logActivity({
         userId: editor.id,
-        userName: editor.full_name || editor.email || "Unknown user",
-        role: editor.role || req.user.role,
+        userName:
+          editor.full_name ||
+          editor.email ||
+          "Unknown user",
+
+        role:
+          editor.role ||
+          req.user.role,
+
         action: "ATTENDANCE_EDITED",
+
         actionType: "attendance_changed",
-        moduleName: editSource === "calendar" ? "Calendar Attendance Edit" : "Attendance",
-        details: `Attendance edited for ${employee.full_name} (${employee.email}) on ${date}. Reason: ${reason}.`,
+
+        moduleName:
+          editSource === "calendar"
+            ? "Calendar Attendance Edit"
+            : "Attendance",
+
+        details:
+          `Attendance edited for ${employee.full_name} ` +
+          `(${employee.email}) on ${date}. ` +
+          `Reason: ${reason}. ` +
+          `Status: ${newValues.status || "--"}.`,
+
         ip: getClientIp(req),
-        branch: employee.branch || req.user.branch || "all",
-        department: employee.department || null,
+
+        branch:
+          employee.branch ||
+          req.user.branch ||
+          "all",
+
+        department:
+          employee.department || null,
+
         metadata: {
           editedBy: {
             id: editor.id,
-            name: editor.full_name || editor.email || "Unknown user",
-            email: editor.email || null,
-            role: editor.role || req.user.role,
+
+            name:
+              editor.full_name ||
+              editor.email ||
+              "Unknown user",
+
+            email:
+              editor.email || null,
+
+            role:
+              editor.role ||
+              req.user.role,
           },
+
           editedFor: {
             id: userId,
             name: employee.full_name,
             email: employee.email,
           },
+
           date,
           reason,
           oldValues,
           newValues,
-          editedRecordId: updatedRecord?.id || oldRecord?.id || null,
+
+          editedRecordId:
+            updatedRecord?.id ||
+            oldRecord?.id ||
+            null,
         },
       });
 
+      // ============================================================
+      // 7. NOTIFICATION
+      // ============================================================
+
       await createNotification({
         userId,
-        actionType: "attendance_update",
-        relatedId: updatedRecord?.id || oldRecord?.id || null,
-        targetRole: "EMPLOYEE",
-        relatedDate: date,
+
+        actionType:
+          "attendance_update",
+
+        relatedId:
+          updatedRecord?.id ||
+          oldRecord?.id ||
+          null,
+
+        targetRole:
+          "EMPLOYEE",
+
+        relatedDate:
+          date,
+
         reason,
+
         description:
           `Attendance updated for ${date}. ` +
           `Status: ${newValues.status || "--"}, ` +
-          `In: ${formatTime12Hour(newValues.check_in_time)}, ` +
-          `Out: ${formatTime12Hour(newValues.check_out_time)}. ` +
+          `In: ${formatTime12Hour(
+            newValues.check_in_time
+          )}, ` +
+          `Out: ${formatTime12Hour(
+            newValues.check_out_time
+          )}. ` +
           `Reason: ${reason}`,
       });
 
+      // ============================================================
+      // RESPONSE
+      // ============================================================
+
       res.json({
-        message: "Attendance updated successfully",
+        message:
+          manualStatus === "paid_leave"
+            ? "Paid Leave assigned successfully"
+            : "Attendance updated successfully",
+
         data: updatedRecord,
       });
     } catch (err) {
-      await client.query("ROLLBACK").catch((rollbackErr) => {
-        console.error("PUT /attendance/:userId rollback failed:", rollbackErr);
+      await client
+        .query("ROLLBACK")
+        .catch((rollbackErr) => {
+          console.error(
+            "PUT /attendance/:userId rollback failed:",
+            rollbackErr
+          );
+        });
+
+      console.error(
+        "PUT /attendance/:userId error:",
+        err
+      );
+
+      res.status(err.statusCode || 500).json({
+        message: err.message,
       });
-      console.error("PUT /attendance/:userId error:", err);
-      res.status(500).json({ message: err.message });
     } finally {
       client.release();
     }
@@ -2726,6 +3132,3 @@ router.get(
 console.log("✅ attendanceRoutes.js loaded — policy engine integrated");
 
 export default router;
-
-
-
