@@ -3,23 +3,29 @@ import { placeholderDefinition } from "../config/letterPlaceholderRegistry.js";
 
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 
-const formatDate = (value) => {
-  console.log("[FORMAT_DATE_INPUT]", value);
-
+const formatDateYMD = (value) => {
   if (!value) return "";
+
+  // Already YYYY-MM-DD
+  if (
+    typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value)
+  ) {
+    return value;
+  }
 
   const date = new Date(value);
 
   if (Number.isNaN(date.getTime())) {
-    console.error("[INVALID_DATE]", value);
+    console.error("[INVALID_DATE_FOR_DB]", value);
     return "";
   }
 
-  return new Intl.DateTimeFormat("en-IN", {
-    day: "2-digit",
-    month: "long",
-    year: "numeric",
-  }).format(date);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
 };
 
 

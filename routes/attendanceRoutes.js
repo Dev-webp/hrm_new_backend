@@ -1716,16 +1716,36 @@ router.get("/attendance/self/history", verifyToken, async (req, res) => {
   }
 });
 
-// GET /api/attendance/range?start=&end=
+// ======================================================
+// GET /api/attendance/range?start=YYYY-MM-DD&end=YYYY-MM-DD
+// ======================================================
+
 router.get("/attendance/range", verifyToken, async (req, res) => {
   try {
     const { start, end, branch } = req.query;
-    const rangeError = validateAttendanceRange(start, end, "Attendance range");
-    if (rangeError) return res.status(400).json({ message: rangeError });
+
+    const rangeError = validateAttendanceRange(
+      start,
+      end,
+      "Attendance range"
+    );
+
+    if (rangeError) {
+      return res.status(400).json({
+        message: rangeError,
+      });
+    }
 
     if (!start || !end) {
-      return res.status(400).json({ message: "start and end required" });
+      return res.status(400).json({
+        message: "start and end required",
+      });
     }
+
+
+    // ==================================================
+    // BRANCH SECURITY
+    // ==================================================
 
     const effectiveBranch =
       isBranchRestrictedOperationalRole(req.user)
@@ -1734,67 +1754,493 @@ router.get("/attendance/range", verifyToken, async (req, res) => {
         ? branch
         : null;
 
+
+    // ==================================================
+    // FETCH EVERY DATE + EVERY ACTIVE EMPLOYEE
+    //
+    // IMPORTANT:
+    // Approved leave_requests are now merged here.
+    // ==================================================
+
     let query = `
       SELECT
+        TO_CHAR(d.day::date, 'YYYY-MM-DD') AS date,
+
         u.id AS user_id,
-        d.day::date AS date,
-        a.check_in_time,
-        a.check_out_time,
-        ${normalizedAttendanceStatusSql("a")} AS status,
-        COALESCE(a.late_minutes, 0) AS late_minutes,
-        COALESCE(a.production_hours, 0) AS production_hours,
-        COALESCE(a.total_break_minutes, 0) AS total_break_minutes,
-        a.half_day_slot,
-        a.leave_type,
-        a.leave_status,
-        a.post_login_idle_minutes,
-        a.misuse_of_time,
+
+        u.full_name,
+        u.department,
         u.branch,
-        u.department
-      FROM generate_series($1::date, $2::date, interval '1 day') d(day)
+
+
+        -- =============================================
+        -- ATTENDANCE DATA
+        -- =============================================
+
+        a.check_in_time,
+
+        a.check_out_time,
+
+        a.status AS attendance_status,
+
+        a.late_minutes,
+
+        COALESCE(a.production_hours, 0) AS production_hours,
+
+        COALESCE(a.total_break_minutes, 0)
+          AS total_break_minutes,
+
+        a.half_day_slot,
+
+        a.post_login_idle_minutes,
+
+        a.misuse_of_time,
+
+
+        -- =============================================
+        -- APPROVED LEAVE DATA
+        -- =============================================
+
+        lr.id AS leave_request_id,
+
+        lr.leave_type AS requested_leave_type,
+
+        lr.status AS leave_request_status,
+
+        lr.paid_days,
+
+        lr.unpaid_days,
+
+        lr.leave_duration_type,
+
+        lr.half_day_session,
+
+
+        -- =============================================
+        -- FINAL STATUS
+        --
+        -- APPROVED LEAVE HAS PRIORITY
+        -- =============================================
+
+        CASE
+
+          WHEN lr.id IS NOT NULL
+            AND LOWER(COALESCE(lr.status, '')) = 'approved'
+
+          THEN
+
+            CASE
+
+              WHEN LOWER(
+                REPLACE(
+                  REPLACE(
+                    COALESCE(lr.leave_type, ''),
+                    ' ',
+                    '_'
+                  ),
+                  '-',
+                  '_'
+                )
+              ) IN (
+                'paid_leave',
+                'paidleave',
+                'pl'
+              )
+
+              THEN 'paid_leave'
+
+
+              WHEN LOWER(
+                REPLACE(
+                  REPLACE(
+                    COALESCE(lr.leave_type, ''),
+                    ' ',
+                    '_'
+                  ),
+                  '-',
+                  '_'
+                )
+              ) IN (
+                'unpaid_leave',
+                'unpaidleave',
+                'loss_of_pay',
+                'lop'
+              )
+
+              THEN 'unpaid_leave'
+
+
+              ELSE 'leave'
+
+            END
+
+
+          WHEN a.status IS NOT NULL
+
+          THEN a.status
+
+
+          ELSE NULL
+
+        END AS status,
+
+
+        -- =============================================
+        -- FINAL LEAVE TYPE
+        -- =============================================
+
+        CASE
+
+          WHEN lr.id IS NOT NULL
+            AND LOWER(COALESCE(lr.status, '')) = 'approved'
+
+          THEN
+
+            CASE
+
+              WHEN LOWER(
+                REPLACE(
+                  REPLACE(
+                    COALESCE(lr.leave_type, ''),
+                    ' ',
+                    '_'
+                  ),
+                  '-',
+                  '_'
+                )
+              ) IN (
+                'paid_leave',
+                'paidleave',
+                'pl'
+              )
+
+              THEN 'paid_leave'
+
+
+              WHEN LOWER(
+                REPLACE(
+                  REPLACE(
+                    COALESCE(lr.leave_type, ''),
+                    ' ',
+                    '_'
+                  ),
+                  '-',
+                  '_'
+                )
+              ) IN (
+                'unpaid_leave',
+                'unpaidleave',
+                'loss_of_pay',
+                'lop'
+              )
+
+              THEN 'unpaid_leave'
+
+
+              ELSE 'leave'
+
+            END
+
+
+          ELSE a.leave_type
+
+        END AS leave_type,
+
+
+        -- =============================================
+        -- FINAL LEAVE STATUS
+        -- =============================================
+
+        CASE
+
+          WHEN lr.id IS NOT NULL
+            AND LOWER(COALESCE(lr.status, '')) = 'approved'
+
+          THEN 'approved'
+
+          ELSE a.leave_status
+
+        END AS leave_status
+
+
+      FROM generate_series(
+        $1::date,
+        $2::date,
+        interval '1 day'
+      ) d(day)
+
+
       CROSS JOIN users u
+
+
+      -- =============================================
+      -- ATTENDANCE RECORD
+      -- =============================================
+
       LEFT JOIN attendance_records a
+
         ON a.user_id = u.id
-       AND a.date = d.day::date
-      WHERE u.role != 'SUPER_ADMIN'
-        AND COALESCE(u.status, 'active') = 'active'
+
+        AND a.date = d.day::date
+
+
+      -- =============================================
+      -- APPROVED LEAVE REQUEST
+      --
+      -- The generated calendar date must fall between
+      -- from_date and to_date.
+      -- =============================================
+
+      LEFT JOIN leave_requests lr
+
+        ON lr.user_id = u.id
+
+        AND LOWER(COALESCE(lr.status, '')) = 'approved'
+
+        AND d.day::date
+          BETWEEN lr.from_date
+          AND lr.to_date
+
+
+      WHERE
+
+        u.role != 'SUPER_ADMIN'
+
+        AND COALESCE(
+          u.status,
+          'active'
+        ) = 'active'
     `;
 
-    const params = [start, end];
+
+    // ==================================================
+    // PARAMETERS
+    // ==================================================
+
+    const params = [
+      start,
+      end,
+    ];
+
     let idx = 3;
 
+
+    // ==================================================
+    // BRANCH FILTER
+    // ==================================================
+
     if (effectiveBranch) {
-      query += ` AND u.branch = $${idx}`;
+
+      query += `
+        AND u.branch = $${idx}
+      `;
+
       params.push(effectiveBranch);
+
       idx++;
+
     }
 
-    query += ` ORDER BY d.day ASC, u.id ASC`;
 
-    const result = await pool.query(query, params);
-    const holidaySet = await fetchHolidaySetForDateRange(start, end);
-    const logsByDate = Object.fromEntries(
-      result.rows.map((r) => {
-        const dateStr = r.date.toISOString ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10);
-        return [`${r.user_id}|${dateStr}`, { ...r, date: dateStr }];
-      })
+    query += `
+      ORDER BY
+        d.day ASC,
+        u.id ASC
+    `;
+
+
+    // ==================================================
+    // EXECUTE QUERY
+    // ==================================================
+
+    const result = await pool.query(
+      query,
+      params
     );
 
-    res.json(
-      result.rows.map((r) => {
-        const dateStr = r.date.toISOString
-          ? r.date.toISOString().slice(0, 10)
-          : String(r.date).slice(0, 10);
-        return withDisplayAttendanceStatus(
-          { ...r, date: dateStr },
-          dateStr,
-          { holidaySet, logsByDate }
-        );
-      })
+
+    // ==================================================
+    // HOLIDAYS
+    // ==================================================
+
+    const holidaySet =
+      await fetchHolidaySetForDateRange(
+        start,
+        end
+      );
+
+
+    // ==================================================
+    // CREATE LOOKUP MAP
+    // ==================================================
+
+    const logsByDate =
+      Object.fromEntries(
+
+        result.rows.map((row) => [
+
+          `${row.user_id}|${row.date}`,
+
+          {
+            ...row,
+
+            date: row.date,
+          },
+
+        ])
+
+      );
+
+
+    // ==================================================
+    // FINAL RESPONSE
+    // ==================================================
+
+ // ==================================================
+// FINAL RESPONSE
+// ==================================================
+
+const response = result.rows.map((row) => {
+  const dateStr = String(row.date).slice(0, 10);
+
+  const normalizedStatus = String(row.status || "")
+    .trim()
+    .toLowerCase();
+
+  const normalizedLeaveType = String(
+    row.leave_type || row.requested_leave_type || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  const normalizedLeaveStatus = String(
+    row.leave_status || row.leave_request_status || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  const isApprovedLeave =
+    normalizedLeaveStatus === "approved";
+
+  const isPaidLeave =
+    isApprovedLeave &&
+    (
+      normalizedStatus === "paid_leave" ||
+      normalizedLeaveType === "paid_leave" ||
+      Number(row.paid_days || 0) > 0
     );
+
+  const isUnpaidLeave =
+    isApprovedLeave &&
+    (
+      normalizedStatus === "unpaid_leave" ||
+      normalizedLeaveType === "unpaid_leave" ||
+      Number(row.unpaid_days || 0) > 0
+    );
+
+  // ==============================================
+  // IMPORTANT:
+  // APPROVED LEAVE MUST NOT BE OVERRIDDEN
+  // BY withDisplayAttendanceStatus()
+  // ==============================================
+
+  if (isPaidLeave) {
+    return {
+      ...row,
+
+      date: dateStr,
+
+      status: "paid_leave",
+
+      raw_status: row.attendance_status || row.status,
+
+      leave_type: "paid_leave",
+      leaveType: "paid_leave",
+
+      leave_status: "approved",
+      leaveStatus: "approved",
+
+      is_paid_leave: true,
+      isPaidLeave: true,
+
+      paid_days: Number(row.paid_days || 1),
+      paidDays: Number(row.paid_days || 1),
+
+      unpaid_days: Number(row.unpaid_days || 0),
+      unpaidDays: Number(row.unpaid_days || 0),
+    };
+  }
+
+  if (isUnpaidLeave) {
+    return {
+      ...row,
+
+      date: dateStr,
+
+      status: "unpaid_leave",
+
+      raw_status: row.attendance_status || row.status,
+
+      leave_type: "unpaid_leave",
+      leaveType: "unpaid_leave",
+
+      leave_status: "approved",
+      leaveStatus: "approved",
+
+      is_paid_leave: false,
+      isPaidLeave: false,
+
+      paid_days: Number(row.paid_days || 0),
+      paidDays: Number(row.paid_days || 0),
+
+      unpaid_days: Number(row.unpaid_days || 1),
+      unpaidDays: Number(row.unpaid_days || 1),
+    };
+  }
+
+  // ==============================================
+  // NORMAL ATTENDANCE CALCULATION
+  // ==============================================
+
+  const record = {
+    ...row,
+
+    date: dateStr,
+
+    paid_days: Number(row.paid_days || 0),
+    paidDays: Number(row.paid_days || 0),
+
+    unpaid_days: Number(row.unpaid_days || 0),
+    unpaidDays: Number(row.unpaid_days || 0),
+
+    is_paid_leave: false,
+    isPaidLeave: false,
+  };
+
+  return withDisplayAttendanceStatus(
+    record,
+    dateStr,
+    {
+      holidaySet,
+      logsByDate,
+    }
+  );
+});
+
+res.json(response);
+
   } catch (err) {
-    console.error("GET /attendance/range error:", err);
-    res.status(500).json({ message: err.message });
+
+    console.error(
+      "GET /attendance/range error:",
+      err
+    );
+
+
+    res.status(500).json({
+      message: err.message,
+    });
+
   }
 });
 
@@ -2794,78 +3240,405 @@ router.get("/attendance/department-leaderboard", verifyToken, async (req, res) =
 // was referenced without alias.
 // Also joins employee_breaks to return actual break times.
 // ───────────────────────────────────────────────────────────────────
-router.get("/attendance/employee/:userId", verifyToken, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { start, end } = req.query;
-    if (!start || !end) return res.status(400).json({ message: "start and end required" });
 
-    const target = await pool.query("SELECT branch, role FROM users WHERE id=$1", [userId]);
-    if (!target.rows.length) return res.status(404).json({ message: "User not found" });
+// ============================================================
+// GET EMPLOYEE ATTENDANCE CALENDAR
+//
+// IMPORTANT:
+// Returns attendance + approved leave requests.
+// Paid Leave / Unpaid Leave will appear even when there is
+// NO attendance_records row.
+// ============================================================
 
-    if (req.user.role === "EMPLOYEE" && req.user.id != userId) {
-      return res.status(403).json({ message: "Access denied" });
+router.get(
+  "/attendance/employee/:userId",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { start, end } = req.query;
+
+      // ========================================================
+      // VALIDATE DATE RANGE
+      // ========================================================
+
+      if (!start || !end) {
+        return res.status(400).json({
+          message: "start and end required",
+        });
+      }
+
+      // ========================================================
+      // GET TARGET EMPLOYEE
+      // ========================================================
+
+      const target = await pool.query(
+        `
+        SELECT branch, role
+        FROM users
+        WHERE id = $1
+        `,
+        [userId]
+      );
+
+      if (!target.rows.length) {
+        return res.status(404).json({
+          message: "User not found",
+        });
+      }
+
+      // ========================================================
+      // ACCESS CONTROL
+      // ========================================================
+
+      if (
+        req.user.role === "EMPLOYEE" &&
+        Number(req.user.id) !== Number(userId)
+      ) {
+        return res.status(403).json({
+          message: "Access denied",
+        });
+      }
+
+      if (
+        req.user.role === "MANAGER" &&
+        target.rows[0].branch !== req.user.branch
+      ) {
+        return res.status(403).json({
+          message: "Cross-branch access denied",
+        });
+      }
+
+      // ========================================================
+      // GET EVERY DAY IN THE REQUESTED RANGE
+      //
+      // This is the important part.
+      // We generate dates and merge:
+      //
+      // 1. Approved leave_requests
+      // 2. attendance_records
+      //
+      // Approved leave gets highest priority.
+      // ========================================================
+
+      const result = await pool.query(
+        `
+        SELECT
+          TO_CHAR(d.day::date, 'YYYY-MM-DD') AS date,
+
+          -- ==================================================
+          -- FINAL STATUS
+          -- ==================================================
+
+          CASE
+
+            -- PAID LEAVE
+            WHEN lr.id IS NOT NULL
+              AND LOWER(COALESCE(lr.status, '')) = 'approved'
+              AND COALESCE(lr.paid_days, 0) > 0
+            THEN 'paid_leave'
+
+            -- UNPAID LEAVE
+            WHEN lr.id IS NOT NULL
+              AND LOWER(COALESCE(lr.status, '')) = 'approved'
+              AND COALESCE(lr.unpaid_days, 0) > 0
+            THEN 'unpaid_leave'
+
+            -- NORMAL ATTENDANCE
+            WHEN ar.id IS NOT NULL
+            THEN ${normalizedAttendanceStatusSql("ar")}
+
+            -- NO RECORD
+            ELSE 'no_record'
+
+          END AS status,
+
+
+          -- ==================================================
+          -- ATTENDANCE DATA
+          -- ==================================================
+
+          ar.id AS attendance_id,
+
+          ar.check_in_time,
+          ar.check_out_time,
+
+          ar.late_minutes,
+
+          ar.production_hours,
+
+          ar.total_break_minutes,
+
+          ar.half_day_slot,
+
+          ar.post_login_idle_minutes,
+
+          ar.misuse_of_time,
+
+
+          -- ==================================================
+          -- ATTENDANCE BREAK DATA
+          -- ==================================================
+
+          b1.start_time AS break1_in,
+          b1.end_time AS break1_out,
+
+          b2.start_time AS break2_in,
+          b2.end_time AS break2_out,
+
+          ln.start_time AS lunch_in,
+          ln.end_time AS lunch_out,
+
+
+          -- ==================================================
+          -- LEAVE REQUEST DATA
+          -- ==================================================
+
+          lr.id AS leave_request_id,
+
+          lr.leave_type AS request_leave_type,
+
+          lr.leave_type,
+
+          lr.status AS leave_status,
+
+          COALESCE(lr.paid_days, 0) AS paid_days,
+
+          COALESCE(lr.unpaid_days, 0) AS unpaid_days,
+
+
+          -- ==================================================
+          -- PAID LEAVE FLAG
+          -- ==================================================
+
+          CASE
+            WHEN lr.id IS NOT NULL
+              AND LOWER(COALESCE(lr.status, '')) = 'approved'
+              AND COALESCE(lr.paid_days, 0) > 0
+            THEN true
+
+            ELSE COALESCE(ar.is_paid_leave, false)
+
+          END AS is_paid_leave,
+
+
+          -- ==================================================
+          -- UNPAID LEAVE FLAG
+          -- ==================================================
+
+          CASE
+            WHEN lr.id IS NOT NULL
+              AND LOWER(COALESCE(lr.status, '')) = 'approved'
+              AND COALESCE(lr.unpaid_days, 0) > 0
+            THEN true
+
+            ELSE false
+
+          END AS is_unpaid_leave
+
+
+        -- ======================================================
+        -- GENERATE ALL DATES
+        -- ======================================================
+
+        FROM generate_series(
+          $2::date,
+          $3::date,
+          INTERVAL '1 day'
+        ) AS d(day)
+
+
+        -- ======================================================
+        -- ATTENDANCE RECORD
+        -- ======================================================
+
+        LEFT JOIN attendance_records ar
+          ON ar.user_id = $1
+          AND ar.date = d.day::date
+
+
+        -- ======================================================
+        -- APPROVED LEAVE REQUEST
+        --
+        -- This works even if attendance_records has NO ROW.
+        -- ======================================================
+
+        LEFT JOIN LATERAL (
+          SELECT lr.*
+
+          FROM leave_requests lr
+
+          WHERE lr.user_id = $1
+
+            AND d.day::date BETWEEN
+              lr.from_date::date
+              AND lr.to_date::date
+
+            AND LOWER(COALESCE(lr.status, '')) = 'approved'
+
+          ORDER BY lr.id DESC
+
+          LIMIT 1
+
+        ) lr ON true
+
+
+        -- ======================================================
+        -- BREAK 1
+        -- ======================================================
+
+        LEFT JOIN employee_breaks b1
+          ON b1.user_id = $1
+          AND b1.date = d.day::date
+          AND b1.break_type = 'break1'
+
+
+        -- ======================================================
+        -- BREAK 2
+        -- ======================================================
+
+        LEFT JOIN employee_breaks b2
+          ON b2.user_id = $1
+          AND b2.date = d.day::date
+          AND b2.break_type = 'break2'
+
+
+        -- ======================================================
+        -- LUNCH
+        -- ======================================================
+
+        LEFT JOIN employee_breaks ln
+          ON ln.user_id = $1
+          AND ln.date = d.day::date
+          AND ln.break_type = 'lunch'
+
+
+        ORDER BY d.day ASC
+        `,
+        [userId, start, end]
+      );
+
+      // ========================================================
+      // HOLIDAYS
+      // ========================================================
+
+      const holidaySet =
+        await fetchHolidaySetForDateRange(start, end);
+
+      const logsByDate = Object.fromEntries(
+        result.rows.map((row) => [
+          row.date,
+          row,
+        ])
+      );
+
+      // ========================================================
+      // FINAL RESPONSE
+      //
+      // VERY IMPORTANT:
+      // Paid Leave and Unpaid Leave should NOT be overridden by
+      // Sunday / Holiday / normal attendance logic.
+      // ========================================================
+
+      const response = result.rows.map((row) => {
+
+        // ======================================================
+        // PAID LEAVE
+        // ======================================================
+
+        if (row.status === "paid_leave") {
+          return {
+            ...row,
+
+            status: "paid_leave",
+
+            is_paid_leave: true,
+
+            isPaidLeave: true,
+          };
+        }
+
+
+        // ======================================================
+        // UNPAID LEAVE
+        // ======================================================
+
+        if (row.status === "unpaid_leave") {
+          return {
+            ...row,
+
+            status: "unpaid_leave",
+
+            is_unpaid_leave: true,
+
+            isUnpaidLeave: true,
+          };
+        }
+
+
+        // ======================================================
+        // NORMAL ATTENDANCE
+        // ======================================================
+
+        return withDisplayAttendanceStatus(
+          row,
+          row.date,
+          {
+            holidaySet,
+            logsByDate,
+          }
+        );
+      });
+
+
+      // ========================================================
+      // DEBUG
+      // ========================================================
+
+      console.log(
+        "EMPLOYEE CALENDAR:",
+        userId,
+        response.filter(
+          (row) =>
+            row.status === "paid_leave" ||
+            row.status === "unpaid_leave"
+        )
+      );
+
+
+      return res.json(response);
+
+    } catch (err) {
+
+      console.error(
+        "GET /attendance/employee/:userId ERROR:",
+        err
+      );
+
+      return res.status(500).json({
+        message: err.message,
+      });
     }
-    if (req.user.role === "MANAGER" && target.rows[0].branch !== req.user.branch) {
-      return res.status(403).json({ message: "Cross-branch access denied" });
-    }
-
-    // FIX: explicit alias `ar` throughout; JOIN breaks for popup detail
-    const result = await pool.query(
-      `SELECT
-         TO_CHAR(ar.date, 'YYYY-MM-DD')  AS date,
-         ar.check_in_time,
-         ar.check_out_time,
-         ${normalizedAttendanceStatusSql("ar")} AS status,
-         ar.late_minutes,
-         ar.production_hours,
-         ar.total_break_minutes,
-         ar.is_paid_leave,
-         ar.half_day_slot,
-         ar.leave_type,
-         ar.leave_status,
-         ar.post_login_idle_minutes,
-         ar.misuse_of_time,
-         lr.leave_type AS request_leave_type,
-         lr.leave_category,
-         lr.paid_days,
-         b1.start_time   AS break1_in,
-         b1.end_time     AS break1_out,
-         b2.start_time   AS break2_in,
-         b2.end_time     AS break2_out,
-         ln.start_time   AS lunch_in,
-         ln.end_time     AS lunch_out
-       FROM attendance_records ar
-       LEFT JOIN leave_requests lr
-         ON lr.id = ar.leave_request_id
-       LEFT JOIN employee_breaks b1
-         ON b1.user_id = ar.user_id
-        AND b1.date = ar.date
-        AND b1.break_type = 'break1'
-       LEFT JOIN employee_breaks b2
-         ON b2.user_id = ar.user_id
-        AND b2.date = ar.date
-        AND b2.break_type = 'break2'
-       LEFT JOIN employee_breaks ln
-         ON ln.user_id = ar.user_id
-        AND ln.date = ar.date
-        AND ln.break_type = 'lunch'
-       WHERE ar.user_id = $1
-         AND ar.date BETWEEN $2::date AND $3::date
-       ORDER BY ar.date ASC`,
-      [userId, start, end]
-    );
-
-    const holidaySet = await fetchHolidaySetForDateRange(start, end);
-    const logsByDate = Object.fromEntries(result.rows.map((row) => [row.date, row]));
-    res.json(result.rows.map((row) => withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate })));
-  } catch (err) {
-    console.error("GET /attendance/employee/:userId error:", err);
-    res.status(500).json({ message: err.message });
   }
-});
+);
 
 // GET /api/attendance/user/:userId (super admin)
+// ============================================================
+// GET /api/attendance/user/:userId
+// SUPER ADMIN / OPERATIONAL MANAGER
+//
+// IMPORTANT:
+// Merges attendance_records with approved leave_requests.
+// This allows Paid Leave / Unpaid Leave to appear in the calendar
+// even when no attendance_records row exists.
+// ============================================================
+
+
+// ============================================================
+// GET ATTENDANCE FOR SUPER ADMIN / OPERATIONAL MANAGER
+// Includes approved leave even when attendance_records has no row
+// ============================================================
+
 router.get(
   "/attendance/user/:userId",
   verifyToken,
@@ -2874,24 +3647,194 @@ router.get(
     try {
       const { userId } = req.params;
       const { start, end } = req.query;
-      if (!start || !end) return res.status(400).json({ message: "start and end required" });
+
+      if (!start || !end) {
+        return res.status(400).json({
+          message: "start and end required",
+        });
+      }
+
       const result = await pool.query(
-        `SELECT TO_CHAR(ar.date,'YYYY-MM-DD') AS date,
-                ar.check_in_time, ar.check_out_time, ${normalizedAttendanceStatusSql("ar")} AS status,
-                ar.late_minutes, ar.production_hours, ar.total_break_minutes,
-                ar.half_day_slot, ar.leave_type, ar.leave_status,
-                ar.post_login_idle_minutes, ar.misuse_of_time
-         FROM attendance_records ar WHERE ar.user_id=$1 AND ar.date BETWEEN $2 AND $3 ORDER BY ar.date ASC`,
+        `
+        SELECT
+          TO_CHAR(d.day, 'YYYY-MM-DD') AS date,
+
+          -- ================================================
+          -- FINAL STATUS
+          -- APPROVED LEAVE HAS HIGHEST PRIORITY
+          -- ================================================
+          CASE
+            WHEN lr.id IS NOT NULL
+              AND LOWER(COALESCE(lr.status, '')) = 'approved'
+              AND COALESCE(lr.paid_days, 0) > 0
+            THEN 'paid_leave'
+
+            WHEN lr.id IS NOT NULL
+              AND LOWER(COALESCE(lr.status, '')) = 'approved'
+              AND COALESCE(lr.unpaid_days, 0) > 0
+            THEN 'unpaid_leave'
+
+            WHEN ar.id IS NOT NULL
+            THEN ${normalizedAttendanceStatusSql("ar")}
+
+            ELSE 'no_record'
+          END AS status,
+
+          -- ================================================
+          -- ATTENDANCE DATA
+          -- ================================================
+          ar.check_in_time,
+          ar.check_out_time,
+          ar.late_minutes,
+          ar.production_hours,
+          ar.total_break_minutes,
+          ar.half_day_slot,
+          ar.post_login_idle_minutes,
+          ar.misuse_of_time,
+
+          -- ================================================
+          -- LEAVE DATA
+          -- ================================================
+          lr.id AS leave_request_id,
+          lr.leave_type AS request_leave_type,
+          lr.leave_type,
+          lr.status AS leave_status,
+
+          COALESCE(lr.paid_days, 0) AS paid_days,
+          COALESCE(lr.unpaid_days, 0) AS unpaid_days,
+
+          -- ================================================
+          -- PAID LEAVE FLAG
+          -- ================================================
+          CASE
+            WHEN lr.id IS NOT NULL
+              AND LOWER(COALESCE(lr.status, '')) = 'approved'
+              AND COALESCE(lr.paid_days, 0) > 0
+            THEN true
+            ELSE COALESCE(ar.is_paid_leave, false)
+          END AS is_paid_leave,
+
+          -- ================================================
+          -- UNPAID LEAVE FLAG
+          -- ================================================
+          CASE
+            WHEN lr.id IS NOT NULL
+              AND LOWER(COALESCE(lr.status, '')) = 'approved'
+              AND COALESCE(lr.unpaid_days, 0) > 0
+            THEN true
+            ELSE false
+          END AS is_unpaid_leave
+
+        FROM generate_series(
+          $2::date,
+          $3::date,
+          INTERVAL '1 day'
+        ) AS d(day)
+
+        LEFT JOIN attendance_records ar
+          ON ar.user_id = $1
+          AND ar.date = d.day::date
+
+        LEFT JOIN LATERAL (
+          SELECT *
+          FROM leave_requests lr
+          WHERE lr.user_id = $1
+            AND d.day::date BETWEEN lr.from_date::date AND lr.to_date::date
+            AND LOWER(COALESCE(lr.status, '')) = 'approved'
+          ORDER BY lr.id DESC
+          LIMIT 1
+        ) lr ON true
+
+        ORDER BY d.day ASC
+        `,
         [userId, start, end]
       );
-      const holidaySet = await fetchHolidaySetForDateRange(start, end);
-      const logsByDate = Object.fromEntries(result.rows.map((row) => [row.date, row]));
-      res.json(result.rows.map((row) => withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate })));
+
+      // ======================================================
+      // DEBUG — TEMPORARY
+      // ======================================================
+
+      console.log(
+        "SUPER ADMIN ATTENDANCE:",
+        JSON.stringify(
+          result.rows.filter(
+            (row) => row.status === "paid_leave"
+          ),
+          null,
+          2
+        )
+      );
+
+      const holidaySet =
+        await fetchHolidaySetForDateRange(start, end);
+
+      const logsByDate = Object.fromEntries(
+        result.rows.map((row) => [
+          row.date,
+          row,
+        ])
+      );
+
+      // ======================================================
+      // IMPORTANT:
+      // LEAVE MUST NOT GO THROUGH withDisplayAttendanceStatus
+      // ======================================================
+
+      const response = result.rows.map((row) => {
+        if (row.status === "paid_leave") {
+          return {
+            ...row,
+            status: "paid_leave",
+            is_paid_leave: true,
+            isPaidLeave: true,
+          };
+        }
+
+        if (row.status === "unpaid_leave") {
+          return {
+            ...row,
+            status: "unpaid_leave",
+            is_unpaid_leave: true,
+            isUnpaidLeave: true,
+          };
+        }
+
+        return withDisplayAttendanceStatus(
+          row,
+          row.date,
+          {
+            holidaySet,
+            logsByDate,
+          }
+        );
+      });
+
+
+      console.log("========== FINAL API RESPONSE ==========");
+
+console.log(
+  response.find(
+    (row) => row.date === "2026-08-31"
+  )
+);
+
+console.log("========================================");
+      return res.json(response);
+
     } catch (err) {
-      res.status(500).json({ message: err.message });
+      console.error(
+        "GET /attendance/user/:userId ERROR:",
+        err
+      );
+
+      return res.status(500).json({
+        message: err.message,
+      });
     }
   }
 );
+
+
 
 // GET /api/attendance/late-trend
 router.get("/attendance/late-trend", verifyToken, async (req, res) => {

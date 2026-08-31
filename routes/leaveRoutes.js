@@ -123,64 +123,358 @@ async function getScopedLeave(req, id) {
   return { leave };
 }
 
+// ============================================================
+// SYNC APPROVED LEAVE TO ATTENDANCE RECORDS
+// ============================================================
+// ============================================================
+// SAFE DATABASE DATE FORMATTER
+// Always returns YYYY-MM-DD
+// Prevents timezone/date formatting problems
+// ============================================================
+
+function toLocalDateString(value) {
+  if (!value) return null;
+
+  // PostgreSQL DATE string already
+  if (typeof value === "string") {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
+
+    if (match) {
+      return match[1];
+    }
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`Invalid date value: ${value}`);
+  }
+
+  // Use India timezone because your HRMS dates are India dates
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+
+  return `${year}-${month}-${day}`;
+}
+// ============================================================
+// SYNC APPROVED LEAVE TO ATTENDANCE RECORDS
+// ============================================================
+
 async function syncApprovedLeaveAttendance(leave, deduction) {
-  const durationType = leave.leave_duration_type || "full_day";
-  const attendanceStatus = attendanceStatusForLeave(durationType);
-  const halfDaySlot = halfDaySlotForSession(leave.half_day_session);
-  const from = new Date(String(leave.from_date).slice(0, 10));
-  const to = new Date(String(leave.to_date).slice(0, 10));
-  const userResult = await pool.query(
-    "SELECT branch, department FROM users WHERE id = $1",
-    [leave.user_id]
-  );
-  const user = userResult.rows[0] || {};
-  let paidRemaining = Number(deduction.paid_days || 0);
+  console.log("\n==============================================");
+  console.log("SYNC APPROVED LEAVE START");
+  console.log("LEAVE ID:", leave.id);
+  console.log("USER ID:", leave.user_id);
+  console.log("FROM DATE RAW:", leave.from_date);
+  console.log("TO DATE RAW:", leave.to_date);
+  console.log("==============================================");
 
-  const holidays = await pool.query(
-    `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date
-     FROM company_holidays
-     WHERE date BETWEEN $1 AND $2
-       AND type = 'holiday'
-       AND (LOWER(COALESCE(branch, 'all')) = 'all' OR branch = $3)`,
-    [leave.from_date, leave.to_date, user.branch]
-  );
-  const holidayDates = new Set(holidays.rows.map((row) => row.date));
+  try {
+    // ==========================================================
+    // SAFE YYYY-MM-DD DATES
+    // ==========================================================
 
-  for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
-    const dateStr = d.toISOString().slice(0, 10);
-    if (d.getDay() === 0 || holidayDates.has(dateStr)) continue;
+    const fromDateStr = toLocalDateString(leave.from_date);
+    const toDateStr = toLocalDateString(leave.to_date);
 
-    const dayWeight = durationType === "half_day" ? 0.5 : 1;
-    const isPaid = paidRemaining > 0;
-    const paidForDay = isPaid ? Math.min(dayWeight, paidRemaining) : 0;
-    paidRemaining = Math.max(0, paidRemaining - paidForDay);
+    console.log("SYNC FROM:", fromDateStr);
+    console.log("SYNC TO:", toDateStr);
 
-    await pool.query(
-      `INSERT INTO attendance_records (
-         user_id, date, status, leave_type, leave_status, is_paid_leave,
-         leave_request_id, half_day_slot, branch, department
-       )
-       VALUES ($1,$2,$3,$4,'approved',$5,$6,$7,$8,$9)
-       ON CONFLICT (user_id, date) DO UPDATE SET
-         status = EXCLUDED.status,
-         leave_type = EXCLUDED.leave_type,
-         leave_status = EXCLUDED.leave_status,
-         is_paid_leave = EXCLUDED.is_paid_leave,
-         leave_request_id = EXCLUDED.leave_request_id,
-         half_day_slot = EXCLUDED.half_day_slot,
-         updated_at = CURRENT_TIMESTAMP`,
+    // ==========================================================
+    // CREATE LOCAL DATE OBJECTS
+    //
+    // IMPORTANT:
+    // Add T00:00:00 to prevent UTC timezone shifting
+    // ==========================================================
+
+    const from = new Date(`${fromDateStr}T00:00:00`);
+    const to = new Date(`${toDateStr}T00:00:00`);
+
+    if (Number.isNaN(from.getTime())) {
+      throw new Error(`Invalid FROM date: ${fromDateStr}`);
+    }
+
+    if (Number.isNaN(to.getTime())) {
+      throw new Error(`Invalid TO date: ${toDateStr}`);
+    }
+
+    // ==========================================================
+    // LEAVE SETTINGS
+    // ==========================================================
+
+    const durationType =
+      leave.leave_duration_type || "full_day";
+
+    const attendanceStatus =
+      attendanceStatusForLeave(durationType);
+
+    const halfDaySlot =
+      halfDaySlotForSession(leave.half_day_session);
+
+    // ==========================================================
+    // GET USER INFORMATION
+    // ==========================================================
+
+    const userResult = await pool.query(
+      `
+      SELECT branch, department
+      FROM users
+      WHERE id = $1
+      `,
+      [leave.user_id]
+    );
+
+    const user = userResult.rows[0] || {};
+
+    // ==========================================================
+    // PAID DAYS
+    // ==========================================================
+
+    let paidRemaining = Number(
+      deduction?.paid_days ??
+      leave.paid_days ??
+      0
+    );
+
+    console.log("PAID DAYS:", paidRemaining);
+
+    // ==========================================================
+    // GET HOLIDAYS
+    // ==========================================================
+
+    const holidays = await pool.query(
+      `
+      SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date
+      FROM company_holidays
+      WHERE date BETWEEN $1::date AND $2::date
+        AND type = 'holiday'
+        AND (
+          LOWER(COALESCE(branch, 'all')) = 'all'
+          OR branch = $3
+        )
+      `,
       [
-        leave.user_id,
-        dateStr,
-        attendanceStatus,
-        isPaid ? "Paid" : "Unpaid",
-        isPaid,
-        leave.id,
-        halfDaySlot,
+        fromDateStr,
+        toDateStr,
         user.branch || leave.branch || null,
-        user.department || leave.department || null,
       ]
     );
+
+    const holidayDates = new Set(
+      holidays.rows.map((row) => row.date)
+    );
+
+    // ==========================================================
+    // LOOP THROUGH EVERY LEAVE DATE
+    // ==========================================================
+
+    const current = new Date(from);
+
+    while (current <= to) {
+
+      // IMPORTANT:
+      // Build YYYY-MM-DD manually
+      const year = current.getFullYear();
+
+      const month = String(
+        current.getMonth() + 1
+      ).padStart(2, "0");
+
+      const day = String(
+        current.getDate()
+      ).padStart(2, "0");
+
+      const dateStr = `${year}-${month}-${day}`;
+
+      console.log(
+        "PROCESSING LEAVE DATE:",
+        dateStr
+      );
+
+      // ========================================================
+      // SKIP SUNDAY
+      // ========================================================
+
+      if (current.getDay() === 0) {
+        console.log(
+          "SKIPPING SUNDAY:",
+          dateStr
+        );
+
+        current.setDate(
+          current.getDate() + 1
+        );
+
+        continue;
+      }
+
+      // ========================================================
+      // SKIP HOLIDAY
+      // ========================================================
+
+      if (holidayDates.has(dateStr)) {
+        console.log(
+          "SKIPPING HOLIDAY:",
+          dateStr
+        );
+
+        current.setDate(
+          current.getDate() + 1
+        );
+
+        continue;
+      }
+
+      // ========================================================
+      // CALCULATE PAID / UNPAID
+      // ========================================================
+
+      const dayWeight =
+        durationType === "half_day"
+          ? 0.5
+          : 1;
+
+      const isPaid =
+        paidRemaining > 0;
+
+      const paidForDay = isPaid
+        ? Math.min(dayWeight, paidRemaining)
+        : 0;
+
+      paidRemaining = Math.max(
+        0,
+        paidRemaining - paidForDay
+      );
+
+      // ========================================================
+      // FINAL ATTENDANCE STATUS
+      //
+      // IMPORTANT:
+      // If paid -> paid_leave
+      // If unpaid -> unpaid_leave
+      // ========================================================
+
+      const finalStatus = isPaid
+        ? "paid_leave"
+        : "unpaid_leave";
+
+      const finalLeaveType = isPaid
+        ? "Paid"
+        : "Unpaid";
+
+      console.log(
+        "INSERTING ATTENDANCE:",
+        {
+          user_id: leave.user_id,
+          date: dateStr,
+          status: finalStatus,
+          leave_type: finalLeaveType,
+          is_paid_leave: isPaid,
+          leave_request_id: leave.id,
+        }
+      );
+
+      // ========================================================
+      // INSERT / UPDATE ATTENDANCE RECORD
+      // ========================================================
+
+      await pool.query(
+        `
+        INSERT INTO attendance_records (
+          user_id,
+          date,
+          status,
+          leave_type,
+          leave_status,
+          is_paid_leave,
+          leave_request_id,
+          half_day_slot,
+          branch,
+          department
+        )
+        VALUES (
+          $1,
+          $2::date,
+          $3,
+          $4,
+          'approved',
+          $5,
+          $6,
+          $7,
+          $8,
+          $9
+        )
+
+        ON CONFLICT (user_id, date)
+
+        DO UPDATE SET
+
+          status = EXCLUDED.status,
+
+          leave_type = EXCLUDED.leave_type,
+
+          leave_status = EXCLUDED.leave_status,
+
+          is_paid_leave = EXCLUDED.is_paid_leave,
+
+          leave_request_id = EXCLUDED.leave_request_id,
+
+          half_day_slot = EXCLUDED.half_day_slot,
+
+          branch = EXCLUDED.branch,
+
+          department = EXCLUDED.department,
+
+          updated_at = CURRENT_TIMESTAMP
+        `,
+        [
+          leave.user_id,
+          dateStr,
+          finalStatus,
+          finalLeaveType,
+          isPaid,
+          leave.id,
+          halfDaySlot,
+          user.branch || leave.branch || null,
+          user.department || leave.department || null,
+        ]
+      );
+
+      console.log(
+        "✅ ATTENDANCE CREATED/UPDATED:",
+        dateStr
+      );
+
+      // ========================================================
+      // NEXT DAY
+      // ========================================================
+
+      current.setDate(
+        current.getDate() + 1
+      );
+    }
+
+    console.log("==============================================");
+    console.log("✅ SYNC APPROVED LEAVE COMPLETED");
+    console.log("LEAVE ID:", leave.id);
+    console.log("==============================================\n");
+
+  } catch (error) {
+
+    console.error(
+      "❌ SYNC APPROVED LEAVE ERROR:",
+      error
+    );
+
+    throw error;
   }
 }
 
@@ -771,13 +1065,83 @@ const changeLeaveStatus = async (req, res) => {
         `UPDATE leave_requests SET ${updateFields}`,
         params
       );
+if (status === "approved") {
 
-      if (status === "approved") {
-        await syncApprovedLeaveAttendance(leave, deduction);
-        await recalcLeaveAttendanceDates(leave, "leave_approval");
-      } else if (status === "rejected") {
-        await recalcLeaveAttendanceDates(leave, "leave_rejection");
-      }
+  // ============================================================
+  // FETCH THE UPDATED APPROVED LEAVE
+  // IMPORTANT:
+  // Do not use the old "leave" object because it was fetched
+  // before the status was changed from pending → approved.
+  // ============================================================
+
+  const updatedLeaveResult = await pool.query(
+    `
+    SELECT
+      l.*,
+      u.branch,
+      u.department,
+      u.full_name
+    FROM leave_requests l
+    JOIN users u
+      ON u.id = l.user_id
+    WHERE l.id = $1
+    `,
+    [leave.id]
+  );
+
+  if (!updatedLeaveResult.rows.length) {
+    throw new Error("Updated leave request could not be found");
+  }
+
+  const updatedLeave = updatedLeaveResult.rows[0];
+
+  console.log(
+    "========== APPROVED LEAVE BEFORE ATTENDANCE SYNC =========="
+  );
+
+  console.log({
+    id: updatedLeave.id,
+    user_id: updatedLeave.user_id,
+    status: updatedLeave.status,
+    leave_type: updatedLeave.leave_type,
+    from_date: updatedLeave.from_date,
+    to_date: updatedLeave.to_date,
+    paid_days: updatedLeave.paid_days,
+    unpaid_days: updatedLeave.unpaid_days,
+    is_paid_leave: updatedLeave.is_paid_leave,
+  });
+
+  console.log(
+    "==========================================================="
+  );
+
+  // ============================================================
+  // CREATE / UPDATE ATTENDANCE RECORDS FOR THE LEAVE DATES
+  // ============================================================
+
+  await syncApprovedLeaveAttendance(
+    updatedLeave,
+    deduction
+  );
+
+  // ============================================================
+  // RECALCULATE AFTER LEAVE SYNC
+  // ============================================================
+
+  await recalcLeaveAttendanceDates(
+    updatedLeave,
+    "leave_approval"
+  );
+
+} else if (status === "rejected") {
+
+  await recalcLeaveAttendanceDates(
+    leave,
+    "leave_rejection"
+  );
+}
+
+ 
 
       const changeReason = status === "rejected"
         ? (rejection_reason || "No rejection reason supplied")
