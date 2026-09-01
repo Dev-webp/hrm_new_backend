@@ -15,7 +15,7 @@ import {
 } from "./notificationTriggers.js";
 import { createValidatedLeaveRequest } from "../services/leaveRequestService.js";
 import {
-  attendanceStatusForLeave,
+  allocateLeaveDay,
   halfDaySlotForSession,
 } from "../utils/leaveRequestPolicy.js";
 import { recalcAttendanceForUserDate } from "./attendanceRoutes.js";
@@ -213,9 +213,6 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
     const durationType =
       leave.leave_duration_type || "full_day";
 
-    const attendanceStatus =
-      attendanceStatusForLeave(durationType);
-
     const halfDaySlot =
       halfDaySlotForSession(leave.half_day_session);
 
@@ -342,17 +339,9 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
           ? 0.5
           : 1;
 
-      const isPaid =
-        paidRemaining > 0;
-
-      const paidForDay = isPaid
-        ? Math.min(dayWeight, paidRemaining)
-        : 0;
-
-      paidRemaining = Math.max(
-        0,
-        paidRemaining - paidForDay
-      );
+      const allocation = allocateLeaveDay({ paidRemaining, dayWeight });
+      const isPaid = allocation.isPaidLeave;
+      paidRemaining = allocation.paidRemaining;
 
       // ========================================================
       // FINAL ATTENDANCE STATUS
@@ -362,13 +351,8 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
       // If unpaid -> unpaid_leave
       // ========================================================
 
-      const finalStatus = isPaid
-        ? "paid_leave"
-        : "unpaid_leave";
-
-      const finalLeaveType = isPaid
-        ? "Paid"
-        : "Unpaid";
+      const finalStatus = allocation.status;
+      const finalLeaveType = allocation.leaveType;
 
       console.log(
         "INSERTING ATTENDANCE:",

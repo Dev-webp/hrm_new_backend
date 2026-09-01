@@ -13,6 +13,9 @@ export function heatmapStatus(rec) {
   if (rec.status === "leave") {
     return rec.isPaidLeave ? "paid_leave" : "unpaid_leave";
   }
+  if (rec.status === "paid_leave" || rec.status === "unpaid_leave") {
+    return rec.status;
+  }
   if (rec.status === "absent") return "absent";
   if (rec.status === "half_day") return "half_day";
   if (rec.lateMinutes > 0) return "late";

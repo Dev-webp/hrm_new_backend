@@ -3661,9 +3661,14 @@ router.get(
 
           -- ================================================
           -- FINAL STATUS
-          -- APPROVED LEAVE HAS HIGHEST PRIORITY
+          -- DATE-LEVEL ATTENDANCE IS THE SOURCE OF TRUTH.
+          -- A leave request can be mixed paid/unpaid, so it must never
+          -- overwrite a persisted paid_leave/unpaid_leave day.
           -- ================================================
           CASE
+            WHEN ar.id IS NOT NULL
+            THEN ${normalizedAttendanceStatusSql("ar")}
+
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
               AND COALESCE(lr.paid_days, 0) > 0
@@ -3673,9 +3678,6 @@ router.get(
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
               AND COALESCE(lr.unpaid_days, 0) > 0
             THEN 'unpaid_leave'
-
-            WHEN ar.id IS NOT NULL
-            THEN ${normalizedAttendanceStatusSql("ar")}
 
             ELSE 'no_record'
           END AS status,
@@ -3689,6 +3691,9 @@ router.get(
           ar.production_hours,
           ar.total_break_minutes,
           ar.half_day_slot,
+          ar.leave_type AS attendance_leave_type,
+          ar.leave_status AS attendance_leave_status,
+          ar.is_paid_leave AS attendance_is_paid_leave,
           ar.post_login_idle_minutes,
           ar.misuse_of_time,
 
@@ -3697,8 +3702,8 @@ router.get(
           -- ================================================
           lr.id AS leave_request_id,
           lr.leave_type AS request_leave_type,
-          lr.leave_type,
-          lr.status AS leave_status,
+          COALESCE(ar.leave_type, lr.leave_type) AS leave_type,
+          COALESCE(ar.leave_status, lr.status) AS leave_status,
 
           COALESCE(lr.paid_days, 0) AS paid_days,
           COALESCE(lr.unpaid_days, 0) AS unpaid_days,
@@ -3707,6 +3712,9 @@ router.get(
           -- PAID LEAVE FLAG
           -- ================================================
           CASE
+            WHEN ar.id IS NOT NULL
+            THEN COALESCE(ar.is_paid_leave, false)
+
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
               AND COALESCE(lr.paid_days, 0) > 0
@@ -3718,6 +3726,9 @@ router.get(
           -- UNPAID LEAVE FLAG
           -- ================================================
           CASE
+            WHEN ar.id IS NOT NULL
+            THEN LOWER(COALESCE(ar.status, '')) = 'unpaid_leave'
+
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
               AND COALESCE(lr.unpaid_days, 0) > 0
@@ -3748,21 +3759,6 @@ router.get(
         ORDER BY d.day ASC
         `,
         [userId, start, end]
-      );
-
-      // ======================================================
-      // DEBUG — TEMPORARY
-      // ======================================================
-
-      console.log(
-        "SUPER ADMIN ATTENDANCE:",
-        JSON.stringify(
-          result.rows.filter(
-            (row) => row.status === "paid_leave"
-          ),
-          null,
-          2
-        )
       );
 
       const holidaySet =
@@ -3809,16 +3805,6 @@ router.get(
         );
       });
 
-
-      console.log("========== FINAL API RESPONSE ==========");
-
-console.log(
-  response.find(
-    (row) => row.date === "2026-08-31"
-  )
-);
-
-console.log("========================================");
       return res.json(response);
 
     } catch (err) {

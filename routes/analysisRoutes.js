@@ -223,6 +223,8 @@ router.get(
           break_exceeded_days: 0,
           absent_days: 0,
           leave_days: 0,
+          paid_leave_days: 0,
+          unpaid_leave_days: 0,
         };
         let breakTotal = 0;
         let breakDays = 0;
@@ -238,7 +240,15 @@ router.get(
           if (computed.computed_status === "full_day") summary.full_days += 1;
           else if (computed.computed_status === "half_day") summary.half_days += 1;
           else if (computed.computed_status === "absent") summary.absent_days += 1;
-          else if (computed.computed_status === "leave") summary.leave_days += 1;
+          else if (computed.computed_status === "paid_leave") {
+            summary.paid_leave_days += 1;
+            summary.leave_days += 1;
+          } else if (computed.computed_status === "unpaid_leave") {
+            summary.unpaid_leave_days += 1;
+            summary.leave_days += 1;
+          } else if (computed.computed_status === "leave") {
+            summary.leave_days += 1;
+          }
 
           if (["full_day", "working", "in_progress"].includes(computed.computed_status)) {
             summary.present_days += 1;
@@ -271,6 +281,9 @@ router.get(
           (s, e) => s + Number(e.break_exceeded_days || 0),
           0
         ),
+        total_paid_leave: employees.reduce((s, e) => s + Number(e.paid_leave_days || 0), 0),
+        total_unpaid_leave: employees.reduce((s, e) => s + Number(e.unpaid_leave_days || 0), 0),
+        total_leave: employees.reduce((s, e) => s + Number(e.leave_days || 0), 0),
         avg_break: employees.length
           ? Math.round(
               employees.reduce(

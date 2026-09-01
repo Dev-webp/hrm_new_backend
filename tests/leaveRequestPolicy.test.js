@@ -5,6 +5,7 @@ import {
   resolveLeaveRequest,
   halfDaySlotForSession,
   resolveLeaveBalanceUsage,
+  allocateLeaveDay,
 } from "../utils/leaveRequestPolicy.js";
 
 describe("half-day leave requests", () => {
@@ -55,6 +56,30 @@ describe("full-day working-day calculation", () => {
 });
 
 describe("paid leave balance allocation", () => {
+  it("allocates consecutive full leave dates chronologically", () => {
+    let paidRemaining = 2;
+    const statuses = Array.from({ length: 5 }, () => {
+      const day = allocateLeaveDay({ paidRemaining });
+      paidRemaining = day.paidRemaining;
+      return day.status;
+    });
+    assert.deepEqual(statuses, ["paid_leave", "paid_leave", "unpaid_leave", "unpaid_leave", "unpaid_leave"]);
+  });
+
+  it("handles fully paid, fully unpaid, and one-day paid requests", () => {
+    const run = (requested, balance) => {
+      let paidRemaining = balance;
+      return Array.from({ length: requested }, () => {
+        const day = allocateLeaveDay({ paidRemaining });
+        paidRemaining = day.paidRemaining;
+        return day.status;
+      });
+    };
+    assert.deepEqual(run(3, 5), ["paid_leave", "paid_leave", "paid_leave"]);
+    assert.deepEqual(run(4, 0), ["unpaid_leave", "unpaid_leave", "unpaid_leave", "unpaid_leave"]);
+    assert.deepEqual(run(1, 1), ["paid_leave"]);
+  });
+
   it("balance 1.0 minus a half day leaves 0.5", () => {
     const usage = resolveLeaveBalanceUsage({ usePaidLeave: true, requestedDays: 0.5, availableBalance: 1 });
     assert.deepEqual(usage, { paidDays: 0.5, unpaidDays: 0, remainingBalance: 0.5 });

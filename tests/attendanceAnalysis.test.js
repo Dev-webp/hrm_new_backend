@@ -32,4 +32,9 @@ describe("heatmap status logic (pure)", () => {
       "paid_leave"
     );
   });
+
+  it("preserves persisted date-level paid and unpaid statuses", () => {
+    assert.equal(heatmapStatus({ status: "paid_leave", isPaidLeave: true }), "paid_leave");
+    assert.equal(heatmapStatus({ status: "unpaid_leave", isPaidLeave: false }), "unpaid_leave");
+  });
 });

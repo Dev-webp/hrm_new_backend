@@ -72,3 +72,19 @@ export function resolveLeaveBalanceUsage({ usePaidLeave, requestedDays, availabl
     remainingBalance: Math.max(0, available - paidDays),
   };
 }
+
+// Called once for each eligible date, in chronological order, by approval.
+// It keeps the date-level attendance status aligned with the balance split.
+export function allocateLeaveDay({ paidRemaining, dayWeight = 1 }) {
+  const available = Math.max(0, Number(paidRemaining) || 0);
+  const weight = Number(dayWeight) || 1;
+  const paidForDay = Math.min(weight, available);
+  const isPaidLeave = paidForDay > 0;
+  return {
+    paidForDay,
+    paidRemaining: Math.max(0, available - paidForDay),
+    status: isPaidLeave ? "paid_leave" : "unpaid_leave",
+    leaveType: isPaidLeave ? "paid_leave" : "unpaid_leave",
+    isPaidLeave,
+  };
+}

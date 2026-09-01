@@ -101,7 +101,7 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
          TO_CHAR(date,'YYYY-MM-DD') AS date,
          status, check_in_time, check_out_time,
          late_minutes, production_hours, total_break_minutes,
-         is_paid_leave, leave_request_id, holiday_name
+         is_paid_leave, leave_type, leave_status, leave_request_id, holiday_name
        FROM attendance_records
        WHERE user_id = $1 AND date BETWEEN $2 AND $3
        ORDER BY date`,
@@ -232,11 +232,19 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
       }
     );
     let status = computed.computed_status;
-    let isPaidLeave = att?.is_paid_leave === true;
-    let leaveType = null;
+    // Preserve the persisted day-level classification even when the parent
+    // leave request is a mixed paid/unpaid request.
+    let isPaidLeave = status === "paid_leave"
+      ? true
+      : status === "unpaid_leave"
+        ? false
+        : att?.is_paid_leave === true;
+    let leaveType = att?.leave_type || null;
 
     const leaveInfo = leaveDateMap.get(dateStr);
-    if (leaveInfo && (!att || ["leave", "absent", "no_record"].includes(computed.computed_status))) {
+    // Attendance records are the date-level source of truth.  Only use the
+    // approved request as a legacy fallback when no record exists yet.
+    if (leaveInfo && !att) {
       status = "leave";
       isPaidLeave = leaveInfo.isPaidLeave;
       leaveType = leaveInfo.leaveType;
@@ -248,8 +256,10 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
         policy_reason: "Approved leave",
       };
     } else if (att?.leave_request_id || leaveInfo) {
-      leaveType = leaveInfo?.leaveType || null;
-      isPaidLeave = isPaidLeave || leaveInfo?.isPaidLeave || false;
+      leaveType = leaveType || leaveInfo?.leaveType || null;
+      if (status !== "paid_leave" && status !== "unpaid_leave") {
+        isPaidLeave = isPaidLeave || leaveInfo?.isPaidLeave || false;
+      }
     }
 
     if (!att && !leaveInfo && dow !== 0 && !holidayMap.has(dateStr)) {
@@ -385,9 +395,9 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     fullDays: safeRecords.filter((r) => r.status === "full_day").length,
     halfDays: safeRecords.filter((r) => r.status === "half_day").length,
     absentDays: safeRecords.filter((r) => r.status === "absent").length,
-    leaveDays: safeRecords.filter((r) => r.status === "leave").length,
-    paidLeaveDays: safeRecords.filter((r) => r.status === "leave" && r.isPaidLeave).length,
-    unpaidLeaveDays: safeRecords.filter((r) => r.status === "leave" && !r.isPaidLeave).length,
+    paidLeaveDays: safeRecords.filter((r) => r.status === "paid_leave" || (r.status === "leave" && r.isPaidLeave)).length,
+    unpaidLeaveDays: safeRecords.filter((r) => r.status === "unpaid_leave" || (r.status === "leave" && !r.isPaidLeave)).length,
+    leaveDays: safeRecords.filter((r) => ["leave", "paid_leave", "unpaid_leave"].includes(r.status)).length,
     holidayDays: safeRecords.filter((r) => r.status === "holiday").length,
     lateDays: safeRecords.filter(isGraceLateRecord).length,
     totalLateMinutes: safeRecords.reduce((s, r) => s + r.lateMinutes, 0),
