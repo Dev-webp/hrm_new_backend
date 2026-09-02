@@ -2,8 +2,37 @@
 import express from "express";
 import { verifyToken, authorizeRoles } from "../middleware/auth.js";
 import { pool } from "../middleware/db.js";
+import { getAdminDashboardAttendance } from "../services/adminDashboardAttendanceService.js";
 
 const router = express.Router();
+
+router.get(
+  "/admin/dashboard/attendance",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  async (req, res) => {
+    try {
+      const { start, end, today, branch = "all" } = req.query;
+      if (!start || !end) {
+        return res.status(400).json({ message: "start and end are required" });
+      }
+      const requestedBranch = req.user.role === "MANAGER"
+        ? req.user.branch
+        : branch !== "all"
+          ? branch
+          : null;
+      const data = await getAdminDashboardAttendance({
+        start,
+        end,
+        summaryDate: today || end,
+        branch: requestedBranch,
+      });
+      return res.json(data);
+    } catch (error) {
+      return res.status(400).json({ message: error.message || "Unable to load dashboard attendance" });
+    }
+  }
+);
 
 /*
 ======================================================

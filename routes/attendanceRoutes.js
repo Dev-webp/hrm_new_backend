@@ -2245,6 +2245,7 @@ res.json(response);
 });
 
 // GET /api/attendance/range/summary?start=&end=&branch=
+
 router.get("/attendance/range/summary", verifyToken, async (req, res) => {
   try {
     const { start, end, branch } = req.query;
@@ -2255,12 +2256,11 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
       return res.status(400).json({ message: "start and end required" });
     }
 
-    const effectiveBranch =
-      isBranchRestrictedOperationalRole(req.user)
-        ? req.user.branch
-        : branch && branch !== "all"
-        ? branch
-        : null;
+    const effectiveBranch = isBranchRestrictedOperationalRole(req.user)
+      ? req.user.branch
+      : branch && branch !== "all"
+      ? branch
+      : null;
 
     const params = [start, end];
     let branchCondition = "";
@@ -2269,6 +2269,7 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
     if (effectiveBranch) {
       branchCondition = `AND u.branch = $${idx}`;
       params.push(effectiveBranch);
+      idx += 1;
     }
 
     const query = `
@@ -2282,8 +2283,8 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
         a.production_hours,
         a.total_break_minutes,
         a.half_day_slot,
-        a.leave_type,
-        a.leave_status,
+        COALESCE(a.leave_type, l.leave_type) AS leave_type,
+        COALESCE(a.leave_status, CASE WHEN l.id IS NOT NULL THEN 'approved' END) AS leave_status,
         a.post_login_idle_minutes,
         a.misuse_of_time
 
@@ -2294,6 +2295,11 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
       LEFT JOIN attendance_records a
         ON a.user_id = u.id
        AND a.date = d.day::date
+
+      LEFT JOIN leave_requests l
+        ON l.user_id = u.id
+       AND LOWER(l.status) = 'approved'
+       AND d.day::date BETWEEN l.from_date AND l.to_date
 
       WHERE u.role != 'SUPER_ADMIN'
         AND COALESCE(u.status, 'active') = 'active'
@@ -2321,6 +2327,7 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
 
       const item = summary.get(row.date);
       item.total += 1;
+
       const computed = getComputedAttendanceStatus(row, {
         dateStr: row.date,
         holidaySet,
@@ -2329,10 +2336,15 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
 
       if (computed.computed_status === "full_day") item.present += 1;
       else if (computed.computed_status === "half_day") item.halfDay += 1;
-      else if (computed.computed_status === "leave") item.leave += 1;
+      // FIX: previously only matched the legacy "leave" bucket and silently
+      // dropped paid_leave/unpaid_leave from the chart.
+      else if (["leave", "paid_leave", "unpaid_leave"].includes(computed.computed_status))
+        item.leave += 1;
       else if (computed.computed_status === "absent") item.absent += 1;
 
-      if (evaluateLateLogin({ office_in: row.check_in_time }).is_late) item.late += 1;
+      // FIX: reuse the already-computed late_minutes instead of a separate
+      // evaluateLateLogin() call with its own late-window assumptions.
+      if (Number(computed.late_minutes) > 0) item.late += 1;
     }
 
     res.json([...summary.values()]);
@@ -2349,8 +2361,12 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
     const rangeError = validateAttendanceRange(start, end, "Bulk monthly attendance range");
     if (rangeError) return res.status(400).json({ message: rangeError });
     if (!start || !end) return res.status(400).json({ message: "start and end required" });
-    const effectiveBranch = isBranchRestrictedOperationalRole(req.user) ? req.user.branch
-      : branch && branch !== "all" ? branch : null;
+
+    const effectiveBranch = isBranchRestrictedOperationalRole(req.user)
+      ? req.user.branch
+      : branch && branch !== "all"
+      ? branch
+      : null;
 
     let query = `
       SELECT a.user_id, TO_CHAR(a.date,'YYYY-MM-DD') AS date,
@@ -2360,18 +2376,92 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
              a.post_login_idle_minutes, a.misuse_of_time
       FROM attendance_records a JOIN users u ON a.user_id=u.id
       WHERE a.date BETWEEN $1 AND $2 AND u.role!='SUPER_ADMIN'`;
-    const params = [start, end]; let idx = 3;
-    if (effectiveBranch) { query += ` AND u.branch=$${idx}`; params.push(effectiveBranch); }
+    const params = [start, end];
+    let idx = 3;
+    if (effectiveBranch) {
+      query += ` AND u.branch=$${idx}`;
+      params.push(effectiveBranch);
+      idx += 1;
+    }
     query += ` ORDER BY a.user_id, a.date ASC`;
 
-    const result = await pool.query(query, params);
+    // FIX: bulk-monthly previously only read attendance_records, so approved
+    // leave with no punch row silently disappeared from the monthly grid.
+    const leaveParams = [start, end];
+    let leaveQuery = `
+      SELECT l.user_id, l.leave_type, l.from_date, l.to_date
+      FROM leave_requests l
+      JOIN users u ON l.user_id = u.id
+      WHERE LOWER(l.status) = 'approved'
+        AND l.from_date <= $2::date AND l.to_date >= $1::date
+        AND u.role != 'SUPER_ADMIN'`;
+    if (effectiveBranch) {
+      leaveQuery += ` AND u.branch = $3`;
+      leaveParams.push(effectiveBranch);
+    }
+
+    const [result, leaveResult] = await Promise.all([
+      pool.query(query, params),
+      pool.query(leaveQuery, leaveParams),
+    ]);
+
     const holidaySet = await fetchHolidaySetForDateRange(start, end);
     const logsByDate = Object.fromEntries(result.rows.map((row) => [row.date, row]));
-    const grouped = {};
-    for (const row of result.rows) {
-      if (!grouped[row.user_id]) grouped[row.user_id] = [];
-      grouped[row.user_id].push(withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate }));
+
+    const leaveByUserDate = new Map();
+    for (const lv of leaveResult.rows) {
+      const cur = new Date(lv.from_date);
+      const to = new Date(lv.to_date);
+      while (cur <= to) {
+        const dateStr = cur.toISOString().slice(0, 10);
+        if (dateStr >= start && dateStr <= end) {
+          leaveByUserDate.set(`${lv.user_id}_${dateStr}`, lv.leave_type);
+        }
+        cur.setDate(cur.getDate() + 1);
+      }
     }
+
+    const grouped = {};
+    const seenUserDate = new Set();
+
+    for (const row of result.rows) {
+      const leaveType = leaveByUserDate.get(`${row.user_id}_${row.date}`);
+      const merged = leaveType
+        ? { ...row, leave_type: row.leave_type || leaveType, leave_status: row.leave_status || "approved" }
+        : row;
+
+      if (!grouped[row.user_id]) grouped[row.user_id] = [];
+      grouped[row.user_id].push(
+        // FIX: withDisplayAttendanceStatus was undefined in the provided
+        // files; use the shared, verified engine instead.
+        withComputedAttendanceStatus(merged, { dateStr: row.date, holidaySet, logsByDate })
+      );
+      seenUserDate.add(`${row.user_id}_${row.date}`);
+    }
+
+    // Synthesize rows for approved-leave days with NO attendance_records row.
+    for (const lv of leaveResult.rows) {
+      const cur = new Date(lv.from_date);
+      const to = new Date(lv.to_date);
+      while (cur <= to) {
+        const dateStr = cur.toISOString().slice(0, 10);
+        if (dateStr >= start && dateStr <= end && !seenUserDate.has(`${lv.user_id}_${dateStr}`)) {
+          const synthetic = {
+            user_id: lv.user_id,
+            date: dateStr,
+            leave_type: lv.leave_type,
+            leave_status: "approved",
+          };
+          if (!grouped[lv.user_id]) grouped[lv.user_id] = [];
+          grouped[lv.user_id].push(
+            withComputedAttendanceStatus(synthetic, { dateStr, holidaySet, logsByDate })
+          );
+          seenUserDate.add(`${lv.user_id}_${dateStr}`);
+        }
+        cur.setDate(cur.getDate() + 1);
+      }
+    }
+
     res.json(grouped);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -3989,6 +4079,417 @@ router.get("/departments", verifyToken, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// GET /api/admin/dashboard/attendance
+// UNIFIED ADMIN DASHBOARD ATTENDANCE API
+// Single source of truth for all attendance data
+// ═══════════════════════════════════════════════════════════════════
+router.get(
+  "/admin/dashboard/attendance",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
+  async (req, res) => {
+    try {
+      const { start, end, branch: requestedBranch, today: todayStr } = req.query;
+      
+      // Validate date range
+      const rangeError = validateAttendanceRange(start, end, "date range");
+      if (rangeError) return res.status(400).json({ message: rangeError });
+
+      // Determine effective branch based on user role
+      const effectiveBranch = isBranchRestrictedOperationalRole(req.user)
+        ? req.user.branch
+        : requestedBranch && requestedBranch !== "all"
+        ? requestedBranch
+        : null;
+
+      // Fetch all employees for the selected branch(es)
+      let employeeQuery = `
+        SELECT 
+          id, full_name, email, role, department, branch, status
+        FROM users
+        WHERE role != 'SUPER_ADMIN' AND COALESCE(status, 'active') = 'active'
+      `;
+      const employeeParams = [];
+      if (effectiveBranch) {
+        employeeQuery += ` AND branch = $1`;
+        employeeParams.push(effectiveBranch);
+      }
+      employeeQuery += ` ORDER BY full_name ASC`;
+      
+      const employeeResult = await pool.query(employeeQuery, employeeParams);
+      const employees = employeeResult.rows;
+
+      // Fetch attendance records for date range
+      let attendanceQuery = `
+        SELECT
+          a.id, a.user_id, TO_CHAR(a.date, 'YYYY-MM-DD') AS date,
+          a.check_in_time, a.check_out_time, a.status,
+          a.late_minutes, a.production_hours, a.total_break_minutes,
+          a.leave_type, a.leave_status, a.is_paid_leave, a.half_day_slot,
+          a.branch, a.department
+        FROM attendance_records a
+        WHERE a.date BETWEEN $1::date AND $2::date
+      `;
+      const attendanceParams = [start, end];
+      
+      if (effectiveBranch) {
+        attendanceQuery += ` AND a.branch = $3`;
+        attendanceParams.push(effectiveBranch);
+      }
+      
+      const attendanceResult = await pool.query(
+        attendanceQuery,
+        attendanceParams
+      );
+      const allRecords = attendanceResult.rows;
+
+      // Index attendance by user_id and date for quick lookup
+      const attendanceByUser = new Map();
+      allRecords.forEach((record) => {
+        if (!attendanceByUser.has(record.user_id)) {
+          attendanceByUser.set(record.user_id, []);
+        }
+        attendanceByUser.get(record.user_id).push(record);
+      });
+
+      // Fetch holidays for the date range
+      const holidayResult = await pool.query(
+        `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date, name
+         FROM company_holidays
+         WHERE date BETWEEN $1::date AND $2::date
+         AND (branch = 'all' OR branch IS NULL OR ($3::text IS NULL OR branch = $3::text))`,
+        [start, end, effectiveBranch]
+      );
+      const holidaySet = new Set(holidayResult.rows.map((r) => r.date));
+
+      // Fetch pending leave requests for notification banner
+      let pendingLeavesQuery = `
+        SELECT lr.id, lr.user_id, u.full_name, lr.leave_type, lr.days, lr.status
+        FROM leave_requests lr
+        JOIN users u ON lr.user_id = u.id
+        WHERE lr.status = 'pending'
+      `;
+      const pendingLeaveParams = [];
+      if (effectiveBranch) {
+        pendingLeavesQuery += ` AND u.branch = $1`;
+        pendingLeaveParams.push(effectiveBranch);
+      }
+      pendingLeavesQuery += ` ORDER BY lr.created_at DESC LIMIT 10`;
+      
+      const pendingLeaveResult = await pool.query(
+        pendingLeavesQuery,
+        pendingLeaveParams
+      );
+      const pendingLeaveItems = pendingLeaveResult.rows;
+
+      // Helper function to check if date is Sunday
+      function isSunday(dateStr) {
+        const [y, m, d] = dateStr.split("-").map(Number);
+        return new Date(y, m - 1, d).getDay() === 0;
+      }
+
+      // Helper function to get attendance record for specific date
+      function getRecordForDate(userId, dateStr) {
+        const records = attendanceByUser.get(userId) || [];
+        return records.find((r) => r.date === dateStr);
+      }
+
+      // Helper function to normalize attendance status
+      function normalizeStatus(status) {
+        if (!status) return "absent";
+        const normalized = String(status).toLowerCase().trim();
+        if (["full_day", "half_day", "absent", "leave", "holiday", "present", "late"].includes(normalized)) {
+          return normalized;
+        }
+        return "absent";
+      }
+
+      // Helper function to determine if employee is present today (live status)
+      function isLivePresent(record) {
+        if (!record) return false;
+        const status = normalizeStatus(record.status);
+        if (["full_day", "present", "late"].includes(status)) return true;
+        if (status === "half_day") return true;
+        // If they have check-in but no check-out today, they're working
+        if (record.check_in_time && !record.check_out_time && record.date === todayStr) {
+          return true;
+        }
+        return false;
+      }
+
+      // Helper function to determine if employee is working right now (only for today)
+   function isWorkingNow(record, todayStr) {
+  if (!record) return false;
+
+  const recordDate = String(record.date || "").slice(0, 10);
+
+  if (recordDate !== todayStr) {
+    return false;
+  }
+
+  const checkIn =
+    record.check_in_time ||
+    record.office_in ||
+    record.checkIn;
+
+  const checkOut =
+    record.check_out_time ||
+    record.office_out ||
+    record.checkOut;
+
+  return Boolean(checkIn) && !checkOut;
+}
+
+      // Helper function to determine if employee is on leave
+      function isLeave(record) {
+        if (!record) return false;
+        const status = normalizeStatus(record.status);
+        return status === "leave" || status === "half_day"; // half_day counts as partial leave
+      }
+
+      // Helper function to check if is paid leave
+      function isPaidLeave(record) {
+        if (!record) return false;
+        const status = normalizeStatus(record.status);
+        if (status === "leave" && record.is_paid_leave) return true;
+        return false;
+      }
+
+      // Helper function to check if is unpaid leave
+      function isUnpaidLeave(record) {
+        if (!record) return false;
+        const status = normalizeStatus(record.status);
+        if (status === "leave" && !record.is_paid_leave) return true;
+        return false;
+      }
+
+      // Helper function to check if late
+      function isLate(record) {
+        if (!record) return false;
+        return record.late_minutes && record.late_minutes > 0;
+      }
+
+      // Calculate summary statistics for today
+      const todayPresent = [];
+      const todayWorking = [];
+      const todayAbsent = [];
+      const todayHalfDay = [];
+      const todayLate = [];
+      const todayPaidLeave = [];
+      const todayUnpaidLeave = [];
+
+      employees.forEach((emp) => {
+        const todayRecord = getRecordForDate(emp.id, todayStr);
+        
+        if (isWorkingNow(todayRecord)) {
+          todayWorking.push(emp.id);
+        } else if (isPaidLeave(todayRecord)) {
+          todayPaidLeave.push(emp.id);
+        } else if (isUnpaidLeave(todayRecord)) {
+          todayUnpaidLeave.push(emp.id);
+        } else if (normalizeStatus(todayRecord?.status) === "half_day") {
+          todayHalfDay.push(emp.id);
+        } else if (isLivePresent(todayRecord)) {
+          todayPresent.push(emp.id);
+          if (isLate(todayRecord)) {
+            todayLate.push(emp.id);
+          }
+        } else {
+          todayAbsent.push(emp.id);
+        }
+      });
+
+      const summary = {
+        present: todayPresent.length,
+        working: todayWorking.length,
+        halfDay: todayHalfDay.length,
+        absent: todayAbsent.length,
+        late: todayLate.length,
+        paidLeave: todayPaidLeave.length,
+        unpaidLeave: todayUnpaidLeave.length,
+      };
+
+      // Calculate calendar statistics
+      const startDate = parseDateStr(start);
+      const endDate = parseDateStr(end);
+      let totalDays = 0;
+      let sundays = 0;
+      let holidays = 0;
+
+      for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+        totalDays += 1;
+        const dateStr = formatDateStr(d);
+        if (isSunday(dateStr)) {
+          sundays += 1;
+        } else if (holidaySet.has(dateStr)) {
+          holidays += 1;
+        }
+      }
+      const workingDays = totalDays - sundays - holidays;
+
+      const calendar = {
+        total: totalDays,
+        sundays,
+        holidays,
+        workingDays,
+      };
+
+      // Calculate per-employee monthly statistics
+      const employeeStats = employees.map((emp) => {
+        const records = attendanceByUser.get(emp.id) || [];
+        
+        let empFullDays = 0;
+        let empHalfDays = 0;
+        let empAbsent = 0;
+        let empLeave = 0;
+        let empLate = 0;
+        let empWorkedDays = 0;
+
+        for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+          const dateStr = formatDateStr(d);
+          
+          // Skip sundays and holidays
+          if (isSunday(dateStr) || holidaySet.has(dateStr)) {
+            continue;
+          }
+
+          empWorkedDays += 1;
+
+          const record = records.find((r) => r.date === dateStr);
+          const status = normalizeStatus(record?.status);
+
+          if (status === "leave" || status === "half_day") {
+            if (status === "leave") {
+              empLeave += 1;
+            } else {
+              empHalfDays += 1;
+            }
+          } else if (isLivePresent(record)) {
+            empFullDays += 1;
+            if (isLate(record)) {
+              empLate += 1;
+            }
+          } else {
+            empAbsent += 1;
+          }
+        }
+
+        // Calculate attendance percentage
+        const effectivePresent = empFullDays + empHalfDays * 0.5;
+        const attendanceDenominator = effectivePresent + empAbsent;
+        const attPct =
+          attendanceDenominator > 0
+            ? Math.round((effectivePresent / attendanceDenominator) * 100)
+            : 0;
+
+        return {
+          ...emp,
+          stats: {
+            present: effectivePresent,
+            fullDays: empFullDays,
+            half: empHalfDays,
+            absent: empAbsent,
+            leave: empLeave,
+            late: empLate,
+            workingDays: empWorkedDays,
+            attPct,
+          },
+        };
+      });
+
+      // Calculate branch statistics
+      const branchStatsMap = new Map();
+      employeeStats.forEach((emp) => {
+        const branchName = emp.branch || "Unknown";
+        if (!branchStatsMap.has(branchName)) {
+          branchStatsMap.set(branchName, {
+            name: branchName,
+            totalEmployees: 0,
+            totalAttendanceUnits: 0,
+          });
+        }
+        const branchStat = branchStatsMap.get(branchName);
+        branchStat.totalEmployees += 1;
+        branchStat.totalAttendanceUnits += emp.stats.present;
+      });
+
+      const branchStats = [...branchStatsMap.values()].map((branch) => ({
+        ...branch,
+        attendancePercentage: branch.totalEmployees > 0
+          ? Math.round((branch.totalAttendanceUnits / (branch.totalEmployees * workingDays)) * 100)
+          : 0,
+      }));
+
+      // Calculate daily summary for trend chart
+      const dailySummary = [];
+      for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+        const dateStr = formatDateStr(d);
+        
+        // Skip sundays and holidays from chart
+        if (isSunday(dateStr) || holidaySet.has(dateStr)) {
+          continue;
+        }
+
+        // Skip future dates
+        if (dateStr > todayStr) {
+          continue;
+        }
+
+        let dayPresent = 0;
+        let dayLate = 0;
+        let dayAbsent = 0;
+
+        employees.forEach((emp) => {
+          const record = getRecordForDate(emp.id, dateStr);
+          const status = normalizeStatus(record?.status);
+
+          if (["leave", "paid_leave", "unpaid_leave"].includes(status)) {
+            // Don't count leaves in present/absent
+            return;
+          }
+
+          if (isLivePresent(record)) {
+            dayPresent += 1;
+            if (isLate(record)) {
+              dayLate += 1;
+            }
+          } else {
+            dayAbsent += 1;
+          }
+        });
+
+        const dayNum = parseInt(dateStr.split("-")[2]);
+        dailySummary.push({
+          date: dateStr,
+          day: dayNum,
+          present: dayPresent,
+          late: dayLate,
+          absent: dayAbsent,
+        });
+      }
+
+      // Return unified response
+      res.json({
+        summary,
+        employees: employeeStats,
+        monthlyStats: Object.fromEntries(
+          employeeStats.map((emp) => [emp.id, emp.stats])
+        ),
+        calendar,
+        branchStats,
+        dailySummary,
+        pendingLeaves: pendingLeaveItems.length,
+        pendingLeaveItems: pendingLeaveItems.slice(0, 5),
+        alerts: [],
+      });
+    } catch (err) {
+      console.error("Admin dashboard error:", err);
+      res.status(500).json({ message: err.message });
+    }
+  }
+);
 
 // GET /api/admin/employees
 router.get(
