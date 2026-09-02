@@ -4384,8 +4384,17 @@ router.get(
             ? Math.round((effectivePresent / attendanceDenominator) * 100)
             : 0;
 
+        // Get today's login time and break time
+        const todayRecord = getRecordForDate(emp.id, todayStr);
+        const todayLoginTime = todayRecord?.check_in_time 
+          ? formatTime12Hour(todayRecord.check_in_time)
+          : null;
+        const todayBreakMinutes = todayRecord?.total_break_minutes || 0;
+
         return {
           ...emp,
+          todayLoginTime,
+          todayBreakMinutes,
           stats: {
             present: effectivePresent,
             fullDays: empFullDays,

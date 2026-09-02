@@ -74,7 +74,8 @@ router.get(
       const { department, search, status = "active" } = req.query;
       const branch = normalizeBranchFilter(req.query.branch);
       let query = `
-        SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
+       SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
+       u.login_access_type,
                u.employee_code, u.salary, u.joining_date, u.status, u.profile_initials,
                designation, bank_name, bank_account, bank_ifsc,
                aadhar_number, d.code AS department_code,
@@ -137,7 +138,8 @@ router.get(
     try {
       const { id } = req.params;
       const result = await pool.query(
-        `SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch, u.employee_code,
+        `SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
+       u.login_access_type, u.employee_code,
                 u.salary, u.joining_date, u.status, u.profile_initials,
                 u.designation, u.bank_name, u.bank_account, u.bank_ifsc,
                 aadhar_number,
@@ -323,6 +325,289 @@ router.put(
       res
         .status(error.statusCode || 500)
         .json({ message: error.statusCode ? error.message : "Update failed" });
+    }
+  }
+);
+// ─────────────────────────────────────────────────────────────
+// GET employee login access
+// ─────────────────────────────────────────────────────────────
+
+router.get(
+  "/admin/employees/:id/login-access",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      // Get employee
+      const employeeResult = await pool.query(
+        `
+        SELECT
+          id,
+          full_name,
+          branch,
+          login_access_type
+        FROM users
+        WHERE id = $1
+        `,
+        [id]
+      );
+
+      if (!employeeResult.rows.length) {
+        return res.status(404).json({
+          message: "Employee not found"
+        });
+      }
+
+      const employee = employeeResult.rows[0];
+
+      // Branch-level permission for managers
+      if (
+        req.user.role === "MANAGER" &&
+        employee.branch !== req.user.branch
+      ) {
+        return res.status(403).json({
+          message: "Access denied – different branch"
+        });
+      }
+
+      // Get additional allowed offices
+      const accessResult = await pool.query(
+        `
+        SELECT branch_name
+        FROM user_branch_login_access
+        WHERE user_id = $1
+          AND is_active = TRUE
+        ORDER BY branch_name
+        `,
+        [id]
+      );
+
+      return res.json({
+        employee: {
+          id: employee.id,
+          full_name: employee.full_name,
+          primaryBranch: employee.branch,
+          loginAccessType:
+            employee.login_access_type || "OFFICE"
+        },
+
+        allowedBranches: accessResult.rows.map(
+          (row) => row.branch_name
+        )
+      });
+
+    } catch (error) {
+      console.error("Get login access failed:", error);
+
+      return res.status(500).json({
+        message: "Failed to get login access"
+      });
+    }
+  }
+);
+
+
+// ─────────────────────────────────────────────────────────────
+// UPDATE employee login access
+// ─────────────────────────────────────────────────────────────
+
+router.put(
+  "/admin/employees/:id/login-access",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER"),
+  async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const { id } = req.params;
+
+      const {
+        loginAccessType,
+        allowedBranches = []
+      } = req.body;
+
+
+      // Validate login type
+      if (!["OFFICE", "REMOTE"].includes(loginAccessType)) {
+        return res.status(400).json({
+          message: "Login access type must be OFFICE or REMOTE"
+        });
+      }
+
+
+      // Validate branches
+      if (!Array.isArray(allowedBranches)) {
+        return res.status(400).json({
+          message: "allowedBranches must be an array"
+        });
+      }
+// OFFICE users must have at least one allowed office
+if (
+  loginAccessType === "OFFICE" &&
+  allowedBranches.length === 0
+) {
+  return res.status(400).json({
+    message: "Select at least one office location for OFFICE login"
+  });
+}
+
+      await client.query("BEGIN");
+
+
+      // Check employee exists
+      const employeeResult = await client.query(
+        `
+        SELECT
+          id,
+          full_name,
+          branch,
+          role
+        FROM users
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [id]
+      );
+
+
+      if (!employeeResult.rows.length) {
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+          message: "Employee not found"
+        });
+      }
+
+
+      const employee = employeeResult.rows[0];
+
+
+      // OPERATIONAL_MANAGER cannot modify admin-level users
+      if (
+        req.user.role === "OPERATIONAL_MANAGER" &&
+        ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(employee.role)
+      ) {
+        await client.query("ROLLBACK");
+
+        return res.status(403).json({
+          message:
+            "Operational managers cannot modify admin-level users"
+        });
+      }
+
+
+      // Update login type
+      await client.query(
+        `
+        UPDATE users
+        SET
+          login_access_type = $1,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        `,
+        [
+          loginAccessType,
+          id
+        ]
+      );
+
+
+      // Remove previous additional office permissions
+      await client.query(
+        `
+        DELETE FROM user_branch_login_access
+        WHERE user_id = $1
+        `,
+        [id]
+      );
+
+
+      // OFFICE users can have additional allowed offices
+      if (loginAccessType === "OFFICE") {
+
+        // Remove duplicates
+        const uniqueBranches = [
+          ...new Set(allowedBranches)
+        ];
+
+        for (const branchName of uniqueBranches) {
+
+          // Verify branch exists and is active
+          const branchResult = await client.query(
+            `
+            SELECT branch_name
+            FROM branch_locations
+            WHERE branch_name = $1
+              AND is_active = TRUE
+            `,
+            [branchName]
+          );
+
+
+          if (!branchResult.rows.length) {
+            throw new Error(
+              `Invalid or inactive branch: ${branchName}`
+            );
+          }
+
+
+          await client.query(
+            `
+            INSERT INTO user_branch_login_access
+            (
+              user_id,
+              branch_name,
+              is_active,
+              granted_by
+            )
+            VALUES ($1, $2, TRUE, $3)
+            `,
+            [
+              id,
+              branchName,
+              req.user.id
+            ]
+          );
+        }
+      }
+
+
+      await client.query("COMMIT");
+
+
+      return res.json({
+        success: true,
+        message:
+          "Employee login access updated successfully",
+
+        loginAccessType,
+
+        allowedBranches:
+          loginAccessType === "OFFICE"
+            ? [...new Set(allowedBranches)]
+            : []
+      });
+
+    } catch (error) {
+
+      await client.query("ROLLBACK");
+
+      console.error(
+        "Update login access failed:",
+        error
+      );
+
+      return res.status(500).json({
+        message:
+          error.message || "Failed to update login access"
+      });
+
+    } finally {
+
+      client.release();
+
     }
   }
 );

@@ -24,10 +24,33 @@ async function notifyInvoiceOnlineStatus(email, isOnline) {
 const DUMMY_BCRYPT_HASH = "$2b$10$7EqJtq98hPqEX7fNZaFWoOhiCwN2kgeJXgsF5fV7oJd6mJ0Bla6D6";
 
 
+// ───────────────── GEO-FENCING HELPERS ─────────────────
+
+// Calculate distance between two GPS coordinates in meters
+function calculateDistanceInMeters(lat1, lon1, lat2, lon2) {
+  const earthRadius = 6371000; // meters
+
+  const toRadians = (value) => (value * Math.PI) / 180;
+
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return earthRadius * c;
+}
+
 // ───────────────── LOGIN ─────────────────
 router.post("/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password,latitude,longitude } = req.body || {};
     const normalizedEmail = String(email || "").trim();
 
     if (!normalizedEmail || !password) {
@@ -37,7 +60,7 @@ router.post("/login", async (req, res) => {
     }
 
     const userRes = await pool.query(
-      `SELECT id, full_name, email, password, role, department, branch, designation, employee_code
+      `SELECT id, full_name, email, password, role, department, branch, designation, employee_code, login_access_type
        FROM users
        WHERE email = $1`,
       [normalizedEmail]
@@ -55,6 +78,121 @@ router.post("/login", async (req, res) => {
         message: "Invalid credentials"
       });
     }
+
+      // ───────────────── LOGIN ACCESS / GEO-FENCING ─────────────────
+
+const loginAccessType =
+  user.login_access_type || "OFFICE";
+
+
+// REMOTE users can login from anywhere
+if (loginAccessType === "OFFICE") {
+
+  // Validate GPS coordinates
+  if (
+    latitude === undefined ||
+    longitude === undefined ||
+    latitude === null ||
+    longitude === null
+  ) {
+    return res.status(403).json({
+      message:
+        "Office login requires location permission. Please enable location access."
+    });
+  }
+
+
+  const userLatitude = Number(latitude);
+  const userLongitude = Number(longitude);
+
+
+  // Validate GPS values
+  if (
+    !Number.isFinite(userLatitude) ||
+    !Number.isFinite(userLongitude) ||
+    userLatitude < -90 ||
+    userLatitude > 90 ||
+    userLongitude < -180 ||
+    userLongitude > 180
+  ) {
+    return res.status(400).json({
+      message: "Invalid location coordinates"
+    });
+  }
+
+
+  // Get all office locations this user is allowed to login from
+  const allowedBranchesResult = await pool.query(
+    `
+    SELECT
+      bl.branch_name,
+      bl.latitude,
+      bl.longitude,
+      bl.allowed_radius
+    FROM user_branch_login_access uba
+    INNER JOIN branch_locations bl
+      ON bl.branch_name = uba.branch_name
+    WHERE uba.user_id = $1
+      AND uba.is_active = TRUE
+      AND bl.is_active = TRUE
+    `,
+    [user.id]
+  );
+
+
+  // OFFICE user without any assigned branch
+  if (!allowedBranchesResult.rows.length) {
+    return res.status(403).json({
+      message:
+        "No office location has been assigned to your account. Please contact HR."
+    });
+  }
+
+
+  let matchedBranch = null;
+  let matchedDistance = null;
+
+
+  // Check distance from every allowed office
+  for (const branch of allowedBranchesResult.rows) {
+
+    const distance = calculateDistanceInMeters(
+      userLatitude,
+      userLongitude,
+      Number(branch.latitude),
+      Number(branch.longitude)
+    );
+
+
+    if (distance <= Number(branch.allowed_radius)) {
+
+      matchedBranch = branch;
+      matchedDistance = Math.round(distance);
+
+      break;
+    }
+  }
+
+
+  // User is outside all allowed office locations
+  if (!matchedBranch) {
+
+    return res.status(403).json({
+      message:
+        "You are outside your allowed office location. Login is not permitted from this location."
+    });
+  }
+
+
+  console.log("[GEOFENCE_LOGIN_ALLOWED]", {
+    userId: user.id,
+    user: user.email,
+    branch: matchedBranch.branch_name,
+    distanceMeters: matchedDistance,
+    allowedRadius: matchedBranch.allowed_radius
+  });
+}
+
 
     const token = jwt.sign(
       {
