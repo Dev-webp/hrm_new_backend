@@ -4088,246 +4088,543 @@ router.get("/departments", verifyToken, async (req, res) => {
 router.get(
   "/admin/dashboard/attendance",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
+  authorizeRoles(
+    "SUPER_ADMIN",
+    "OPERATIONAL_MANAGER",
+    "MANAGER",
+    "SUB_ADMIN"
+  ),
   async (req, res) => {
     try {
-      const { start, end, branch: requestedBranch, today: todayStr } = req.query;
-      
-      // Validate date range
-      const rangeError = validateAttendanceRange(start, end, "date range");
-      if (rangeError) return res.status(400).json({ message: rangeError });
+      const {
+        start,
+        end,
+        branch: requestedBranch,
+        today: requestedToday,
+      } = req.query;
 
-      // Determine effective branch based on user role
-      const effectiveBranch = isBranchRestrictedOperationalRole(req.user)
-        ? req.user.branch
-        : requestedBranch && requestedBranch !== "all"
-        ? requestedBranch
-        : null;
+      const rangeError = validateAttendanceRange(
+        start,
+        end,
+        "date range"
+      );
 
-      // Fetch all employees for the selected branch(es)
+      if (rangeError) {
+        return res.status(400).json({
+          message: rangeError,
+        });
+      }
+
+      /*
+       * IMPORTANT:
+       * Never trust future dates for attendance calculations.
+       *
+       * Example:
+       * Range = Sep 1 → Sep 30
+       * Today = Sep 2
+       *
+       * Calculate only Sep 1 → Sep 2
+       */
+
+      const actualToday = formatDateStr(new Date());
+
+      const todayStr =
+        requestedToday && requestedToday <= actualToday
+          ? requestedToday
+          : actualToday;
+
+      const calculationEnd =
+        end < todayStr ? end : todayStr;
+
+      const effectiveBranch =
+        isBranchRestrictedOperationalRole(req.user)
+          ? req.user.branch
+          : requestedBranch &&
+            requestedBranch !== "all"
+          ? requestedBranch
+          : null;
+
+      /* =====================================================
+         EMPLOYEES
+      ===================================================== */
+
       let employeeQuery = `
-        SELECT 
-          id, full_name, email, role, department, branch, status
+        SELECT
+          id,
+          full_name,
+          email,
+          role,
+          department,
+          branch,
+          status
         FROM users
-        WHERE role != 'SUPER_ADMIN' AND COALESCE(status, 'active') = 'active'
+        WHERE role != 'SUPER_ADMIN'
+          AND COALESCE(status, 'active') = 'active'
       `;
+
       const employeeParams = [];
+
       if (effectiveBranch) {
         employeeQuery += ` AND branch = $1`;
         employeeParams.push(effectiveBranch);
       }
+
       employeeQuery += ` ORDER BY full_name ASC`;
-      
-      const employeeResult = await pool.query(employeeQuery, employeeParams);
+
+      const employeeResult = await pool.query(
+        employeeQuery,
+        employeeParams
+      );
+
       const employees = employeeResult.rows;
 
-      // Fetch attendance records for date range
+      /* =====================================================
+         ATTENDANCE RECORDS
+         Fetch only until calculationEnd
+      ===================================================== */
+
       let attendanceQuery = `
         SELECT
-          a.id, a.user_id, TO_CHAR(a.date, 'YYYY-MM-DD') AS date,
-          a.check_in_time, a.check_out_time, a.status,
-          a.late_minutes, a.production_hours, a.total_break_minutes,
-          a.leave_type, a.leave_status, a.is_paid_leave, a.half_day_slot,
-          a.branch, a.department
+          a.id,
+          a.user_id,
+          TO_CHAR(a.date, 'YYYY-MM-DD') AS date,
+          a.check_in_time,
+          a.check_out_time,
+          a.status,
+          a.late_minutes,
+          a.production_hours,
+          a.total_break_minutes,
+          a.leave_type,
+          a.leave_status,
+          a.is_paid_leave,
+          a.half_day_slot,
+          a.branch,
+          a.department
         FROM attendance_records a
         WHERE a.date BETWEEN $1::date AND $2::date
       `;
-      const attendanceParams = [start, end];
-      
+
+      const attendanceParams = [
+        start,
+        calculationEnd,
+      ];
+
       if (effectiveBranch) {
         attendanceQuery += ` AND a.branch = $3`;
         attendanceParams.push(effectiveBranch);
       }
-      
+
+      attendanceQuery += `
+        ORDER BY a.user_id, a.date
+      `;
+
       const attendanceResult = await pool.query(
         attendanceQuery,
         attendanceParams
       );
+
       const allRecords = attendanceResult.rows;
 
-      // Index attendance by user_id and date for quick lookup
+      /* =====================================================
+         INDEX ATTENDANCE
+      ===================================================== */
+
       const attendanceByUser = new Map();
+
       allRecords.forEach((record) => {
         if (!attendanceByUser.has(record.user_id)) {
           attendanceByUser.set(record.user_id, []);
         }
-        attendanceByUser.get(record.user_id).push(record);
+
+        attendanceByUser
+          .get(record.user_id)
+          .push(record);
       });
 
-      // Fetch holidays for the date range
+      function getRecordForDate(
+        userId,
+        dateStr
+      ) {
+        const records =
+          attendanceByUser.get(userId) || [];
+
+        return records.find(
+          (record) => record.date === dateStr
+        );
+      }
+
+      /* =====================================================
+         HOLIDAYS
+      ===================================================== */
+
       const holidayResult = await pool.query(
-        `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date, name
-         FROM company_holidays
-         WHERE date BETWEEN $1::date AND $2::date
-         AND (branch = 'all' OR branch IS NULL OR ($3::text IS NULL OR branch = $3::text))`,
-        [start, end, effectiveBranch]
+        `
+        SELECT
+          TO_CHAR(date, 'YYYY-MM-DD') AS date,
+          name
+        FROM company_holidays
+        WHERE date BETWEEN $1::date AND $2::date
+          AND (
+            branch = 'all'
+            OR branch IS NULL
+            OR (
+              $3::text IS NULL
+              OR branch = $3::text
+            )
+          )
+        `,
+        [
+          start,
+          calculationEnd,
+          effectiveBranch,
+        ]
       );
-      const holidaySet = new Set(holidayResult.rows.map((r) => r.date));
 
-      // Fetch pending leave requests for notification banner
+      const holidaySet = new Set(
+        holidayResult.rows.map(
+          (row) => row.date
+        )
+      );
+
+      /* =====================================================
+         PENDING LEAVES
+      ===================================================== */
+
       let pendingLeavesQuery = `
-        SELECT lr.id, lr.user_id, u.full_name, lr.leave_type, lr.days, lr.status
+        SELECT
+          lr.id,
+          lr.user_id,
+          u.full_name,
+          lr.leave_type,
+          lr.days,
+          lr.status
         FROM leave_requests lr
-        JOIN users u ON lr.user_id = u.id
-        WHERE lr.status = 'pending'
+        JOIN users u
+          ON lr.user_id = u.id
+        WHERE LOWER(lr.status) = 'pending'
       `;
+
       const pendingLeaveParams = [];
+
       if (effectiveBranch) {
-        pendingLeavesQuery += ` AND u.branch = $1`;
-        pendingLeaveParams.push(effectiveBranch);
-      }
-      pendingLeavesQuery += ` ORDER BY lr.created_at DESC LIMIT 10`;
-      
-      const pendingLeaveResult = await pool.query(
-        pendingLeavesQuery,
-        pendingLeaveParams
-      );
-      const pendingLeaveItems = pendingLeaveResult.rows;
+        pendingLeavesQuery += `
+          AND u.branch = $1
+        `;
 
-      // Helper function to check if date is Sunday
+        pendingLeaveParams.push(
+          effectiveBranch
+        );
+      }
+
+      pendingLeavesQuery += `
+        ORDER BY lr.created_at DESC
+        LIMIT 10
+      `;
+
+      const pendingLeaveResult =
+        await pool.query(
+          pendingLeavesQuery,
+          pendingLeaveParams
+        );
+
+      const pendingLeaveItems =
+        pendingLeaveResult.rows;
+
+      /* =====================================================
+         HELPERS
+      ===================================================== */
+
       function isSunday(dateStr) {
-        const [y, m, d] = dateStr.split("-").map(Number);
-        return new Date(y, m - 1, d).getDay() === 0;
+        const [year, month, day] =
+          dateStr.split("-").map(Number);
+
+        return (
+          new Date(
+            year,
+            month - 1,
+            day
+          ).getDay() === 0
+        );
       }
 
-      // Helper function to get attendance record for specific date
-      function getRecordForDate(userId, dateStr) {
-        const records = attendanceByUser.get(userId) || [];
-        return records.find((r) => r.date === dateStr);
-      }
-
-      // Helper function to normalize attendance status
       function normalizeStatus(status) {
         if (!status) return "absent";
-        const normalized = String(status).toLowerCase().trim();
-        if (["full_day", "half_day", "absent", "leave", "holiday", "present", "late"].includes(normalized)) {
-          return normalized;
-        }
-        return "absent";
+
+        return String(status)
+          .trim()
+          .toLowerCase()
+          .replace(/[\s-]+/g, "_");
       }
 
-      // Helper function to determine if employee is present today (live status)
-      function isLivePresent(record) {
+      function isLeaveRecord(record) {
         if (!record) return false;
-        const status = normalizeStatus(record.status);
-        if (["full_day", "present", "late"].includes(status)) return true;
-        if (status === "half_day") return true;
-        // If they have check-in but no check-out today, they're working
-        if (record.check_in_time && !record.check_out_time && record.date === todayStr) {
-          return true;
-        }
-        return false;
+
+        const status = normalizeStatus(
+          record.status
+        );
+
+        const leaveType = normalizeStatus(
+          record.leave_type
+        );
+
+        return (
+          status === "leave" ||
+          status === "paid_leave" ||
+          status === "unpaid_leave" ||
+          leaveType === "paid_leave" ||
+          leaveType === "unpaid_leave"
+        );
       }
 
-      // Helper function to determine if employee is working right now (only for today)
-   function isWorkingNow(record, todayStr) {
-  if (!record) return false;
-
-  const recordDate = String(record.date || "").slice(0, 10);
-
-  if (recordDate !== todayStr) {
-    return false;
-  }
-
-  const checkIn =
-    record.check_in_time ||
-    record.office_in ||
-    record.checkIn;
-
-  const checkOut =
-    record.check_out_time ||
-    record.office_out ||
-    record.checkOut;
-
-  return Boolean(checkIn) && !checkOut;
-}
-
-      // Helper function to determine if employee is on leave
-      function isLeave(record) {
-        if (!record) return false;
-        const status = normalizeStatus(record.status);
-        return status === "leave" || status === "half_day"; // half_day counts as partial leave
-      }
-
-      // Helper function to check if is paid leave
       function isPaidLeave(record) {
         if (!record) return false;
-        const status = normalizeStatus(record.status);
-        if (status === "leave" && record.is_paid_leave) return true;
-        return false;
+
+        const status = normalizeStatus(
+          record.status
+        );
+
+        const leaveType = normalizeStatus(
+          record.leave_type
+        );
+
+        return (
+          status === "paid_leave" ||
+          leaveType === "paid_leave" ||
+          record.is_paid_leave === true
+        );
       }
 
-      // Helper function to check if is unpaid leave
       function isUnpaidLeave(record) {
         if (!record) return false;
-        const status = normalizeStatus(record.status);
-        if (status === "leave" && !record.is_paid_leave) return true;
-        return false;
+
+        const status = normalizeStatus(
+          record.status
+        );
+
+        const leaveType = normalizeStatus(
+          record.leave_type
+        );
+
+        return (
+          status === "unpaid_leave" ||
+          leaveType === "unpaid_leave" ||
+          (
+            status === "leave" &&
+            !record.is_paid_leave
+          )
+        );
       }
 
-      // Helper function to check if late
-      function isLate(record) {
+      function isHalfDay(record) {
         if (!record) return false;
-        return record.late_minutes && record.late_minutes > 0;
+
+        return (
+          normalizeStatus(record.status) ===
+          "half_day"
+        );
       }
 
-      // Calculate summary statistics for today
-      const todayPresent = [];
-      const todayWorking = [];
-      const todayAbsent = [];
-      const todayHalfDay = [];
-      const todayLate = [];
-      const todayPaidLeave = [];
-      const todayUnpaidLeave = [];
+      function isPresentRecord(
+        record,
+        dateStr
+      ) {
+        if (!record) return false;
 
-      employees.forEach((emp) => {
-        const todayRecord = getRecordForDate(emp.id, todayStr);
-        
-        if (isWorkingNow(todayRecord)) {
-          todayWorking.push(emp.id);
-        } else if (isPaidLeave(todayRecord)) {
-          todayPaidLeave.push(emp.id);
-        } else if (isUnpaidLeave(todayRecord)) {
-          todayUnpaidLeave.push(emp.id);
-        } else if (normalizeStatus(todayRecord?.status) === "half_day") {
-          todayHalfDay.push(emp.id);
-        } else if (isLivePresent(todayRecord)) {
-          todayPresent.push(emp.id);
-          if (isLate(todayRecord)) {
-            todayLate.push(emp.id);
-          }
-        } else {
-          todayAbsent.push(emp.id);
+        const status = normalizeStatus(
+          record.status
+        );
+
+        if (
+          [
+            "full_day",
+            "present",
+            "late",
+            "working",
+            "in_progress",
+          ].includes(status)
+        ) {
+          return true;
         }
+
+        if (status === "half_day") {
+          return true;
+        }
+
+        if (
+          record.check_in_time &&
+          dateStr === todayStr
+        ) {
+          return true;
+        }
+
+        return Boolean(
+          record.check_in_time &&
+          record.check_out_time
+        );
+      }
+
+      function isWorkingNow(
+        record,
+        dateStr
+      ) {
+        if (!record) return false;
+
+        if (dateStr !== todayStr) {
+          return false;
+        }
+
+        return Boolean(
+          record.check_in_time &&
+          !record.check_out_time
+        );
+      }
+
+      function isLate(record) {
+        return (
+          Number(record?.late_minutes || 0) > 0
+        );
+      }
+
+      /* =====================================================
+         TODAY SUMMARY
+      ===================================================== */
+
+      let todayPresent = 0;
+      let todayWorking = 0;
+      let todayAbsent = 0;
+      let todayHalfDay = 0;
+      let todayLate = 0;
+      let todayPaidLeave = 0;
+      let todayUnpaidLeave = 0;
+
+      const todayIsSunday =
+        isSunday(todayStr);
+
+      const todayIsHoliday =
+        holidaySet.has(todayStr);
+
+      employees.forEach((employee) => {
+        const record =
+          getRecordForDate(
+            employee.id,
+            todayStr
+          );
+
+        /*
+         * Sunday/Holiday should not mark
+         * employees as absent.
+         */
+
+        if (
+          todayIsSunday ||
+          todayIsHoliday
+        ) {
+          return;
+        }
+
+        if (
+          isPaidLeave(record)
+        ) {
+          todayPaidLeave += 1;
+          return;
+        }
+
+        if (
+          isUnpaidLeave(record)
+        ) {
+          todayUnpaidLeave += 1;
+          return;
+        }
+
+        if (
+          isHalfDay(record)
+        ) {
+          todayHalfDay += 1;
+
+          if (isLate(record)) {
+            todayLate += 1;
+          }
+
+          return;
+        }
+
+        if (
+          isWorkingNow(
+            record,
+            todayStr
+          )
+        ) {
+          todayWorking += 1;
+
+          if (isLate(record)) {
+            todayLate += 1;
+          }
+
+          return;
+        }
+
+        if (
+          isPresentRecord(
+            record,
+            todayStr
+          )
+        ) {
+          todayPresent += 1;
+
+          if (isLate(record)) {
+            todayLate += 1;
+          }
+
+          return;
+        }
+
+        todayAbsent += 1;
       });
 
       const summary = {
-        present: todayPresent.length,
-        working: todayWorking.length,
-        halfDay: todayHalfDay.length,
-        absent: todayAbsent.length,
-        late: todayLate.length,
-        paidLeave: todayPaidLeave.length,
-        unpaidLeave: todayUnpaidLeave.length,
+        present: todayPresent,
+        working: todayWorking,
+        halfDay: todayHalfDay,
+        absent: todayAbsent,
+        late: todayLate,
+        paidLeave: todayPaidLeave,
+        unpaidLeave: todayUnpaidLeave,
       };
 
-      // Calculate calendar statistics
+      /* =====================================================
+         CALENDAR
+         ONLY ELAPSED DAYS
+      ===================================================== */
+
       const startDate = parseDateStr(start);
-      const endDate = parseDateStr(end);
+      const calculationEndDate =
+        parseDateStr(calculationEnd);
+
       let totalDays = 0;
       let sundays = 0;
       let holidays = 0;
 
-      for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+      for (
+        let date = new Date(startDate);
+        date <= calculationEndDate;
+        date.setDate(date.getDate() + 1)
+      ) {
+        const dateStr =
+          formatDateStr(date);
+
         totalDays += 1;
-        const dateStr = formatDateStr(d);
+
         if (isSunday(dateStr)) {
           sundays += 1;
-        } else if (holidaySet.has(dateStr)) {
+        } else if (
+          holidaySet.has(dateStr)
+        ) {
           holidays += 1;
         }
       }
-      const workingDays = totalDays - sundays - holidays;
+
+      const workingDays =
+        totalDays - sundays - holidays;
 
       const calendar = {
         total: totalDays,
@@ -4336,113 +4633,298 @@ router.get(
         workingDays,
       };
 
-      // Calculate per-employee monthly statistics
-      const employeeStats = employees.map((emp) => {
-        const records = attendanceByUser.get(emp.id) || [];
-        
-        let empFullDays = 0;
-        let empHalfDays = 0;
-        let empAbsent = 0;
-        let empLeave = 0;
-        let empLate = 0;
-        let empWorkedDays = 0;
+      /* =====================================================
+         EMPLOYEE MTD STATS
+         ONLY UNTIL TODAY
+      ===================================================== */
 
-        for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
-          const dateStr = formatDateStr(d);
-          
-          // Skip sundays and holidays
-          if (isSunday(dateStr) || holidaySet.has(dateStr)) {
-            continue;
-          }
+      const employeeStats = employees.map(
+        (employee) => {
+          const records =
+            attendanceByUser.get(
+              employee.id
+            ) || [];
 
-          empWorkedDays += 1;
+          let empFullDays = 0;
+          let empHalfDays = 0;
+          let empAbsent = 0;
+          let empLeave = 0;
+          let empLate = 0;
+          let empWorkedDays = 0;
 
-          const record = records.find((r) => r.date === dateStr);
-          const status = normalizeStatus(record?.status);
+          for (
+            let date = new Date(startDate);
+            date <= calculationEndDate;
+            date.setDate(
+              date.getDate() + 1
+            )
+          ) {
+            const dateStr =
+              formatDateStr(date);
 
-          if (status === "leave" || status === "half_day") {
-            if (status === "leave") {
+            /*
+             * Skip Sunday
+             */
+
+            if (isSunday(dateStr)) {
+              continue;
+            }
+
+            /*
+             * Skip holiday
+             */
+
+            if (holidaySet.has(dateStr)) {
+              continue;
+            }
+
+            empWorkedDays += 1;
+
+            const record =
+              records.find(
+                (row) =>
+                  row.date === dateStr
+              );
+
+            if (isPaidLeave(record)) {
               empLeave += 1;
-            } else {
+              continue;
+            }
+
+            if (isUnpaidLeave(record)) {
+              empLeave += 1;
+              continue;
+            }
+
+            if (isHalfDay(record)) {
               empHalfDays += 1;
+
+              if (isLate(record)) {
+                empLate += 1;
+              }
+
+              continue;
             }
-          } else if (isLivePresent(record)) {
-            empFullDays += 1;
-            if (isLate(record)) {
-              empLate += 1;
+
+            if (
+              isPresentRecord(
+                record,
+                dateStr
+              )
+            ) {
+              empFullDays += 1;
+
+              if (isLate(record)) {
+                empLate += 1;
+              }
+
+              continue;
             }
-          } else {
+
+            /*
+             * No record on an elapsed
+             * working day = absent
+             */
+
             empAbsent += 1;
           }
+
+          const effectivePresent =
+            empFullDays +
+            empHalfDays * 0.5;
+
+          /*
+           * Attendance percentage:
+           * Leaves are excluded.
+           */
+
+          const attendanceDenominator =
+            effectivePresent +
+            empAbsent;
+
+          const attPct =
+            attendanceDenominator > 0
+              ? Math.round(
+                  (effectivePresent /
+                    attendanceDenominator) *
+                    100
+                )
+              : 0;
+
+          const todayRecord =
+            getRecordForDate(
+              employee.id,
+              todayStr
+            );
+
+          const todayLoginTime =
+            todayRecord?.check_in_time
+              ? formatTime12Hour(
+                  todayRecord.check_in_time
+                )
+              : null;
+
+          const todayBreakMinutes =
+            Number(
+              todayRecord?.total_break_minutes ||
+                0
+            );
+
+          return {
+            ...employee,
+
+            todayLoginTime,
+
+            todayBreakMinutes,
+
+            stats: {
+              present: effectivePresent,
+
+              fullDays: empFullDays,
+
+              half: empHalfDays,
+
+              absent: empAbsent,
+
+              leave: empLeave,
+
+              late: empLate,
+
+              workingDays: empWorkedDays,
+
+              attPct,
+            },
+          };
         }
+      );
 
-        // Calculate attendance percentage
-        const effectivePresent = empFullDays + empHalfDays * 0.5;
-        const attendanceDenominator = effectivePresent + empAbsent;
-        const attPct =
-          attendanceDenominator > 0
-            ? Math.round((effectivePresent / attendanceDenominator) * 100)
-            : 0;
+      /* =====================================================
+         MONTHLY TOTALS
+         FIXES NaN IN FRONTEND
+      ===================================================== */
 
-        // Get today's login time and break time
-        const todayRecord = getRecordForDate(emp.id, todayStr);
-        const todayLoginTime = todayRecord?.check_in_time 
-          ? formatTime12Hour(todayRecord.check_in_time)
-          : null;
-        const todayBreakMinutes = todayRecord?.total_break_minutes || 0;
+      const monthlyTotals =
+        employeeStats.reduce(
+          (totals, employee) => {
+            totals.totalPresent +=
+              Number(
+                employee.stats.present || 0
+              );
 
-        return {
-          ...emp,
-          todayLoginTime,
-          todayBreakMinutes,
-          stats: {
-            present: effectivePresent,
-            fullDays: empFullDays,
-            half: empHalfDays,
-            absent: empAbsent,
-            leave: empLeave,
-            late: empLate,
-            workingDays: empWorkedDays,
-            attPct,
+            totals.totalAbsent +=
+              Number(
+                employee.stats.absent || 0
+              );
+
+            totals.totalLate +=
+              Number(
+                employee.stats.late || 0
+              );
+
+            totals.totalLeave +=
+              Number(
+                employee.stats.leave || 0
+              );
+
+            totals.totalWorkingDays +=
+              Number(
+                employee.stats.workingDays || 0
+              );
+
+            return totals;
           },
-        };
-      });
+          {
+            totalPresent: 0,
+            totalAbsent: 0,
+            totalLate: 0,
+            totalLeave: 0,
+            totalWorkingDays: 0,
+          }
+        );
 
-      // Calculate branch statistics
+      /* =====================================================
+         BRANCH STATS
+      ===================================================== */
+
       const branchStatsMap = new Map();
-      employeeStats.forEach((emp) => {
-        const branchName = emp.branch || "Unknown";
-        if (!branchStatsMap.has(branchName)) {
-          branchStatsMap.set(branchName, {
-            name: branchName,
-            totalEmployees: 0,
-            totalAttendanceUnits: 0,
-          });
+
+      employeeStats.forEach(
+        (employee) => {
+          const branchName =
+            employee.branch || "Unknown";
+
+          if (
+            !branchStatsMap.has(
+              branchName
+            )
+          ) {
+            branchStatsMap.set(
+              branchName,
+              {
+                name: branchName,
+                totalEmployees: 0,
+                totalAttendanceUnits: 0,
+              }
+            );
+          }
+
+          const branchStat =
+            branchStatsMap.get(
+              branchName
+            );
+
+          branchStat.totalEmployees += 1;
+
+          branchStat.totalAttendanceUnits +=
+            Number(
+              employee.stats.present || 0
+            );
         }
-        const branchStat = branchStatsMap.get(branchName);
-        branchStat.totalEmployees += 1;
-        branchStat.totalAttendanceUnits += emp.stats.present;
-      });
+      );
 
-      const branchStats = [...branchStatsMap.values()].map((branch) => ({
-        ...branch,
-        attendancePercentage: branch.totalEmployees > 0
-          ? Math.round((branch.totalAttendanceUnits / (branch.totalEmployees * workingDays)) * 100)
-          : 0,
-      }));
+      const branchStats =
+        [...branchStatsMap.values()].map(
+          (branch) => ({
+            ...branch,
 
-      // Calculate daily summary for trend chart
+            attendancePercentage:
+              branch.totalEmployees > 0 &&
+              workingDays > 0
+                ? Math.round(
+                    (
+                      branch.totalAttendanceUnits /
+                      (
+                        branch.totalEmployees *
+                        workingDays
+                      )
+                    ) *
+                      100
+                  )
+                : 0,
+          })
+        );
+
+      /* =====================================================
+         DAILY TREND
+         ONLY ELAPSED DAYS
+      ===================================================== */
+
       const dailySummary = [];
-      for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
-        const dateStr = formatDateStr(d);
-        
-        // Skip sundays and holidays from chart
-        if (isSunday(dateStr) || holidaySet.has(dateStr)) {
-          continue;
-        }
 
-        // Skip future dates
-        if (dateStr > todayStr) {
+      for (
+        let date = new Date(startDate);
+        date <= calculationEndDate;
+        date.setDate(
+          date.getDate() + 1
+        )
+      ) {
+        const dateStr =
+          formatDateStr(date);
+
+        if (
+          isSunday(dateStr) ||
+          holidaySet.has(dateStr)
+        ) {
           continue;
         }
 
@@ -4450,26 +4932,56 @@ router.get(
         let dayLate = 0;
         let dayAbsent = 0;
 
-        employees.forEach((emp) => {
-          const record = getRecordForDate(emp.id, dateStr);
-          const status = normalizeStatus(record?.status);
+        employees.forEach(
+          (employee) => {
+            const record =
+              getRecordForDate(
+                employee.id,
+                dateStr
+              );
 
-          if (["leave", "paid_leave", "unpaid_leave"].includes(status)) {
-            // Don't count leaves in present/absent
-            return;
-          }
-
-          if (isLivePresent(record)) {
-            dayPresent += 1;
-            if (isLate(record)) {
-              dayLate += 1;
+            if (
+              isLeaveRecord(record)
+            ) {
+              return;
             }
-          } else {
+
+            if (
+              isHalfDay(record)
+            ) {
+              dayPresent += 0.5;
+
+              if (isLate(record)) {
+                dayLate += 1;
+              }
+
+              return;
+            }
+
+            if (
+              isPresentRecord(
+                record,
+                dateStr
+              )
+            ) {
+              dayPresent += 1;
+
+              if (isLate(record)) {
+                dayLate += 1;
+              }
+
+              return;
+            }
+
             dayAbsent += 1;
           }
-        });
+        );
 
-        const dayNum = parseInt(dateStr.split("-")[2]);
+        const dayNum =
+          Number(
+            dateStr.split("-")[2]
+          );
+
         dailySummary.push({
           date: dateStr,
           day: dayNum,
@@ -4479,23 +4991,71 @@ router.get(
         });
       }
 
-      // Return unified response
+      /* =====================================================
+         RESPONSE
+      ===================================================== */
+
       res.json({
         summary,
+
         employees: employeeStats,
-        monthlyStats: Object.fromEntries(
-          employeeStats.map((emp) => [emp.id, emp.stats])
-        ),
+
+        /*
+         * Frontend KPI totals
+         */
+
+        monthlyStats: monthlyTotals,
+
+        /*
+         * Keep individual employee stats
+         * if frontend needs them
+         */
+
+        employeeMonthlyStats:
+          Object.fromEntries(
+            employeeStats.map(
+              (employee) => [
+                employee.id,
+                employee.stats,
+              ]
+            )
+          ),
+
         calendar,
+
         branchStats,
+
         dailySummary,
-        pendingLeaves: pendingLeaveItems.length,
-        pendingLeaveItems: pendingLeaveItems.slice(0, 5),
+
+        pendingLeaves:
+          pendingLeaveItems.length,
+
+        pendingLeaveItems:
+          pendingLeaveItems.slice(0, 5),
+
         alerts: [],
+
+        metadata: {
+          start,
+          end,
+
+          calculationEnd,
+
+          today: todayStr,
+
+          branch:
+            effectiveBranch || "all",
+        },
       });
     } catch (err) {
-      console.error("Admin dashboard error:", err);
-      res.status(500).json({ message: err.message });
+      console.error(
+        "Admin dashboard error:",
+        err
+      );
+
+      res.status(500).json({
+        message: err.message,
+      });
     }
   }
 );
