@@ -162,41 +162,29 @@ export async function getProfessionalLeaveBalance(userId, targetDate = new Date(
 
   const creditInfo = await ensureMonthlyPaidLeaveCredit(userId, targetDate);
 
-  const result = await pool.query(
-    `
-    SELECT
-      COALESCE(SUM(paid_leave_credited), 0) AS total_credited,
-      COALESCE(SUM(paid_leave_used), 0) AS paid_used,
-      COALESCE(SUM(unpaid_leave_used), 0) AS unpaid_used
+ const result = await pool.query(`
+    SELECT paid_leave_credited, paid_leave_used, unpaid_leave_used
     FROM leave_balance
-    WHERE user_id = $1
-      AND (
-        year < $2
-        OR (year = $2 AND month <= $3)
-      )
-    `,
-    [userId, year, month]
-  );
+    WHERE user_id = $1 AND year = $2 AND month = $3
+  `, [userId, year, month]);
 
-  const row = result.rows[0];
+ const row = result.rows[0] || {};
+const totalCredited = Number(row.paid_leave_credited || 0);
+const paidUsed = Number(row.paid_leave_used || 0);
+const unpaidUsed = Number(row.unpaid_leave_used || 0);
+const available = Math.max(0, totalCredited - paidUsed);
 
-  const totalCredited = Number(row.total_credited || 0);
-  const paidUsed = Number(row.paid_used || 0);
-  const unpaidUsed = Number(row.unpaid_used || 0);
-  const available = Math.max(0, totalCredited - paidUsed);
-
-  return {
-    year,
-    month,
-    eligible: creditInfo.eligible,
-    probationMonths: creditInfo.probationMonths,
-    current_month_credit: creditInfo.monthlyCredit,
-    total_paid_credited: totalCredited,
-    paid_used: paidUsed,
-    unpaid_used: unpaidUsed,
-    carry_forward: Math.max(0, available - creditInfo.monthlyCredit),
-    paid_leave_balance: available,
-  };
+return {
+  year, month,
+  eligible: creditInfo.eligible,
+  probationMonths: creditInfo.probationMonths,
+  current_month_credit: creditInfo.monthlyCredit,
+  total_paid_credited: totalCredited,
+  paid_used: paidUsed,
+  unpaid_used: unpaidUsed,
+  paid_leave_balance: available,
+  // carry_forward: REMOVED
+};
 }
 
 export async function deductApprovedLeave(userId, days, leaveType, targetDate = new Date()) {
@@ -315,31 +303,17 @@ export async function adjustLeaveBalanceForAttendanceStatusChange({
 
   await ensureMonthlyPaidLeaveCredit(userId, targetDate, client);
 
-  const lockedBalances = await client.query(
-    `SELECT id, year, month, paid_leave_credited, paid_leave_used, unpaid_leave_used
-     FROM leave_balance
-     WHERE user_id = $1
-       AND (year < $2 OR (year = $2 AND month <= $3))
-     ORDER BY year, month
-     FOR UPDATE`,
-    [userId, year, month]
-  );
-
-  const targetBalance = lockedBalances.rows.find(
-    (row) => Number(row.year) === year && Number(row.month) === month
-  );
-  if (!targetBalance) throw new Error("Leave balance row could not be created");
-
-  const totalCredited = lockedBalances.rows.reduce(
-    (sum, row) => sum + Number(row.paid_leave_credited || 0),
-    0
-  );
-  const totalPaidUsed = lockedBalances.rows.reduce(
-    (sum, row) => sum + Number(row.paid_leave_used || 0),
-    0
-  );
-  const available = Math.max(0, totalCredited - totalPaidUsed);
-
+const lockedBalance = await client.query(
+  `SELECT id, paid_leave_credited, paid_leave_used, unpaid_leave_used
+   FROM leave_balance WHERE user_id = $1 AND year = $2 AND month = $3 FOR UPDATE`,
+  [userId, year, month]
+);
+const targetBalance = lockedBalance.rows[0];
+if (!targetBalance) throw new Error("Leave balance row could not be created");
+const available = Math.max(
+  0,
+  Number(targetBalance.paid_leave_credited || 0) - Number(targetBalance.paid_leave_used || 0)
+);
   const appliedDelta = applyAttendanceLeaveBalanceDelta({
     oldStatus,
     newStatus,

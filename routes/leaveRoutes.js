@@ -50,9 +50,8 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
 
   const balance = await getProfessionalLeaveBalance(leave.user_id, fromDate);
   const requestedDays = Number(leave.requested_days ?? leave.days ?? 0);
-  const employeeUsePaidLeave = leave.use_paid_leave === true || leave.use_paid_leave === "true";
   const availablePaid = Number(balance.paid_leave_balance || 0);
-  const paidDays = employeeUsePaidLeave ? Math.min(requestedDays, availablePaid) : 0;
+  const paidDays = Math.min(requestedDays, availablePaid);   // paid consumed automatically, no employee flag
   const unpaidDays = Math.max(0, requestedDays - paidDays);
   const remainingPaidBalance = Math.max(0, availablePaid - paidDays);
   const finalCategory = paidDays > 0 ? "Paid" : "Unpaid";
@@ -72,7 +71,9 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
   if (flags.is_sudden) reasons.push("Sudden leave penalty applied");
   if (flags.sat_mon_exceeded) reasons.push("Saturday/Monday monthly limit exceeded");
   if (sundayPenalty) reasons.push("Sunday penalty included");
-  reasons.push(employeeUsePaidLeave ? "Employee chose to use paid leave" : "Employee chose not to use paid leave");
+  if (unpaidDays > 0) {
+    reasons.push(`Paid leave balance insufficient — ${paidDays} paid, ${unpaidDays} unpaid`);
+  }
   if (!reasons.length) reasons.push("Normal leave approval");
 
   return {
@@ -90,8 +91,8 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
     current_status: leave.status,
     applied_date: leave.created_at,
     reason: leave.reason?.trim() || "No reason provided.",
-    use_paid_leave: employeeUsePaidLeave,
-    employee_use_paid_leave: employeeUsePaidLeave,
+    use_paid_leave: true,  // Fixed value — backend now decides automatically
+    employee_use_paid_leave: true,  // Fixed value — backend now decides automatically
     available_paid_balance: availablePaid,
     paid_days: paidDays,
     unpaid_days: unpaidDays,
@@ -792,105 +793,6 @@ router.get(
   }
 );
 
-router.get(
-  "/leaves/:id/approval-preview",
-  verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
-  async (req, res) => {
-    try {
-      const scoped = await getScopedLeave(req, req.params.id);
-      if (scoped.error) return res.status(scoped.error.status).json({ message: scoped.error.message });
-      const preview = await buildApprovalPreview(
-        scoped.leave,
-        req.query.include_sunday_penalty === "true"
-      );
-      return res.json(preview);
-
-      const { id } = req.params;
-
-      const leaveRes = await pool.query(
-        `
-        SELECT 
-          l.*,
-          u.full_name,
-          u.branch
-        FROM leave_requests l
-        JOIN users u ON u.id = l.user_id
-        WHERE l.id = $1
-        `,
-        [id]
-      );
-
-      if (!leaveRes.rows.length) {
-        return res.status(404).json({ message: "Leave not found" });
-      }
-
-      const leave = leaveRes.rows[0];
-
-      if (req.user.role === "MANAGER" && leave.branch !== req.user.branch) {
-        return res.status(403).json({
-          message: "Access denied – different branch",
-        });
-      }
-
-      const fromDateObj = new Date(leave.from_date);
-
-      if (Number.isNaN(fromDateObj.getTime())) {
-        return res.status(400).json({
-          message: "Invalid leave from_date",
-          from_date: leave.from_date,
-        });
-      }
-
-      const balance = await getProfessionalLeaveBalance(
-        leave.user_id,
-        fromDateObj
-      );
-
-      const requestedDays = Number(leave.requested_days ?? leave.days ?? 0);
-
-      const leaveCategory =
-        leave.leave_category ||
-        (leave.leave_type === "Paid" || leave.leave_type === "Earned"
-          ? "Paid"
-          : "Unpaid");
-
-      let availablePaid = 0;
-
-      if (leaveCategory === "Paid") {
-        availablePaid = Number(balance.paid_leave_balance || 0);
-      }
-
-      const canApprove = leaveCategory !== "Paid" || availablePaid >= requestedDays;
-      const paidDays = leaveCategory === "Paid" && canApprove ? requestedDays : 0;
-      const unpaidDays = leaveCategory === "Unpaid" ? requestedDays : 0;
-
-      res.json({
-        leave_id: leave.id,
-        employee_name: leave.full_name,
-        leave_type: leave.leave_type,
-        leave_category: leaveCategory,
-        requested_days: requestedDays,
-        available_paid_balance: availablePaid,
-        paid_days: paidDays,
-        unpaid_days: unpaidDays,
-        salary_deduction_days: unpaidDays,
-        can_approve: canApprove,
-        leave_duration_type: leave.leave_duration_type || "full_day",
-        half_day_session: leave.half_day_session,
-        from_date: leave.from_date,
-        to_date: leave.to_date,
-      });
-    } catch (error) {
-      console.error("Approval preview error:", error);
-      res.status(500).json({
-        message: "Failed to fetch approval preview",
-        error: error.message,
-      });
-    }
-  }
-);
-
 /* ✅ Approve / Reject leave */
 const changeLeaveStatus = async (req, res) => {
     try {
@@ -1203,13 +1105,6 @@ router.patch(
   changeLeaveStatus
 );
 
-router.put(
-  "/leaves/:id",
-  verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
-  changeLeaveStatus
-);
-
 /* ✅ Create leave request */
 router.post("/leaves", verifyToken, async (req, res) => {
   try {
@@ -1360,13 +1255,6 @@ const deleteLeaveRequest = async (req, res) => {
 
 router.delete(
   "/leave/:id",
-  verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
-  deleteLeaveRequest
-);
-
-router.delete(
-  "/leaves/:id",
   verifyToken,
   authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
   deleteLeaveRequest

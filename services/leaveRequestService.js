@@ -10,7 +10,7 @@ export async function createValidatedLeaveRequest(userId, payload) {
     reason,
     leave_duration_type = "full_day",
     half_day_session = null,
-    use_paid_leave = false,
+    // use_paid_leave: REMOVED — backend decides, not the employee
   } = payload;
 
   if (!leave_type) throw new Error("leave_type is required");
@@ -44,12 +44,10 @@ export async function createValidatedLeaveRequest(userId, payload) {
   let unpaidDays = 0;
   let remainingBalance = 0;
   let availableBalance = 0;
-  const usePaidLeave = use_paid_leave === true || use_paid_leave === "true";
   const balance = await getProfessionalLeaveBalance(userId, new Date(`${from_date}T00:00:00`));
   availableBalance = Number(balance.paid_leave_balance || 0);
 
   ({ paidDays, unpaidDays, remainingBalance } = resolveLeaveBalanceUsage({
-    usePaidLeave,
     requestedDays,
     availableBalance,
   }));
@@ -64,7 +62,7 @@ export async function createValidatedLeaveRequest(userId, payload) {
      RETURNING *`,
     [
       userId,
-      usePaidLeave ? "Paid" : leave_type,
+      paidDays > 0 ? "Paid" : leave_type,
       from_date,
       to_date,
       Math.ceil(requestedDays),
@@ -77,7 +75,7 @@ export async function createValidatedLeaveRequest(userId, payload) {
       paidDays,
       unpaidDays,
       availableBalance,
-      usePaidLeave,
+      true,  // Fixed value for historical/reporting — no longer drives logic
       remainingBalance,
     ]
   );

@@ -1,0 +1,1145 @@
+TAP version 13
+# Subtest: attendance access control
+    # Subtest: blocks managers from other branches
+    ok 1 - blocks managers from other branches
+      ---
+      duration_ms: 1.7454
+      type: 'test'
+      ...
+    # Subtest: allows managers in their own branch
+    ok 2 - allows managers in their own branch
+      ---
+      duration_ms: 0.4592
+      type: 'test'
+      ...
+    # Subtest: blocks employees from another employee attendance
+    ok 3 - blocks employees from another employee attendance
+      ---
+      duration_ms: 0.3201
+      type: 'test'
+      ...
+    1..3
+ok 1 - attendance access control
+  ---
+  duration_ms: 5.0408
+  type: 'suite'
+  ...
+# Subtest: audit log access control
+    # Subtest: blocks manager audit lookup outside branch
+    ok 1 - blocks manager audit lookup outside branch
+      ---
+      duration_ms: 0.6551
+      type: 'test'
+      ...
+    # Subtest: blocks employee audit lookup for another user
+    ok 2 - blocks employee audit lookup for another user
+      ---
+      duration_ms: 3.71
+      type: 'test'
+      ...
+    # Subtest: blocks employees from creating client-supplied audit logs
+    ok 3 - blocks employees from creating client-supplied audit logs
+      ---
+      duration_ms: 0.5498
+      type: 'test'
+      ...
+    # Subtest: allows managers to create client-supplied audit logs when needed
+    ok 4 - allows managers to create client-supplied audit logs when needed
+      ---
+      duration_ms: 0.8443
+      type: 'test'
+      ...
+    1..4
+ok 2 - audit log access control
+  ---
+  duration_ms: 9.0236
+  type: 'suite'
+  ...
+# Subtest: attendanceAnalysisService monthRange
+    # Subtest: returns correct May 2026 range
+    ok 1 - returns correct May 2026 range
+      ---
+      duration_ms: 10.0166
+      type: 'test'
+      ...
+    # Subtest: handles February leap year
+    ok 2 - handles February leap year
+      ---
+      duration_ms: 0.5975
+      type: 'test'
+      ...
+    1..2
+ok 3 - attendanceAnalysisService monthRange
+  ---
+  duration_ms: 16.7985
+  type: 'suite'
+  ...
+# Subtest: heatmap status logic (pure)
+    # Subtest: late preserved when status is full_day
+    ok 1 - late preserved when status is full_day
+      ---
+      duration_ms: 0.9293
+      type: 'test'
+      ...
+    # Subtest: paid vs unpaid leave
+    ok 2 - paid vs unpaid leave
+      ---
+      duration_ms: 1.8954
+      type: 'test'
+      ...
+    # Subtest: preserves persisted date-level paid and unpaid statuses
+    ok 3 - preserves persisted date-level paid and unpaid statuses
+      ---
+      duration_ms: 0.527
+      type: 'test'
+      ...
+    1..3
+ok 4 - heatmap status logic (pure)
+  ---
+  duration_ms: 5.0401
+  type: 'suite'
+  ...
+# Subtest: manual attendance leave balance transitions
+    # Subtest: absent to paid leave
+    ok 1 - absent to paid leave
+      ---
+      duration_ms: 4.123
+      type: 'test'
+      ...
+    # Subtest: full day to paid leave
+    ok 2 - full day to paid leave
+      ---
+      duration_ms: 0.5761
+      type: 'test'
+      ...
+    # Subtest: half day to paid leave
+    ok 3 - half day to paid leave
+      ---
+      duration_ms: 0.5388
+      type: 'test'
+      ...
+    # Subtest: paid leave saved again
+    ok 4 - paid leave saved again
+      ---
+      duration_ms: 0.5919
+      type: 'test'
+      ...
+    # Subtest: paid leave restored
+    ok 5 - paid leave restored
+      ---
+      duration_ms: 1.0292
+      type: 'test'
+      ...
+    # Subtest: paid leave converted to unpaid
+    ok 6 - paid leave converted to unpaid
+      ---
+      duration_ms: 0.4442
+      type: 'test'
+      ...
+    # Subtest: unpaid leave converted to paid
+    ok 7 - unpaid leave converted to paid
+      ---
+      duration_ms: 0.5002
+      type: 'test'
+      ...
+    # Subtest: unpaid leave restored
+    ok 8 - unpaid leave restored
+      ---
+      duration_ms: 1.0435
+      type: 'test'
+      ...
+    # Subtest: unrelated status unchanged
+    ok 9 - unrelated status unchanged
+      ---
+      duration_ms: 0.9135
+      type: 'test'
+      ...
+    1..9
+ok 5 - manual attendance leave balance transitions
+  ---
+  duration_ms: 14.3201
+  type: 'suite'
+  ...
+# Subtest: manual attendance balance application
+    # Subtest: no record to paid leave
+    ok 1 - no record to paid leave
+      ---
+      duration_ms: 2.6329
+      type: 'test'
+      ...
+    # Subtest: paid leave saved again
+    ok 2 - paid leave saved again
+      ---
+      duration_ms: 0.3814
+      type: 'test'
+      ...
+    # Subtest: paid leave to absent
+    ok 3 - paid leave to absent
+      ---
+      duration_ms: 0.4131
+      type: 'test'
+      ...
+    # Subtest: paid leave to full day
+    ok 4 - paid leave to full day
+      ---
+      duration_ms: 0.3292
+      type: 'test'
+      ...
+    # Subtest: paid leave to half day
+    ok 5 - paid leave to half day
+      ---
+      duration_ms: 0.426
+      type: 'test'
+      ...
+    # Subtest: paid leave to unpaid leave
+    ok 6 - paid leave to unpaid leave
+      ---
+      duration_ms: 0.2375
+      type: 'test'
+      ...
+    # Subtest: unpaid leave to paid leave
+    ok 7 - unpaid leave to paid leave
+      ---
+      duration_ms: 2.6118
+      type: 'test'
+      ...
+    # Subtest: unpaid leave saved again
+    ok 8 - unpaid leave saved again
+      ---
+      duration_ms: 0.3195
+      type: 'test'
+      ...
+    # Subtest: normal half day
+    ok 9 - normal half day
+      ---
+      duration_ms: 0.2768
+      type: 'test'
+      ...
+    # Subtest: rejects paid leave when one full day is unavailable
+    ok 10 - rejects paid leave when one full day is unavailable
+      ---
+      duration_ms: 1.6776
+      type: 'test'
+      ...
+    1..10
+ok 6 - manual attendance balance application
+  ---
+  duration_ms: 10.8175
+  type: 'suite'
+  ...
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'Hyderabad',
+#   normalizedBranch: 'Hyderabad',
+#   addressSelected: 'Registered Office: 62/A, Sundari Reddy Bhavan, Ground Floor,<br>Vengalrao Nagar, S.R.Nagar,<br>Hyderabad, Telangana - 500038<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Hyderabad'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'hyderabad',
+#   normalizedBranch: 'Hyderabad',
+#   addressSelected: 'Registered Office: 62/A, Sundari Reddy Bhavan, Ground Floor,<br>Vengalrao Nagar, S.R.Nagar,<br>Hyderabad, Telangana - 500038<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Hyderabad'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'hyd',
+#   normalizedBranch: 'Hyderabad',
+#   addressSelected: 'Registered Office: 62/A, Sundari Reddy Bhavan, Ground Floor,<br>Vengalrao Nagar, S.R.Nagar,<br>Hyderabad, Telangana - 500038<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Hyderabad'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'hyderabad branch',
+#   normalizedBranch: 'Hyderabad',
+#   addressSelected: 'Registered Office: 62/A, Sundari Reddy Bhavan, Ground Floor,<br>Vengalrao Nagar, S.R.Nagar,<br>Hyderabad, Telangana - 500038<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Hyderabad'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'Bangalore',
+#   normalizedBranch: 'Bangalore',
+#   addressSelected: 'Raheja Arcade, 16 & 17, 5th Block,<br>Opp. Nexus Mall, Koramangala,<br>Bengaluru, Karnataka - 560095<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Bengaluru'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'bangalore',
+#   normalizedBranch: 'Bangalore',
+#   addressSelected: 'Raheja Arcade, 16 & 17, 5th Block,<br>Opp. Nexus Mall, Koramangala,<br>Bengaluru, Karnataka - 560095<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Bengaluru'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'bengaluru',
+#   normalizedBranch: 'Bangalore',
+#   addressSelected: 'Raheja Arcade, 16 & 17, 5th Block,<br>Opp. Nexus Mall, Koramangala,<br>Bengaluru, Karnataka - 560095<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Bengaluru'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'blr',
+#   normalizedBranch: 'Bangalore',
+#   addressSelected: 'Raheja Arcade, 16 & 17, 5th Block,<br>Opp. Nexus Mall, Koramangala,<br>Bengaluru, Karnataka - 560095<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Bengaluru'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'bangalore branch',
+#   normalizedBranch: 'Bangalore',
+#   addressSelected: 'Raheja Arcade, 16 & 17, 5th Block,<br>Opp. Nexus Mall, Koramangala,<br>Bengaluru, Karnataka - 560095<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Bengaluru'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'bengaluru branch',
+#   normalizedBranch: 'Bangalore',
+#   addressSelected: 'Raheja Arcade, 16 & 17, 5th Block,<br>Opp. Nexus Mall, Koramangala,<br>Bengaluru, Karnataka - 560095<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Bengaluru'
+# }
+# Subtest: all supported branch aliases resolve to their canonical metadata
+ok 7 - all supported branch aliases resolve to their canonical metadata
+  ---
+  duration_ms: 10.1355
+  type: 'test'
+  ...
+# Subtest: unknown branches return the structured 400 error
+ok 8 - unknown branches return the structured 400 error
+  ---
+  duration_ms: 1.1639
+  type: 'test'
+  ...
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'hyderabad',
+#   normalizedBranch: 'Hyderabad',
+#   addressSelected: 'Registered Office: 62/A, Sundari Reddy Bhavan, Ground Floor,<br>Vengalrao Nagar, S.R.Nagar,<br>Hyderabad, Telangana - 500038<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Hyderabad'
+# }
+# Subtest: Offer and Experience templates use resolver-owned branch fields
+not ok 9 - Offer and Experience templates use resolver-owned branch fields
+  ---
+  duration_ms: 36.5348
+  type: 'test'
+  location: 'C:\\Users\\pc\\hrmsReactback\\hrmsReact 2\\hrmsReact\\hrmsFrontendNAvigationwithoutdb_2\\hrmssoftwaewTeating\\backend\\tests\\branchResolution.test.js:25:1'
+  failureType: 'testCodeFailure'
+  error: 'formatDate is not defined'
+  code: 'ERR_TEST_FAILURE'
+  name: 'ReferenceError'
+  stack: |-
+    renderPlaceholders (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/utils/placeholderService.js:103:51)
+    TestContext.<anonymous> (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/tests/branchResolution.test.js:28:23)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..3
+# Subtest: tests\\branchResolution.test.js
+not ok 4 - tests\\branchResolution.test.js
+  ---
+  duration_ms: 289.6635
+  type: 'test'
+  location: 'C:\\Users\\pc\\hrmsReactback\\hrmsReact 2\\hrmsReact\\hrmsFrontendNAvigationwithoutdb_2\\hrmssoftwaewTeating\\backend\\tests\\branchResolution.test.js:1:1'
+  failureType: 'testCodeFailure'
+  exitCode: 1
+  signal: ~
+  error: 'test failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: break activity classification
+    # Subtest: super admin editing another employee
+    ok 1 - super admin editing another employee
+      ---
+      duration_ms: 2.3175
+      type: 'test'
+      ...
+    # Subtest: sub admin editing another employee
+    ok 2 - sub admin editing another employee
+      ---
+      duration_ms: 0.3404
+      type: 'test'
+      ...
+    # Subtest: manager editing another employee
+    ok 3 - manager editing another employee
+      ---
+      duration_ms: 0.3699
+      type: 'test'
+      ...
+    # Subtest: sub admin editing their own break
+    ok 4 - sub admin editing their own break
+      ---
+      duration_ms: 0.5484
+      type: 'test'
+      ...
+    # Subtest: manager editing their own break
+    ok 5 - manager editing their own break
+      ---
+      duration_ms: 0.5965
+      type: 'test'
+      ...
+    # Subtest: employee editing their own break
+    ok 6 - employee editing their own break
+      ---
+      duration_ms: 0.4735
+      type: 'test'
+      ...
+    1..6
+ok 11 - break activity classification
+  ---
+  duration_ms: 15.8353
+  type: 'suite'
+  ...
+# Subtest: break activity comparison
+    # Subtest: reports time, duration, and missing-break changes without raw JSON
+    ok 1 - reports time, duration, and missing-break changes without raw JSON
+      ---
+      duration_ms: 1.3431
+      type: 'test'
+      ...
+    1..1
+ok 12 - break activity comparison
+  ---
+  duration_ms: 2.453
+  type: 'suite'
+  ...
+# ◇ injected env (15) from .env // tip: ⌘ enable debugging { debug: true }
+# ✅ attendanceRoutes.js loaded — policy engine integrated
+# Subtest: canonical attendance status calculation
+    # Subtest: returns full day for 9 gross hours even when net production is 8 hours
+    ok 1 - returns full day for 9 gross hours even when net production is 8 hours
+      ---
+      duration_ms: 3.7853
+      type: 'test'
+      ...
+    # Subtest: keeps Attendance Register display Present for 9:56 to 19:01 with a 38 minute break
+    ok 2 - keeps Attendance Register display Present for 9:56 to 19:01 with a 38 minute break
+      ---
+      duration_ms: 0.4553
+      type: 'test'
+      ...
+    1..2
+ok 13 - canonical attendance status calculation
+  ---
+  duration_ms: 5.411
+  type: 'suite'
+  ...
+# [DB_READY] Database connected successfully
+# Subtest: earned leave probation (pure)
+    # Subtest: not eligible before 3 months
+    ok 1 - not eligible before 3 months
+      ---
+      duration_ms: 5.4414
+      type: 'test'
+      ...
+    # Subtest: eligible at 3+ months
+    ok 2 - eligible at 3+ months
+      ---
+      duration_ms: 0.5107
+      type: 'test'
+      ...
+    1..2
+ok 14 - earned leave probation (pure)
+  ---
+  duration_ms: 8.2323
+  type: 'suite'
+  ...
+# Subtest: getEligibilityDate
+    # Subtest: adds 3 months to joining
+    ok 1 - adds 3 months to joining
+      ---
+      duration_ms: 0.6856
+      type: 'test'
+      ...
+    1..1
+ok 15 - getEligibilityDate
+  ---
+  duration_ms: 0.9637
+  type: 'suite'
+  ...
+# Subtest: monthsSinceJoining
+    # Subtest: counts calendar months
+    ok 1 - counts calendar months
+      ---
+      duration_ms: 0.7335
+      type: 'test'
+      ...
+    1..1
+ok 16 - monthsSinceJoining
+  ---
+  duration_ms: 0.9893
+  type: 'suite'
+  ...
+# Subtest: leave type normalization
+    # Subtest: maps earned to Paid and legacy types to Unpaid
+    ok 1 - maps earned to Paid and legacy types to Unpaid
+      ---
+      duration_ms: 0.8999
+      type: 'test'
+      ...
+    1..1
+ok 17 - leave type normalization
+  ---
+  duration_ms: 1.5784
+  type: 'suite'
+  ...
+# Subtest: deductLeave split (pure)
+    # Subtest: splits paid vs unpaid when balance partial
+    ok 1 - splits paid vs unpaid when balance partial
+      ---
+      duration_ms: 0.6714
+      type: 'test'
+      ...
+    1..1
+ok 18 - deductLeave split (pure)
+  ---
+  duration_ms: 1.2109
+  type: 'suite'
+  ...
+# Subtest: balance deduction logic
+    # Subtest: available = balance - used
+    ok 1 - available = balance - used
+      ---
+      duration_ms: 0.42
+      type: 'test'
+      ...
+    1..1
+ok 19 - balance deduction logic
+  ---
+  duration_ms: 0.7042
+  type: 'suite'
+  ...
+# Subtest: half-day leave requests
+    # Subtest: creates a 0.5 morning request
+    ok 1 - creates a 0.5 morning request
+      ---
+      duration_ms: 2.22
+      type: 'test'
+      ...
+    # Subtest: two half-day requests consume one day
+    ok 2 - two half-day requests consume one day
+      ---
+      duration_ms: 0.3972
+      type: 'test'
+      ...
+    # Subtest: rejects a multi-date half-day request
+    ok 3 - rejects a multi-date half-day request
+      ---
+      duration_ms: 1.3508
+      type: 'test'
+      ...
+    # Subtest: requires a half-day session
+    ok 4 - requires a half-day session
+      ---
+      duration_ms: 0.8015
+      type: 'test'
+      ...
+    1..4
+ok 20 - half-day leave requests
+  ---
+  duration_ms: 7.486
+  type: 'suite'
+  ...
+# Subtest: full-day working-day calculation
+    # Subtest: excludes Sundays and company holidays
+    ok 1 - excludes Sundays and company holidays
+      ---
+      duration_ms: 4.3511
+      type: 'test'
+      ...
+    1..1
+ok 21 - full-day working-day calculation
+  ---
+  duration_ms: 4.7212
+  type: 'suite'
+  ...
+# Subtest: paid leave balance allocation
+    # Subtest: allocates consecutive full leave dates chronologically
+    ok 1 - allocates consecutive full leave dates chronologically
+      ---
+      duration_ms: 2.2609
+      type: 'test'
+      ...
+    # Subtest: handles fully paid, fully unpaid, and one-day paid requests
+    ok 2 - handles fully paid, fully unpaid, and one-day paid requests
+      ---
+      duration_ms: 0.7962
+      type: 'test'
+      ...
+    # Subtest: balance 1.0 minus a half day leaves 0.5
+    ok 3 - balance 1.0 minus a half day leaves 0.5
+      ---
+      duration_ms: 0.55
+      type: 'test'
+      ...
+    # Subtest: two half days consume the full 1.0 balance
+    ok 4 - two half days consume the full 1.0 balance
+      ---
+      duration_ms: 0.4494
+      type: 'test'
+      ...
+    # Subtest: splits a request when only partial paid leave is available
+    ok 5 - splits a request when only partial paid leave is available
+      ---
+      duration_ms: 0.7944
+      type: 'test'
+      ...
+    # Subtest: balance 1.0 minus a full day leaves zero
+    ok 6 - balance 1.0 minus a full day leaves zero
+      ---
+      duration_ms: 0.3797
+      type: 'test'
+      ...
+    # Subtest: does not consume paid leave when the employee declines
+    ok 7 - does not consume paid leave when the employee declines
+      ---
+      duration_ms: 0.2812
+      type: 'test'
+      ...
+    1..7
+ok 22 - paid leave balance allocation
+  ---
+  duration_ms: 6.6169
+  type: 'suite'
+  ...
+# ◇ injected env (15) from .env // tip: ⌘ custom filepath { path: '/custom/path/.env' }
+# Subtest: manual attendance override protection
+    # Subtest: skips automatic classification when manual evidence exists
+    ok 1 - skips automatic classification when manual evidence exists
+      ---
+      duration_ms: 0.7782
+      type: 'test'
+      ...
+    # Subtest: allows manual edit flow to force recalculation while saving the correction
+    ok 2 - allows manual edit flow to force recalculation while saving the correction
+      ---
+      duration_ms: 0.1826
+      type: 'test'
+      ...
+    1..2
+ok 23 - manual attendance override protection
+  ---
+  duration_ms: 2.128
+  type: 'suite'
+  ...
+# [DB_READY] Database connected successfully
+# Subtest: payroll mid-month join clamp
+    # Subtest: excludes dates before joining from absence and payable-day calculations
+    not ok 1 - excludes dates before joining from absence and payable-day calculations
+      ---
+      duration_ms: 5.7261
+      type: 'test'
+      location: 'C:\\Users\\pc\\hrmsReactback\\hrmsReact 2\\hrmsReact\\hrmsFrontendNAvigationwithoutdb_2\\hrmssoftwaewTeating\\backend\\tests\\payroll.test.js:6:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Unexpected query: SELECT
+                 TO_CHAR(date,'YYYY-MM-DD') AS date,
+                 break_type, start_time, end_time, duration_minutes, break3_sessions
+               FROM employee_breaks
+               WHERE user_id = $1 AND date BETWEEN $2 AND $3
+               ORDER BY date, break_type
+      code: 'ERR_TEST_FAILURE'
+      stack: |-
+        Object.query (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/tests/payroll.test.js:27:15)
+        fetchPayrollData (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/routes/payrollService.js:188:10)
+        async calculatePayroll (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/routes/payrollService.js:478:16)
+        async TestContext.<anonymous> (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/tests/payroll.test.js:31:21)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Promise.all (index 0)
+        async Suite.run (node:internal/test_runner/test:1442:7)
+        async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+      ...
+    1..1
+not ok 24 - payroll mid-month join clamp
+  ---
+  duration_ms: 7.6106
+  type: 'suite'
+  location: 'C:\\Users\\pc\\hrmsReactback\\hrmsReact 2\\hrmsReact\\hrmsFrontendNAvigationwithoutdb_2\\hrmssoftwaewTeating\\backend\\tests\\payroll.test.js:5:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'Bangalore',
+#   normalizedBranch: 'Bangalore',
+#   addressSelected: 'Raheja Arcade, 16 & 17, 5th Block,<br>Opp. Nexus Mall, Koramangala,<br>Bengaluru, Karnataka - 560095<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Bengaluru'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'Bangalore',
+#   normalizedBranch: 'Bangalore',
+#   addressSelected: 'Raheja Arcade, 16 & 17, 5th Block,<br>Opp. Nexus Mall, Koramangala,<br>Bengaluru, Karnataka - 560095<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Bengaluru'
+# }
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'Bangalore',
+#   normalizedBranch: 'Bangalore',
+#   addressSelected: 'Raheja Arcade, 16 & 17, 5th Block,<br>Opp. Nexus Mall, Koramangala,<br>Bengaluru, Karnataka - 560095<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Bengaluru'
+# }
+# Subtest: renders registered required and computed offer placeholders
+not ok 25 - renders registered required and computed offer placeholders
+  ---
+  duration_ms: 4.3552
+  type: 'test'
+  location: 'C:\\Users\\pc\\hrmsReactback\\hrmsReact 2\\hrmsReact\\hrmsFrontendNAvigationwithoutdb_2\\hrmssoftwaewTeating\\backend\\tests\\placeholderService.test.js:10:1'
+  failureType: 'testCodeFailure'
+  error: 'formatDate is not defined'
+  code: 'ERR_TEST_FAILURE'
+  name: 'ReferenceError'
+  stack: |-
+    renderPlaceholders (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/utils/placeholderService.js:103:51)
+    TestContext.<anonymous> (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/tests/placeholderService.test.js:11:16)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.start (node:internal/test_runner/test:944:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+  ...
+# Subtest: reports all missing required placeholders
+not ok 26 - reports all missing required placeholders
+  ---
+  duration_ms: 2.3866
+  type: 'test'
+  location: 'C:\\Users\\pc\\hrmsReactback\\hrmsReact 2\\hrmsReact\\hrmsFrontendNAvigationwithoutdb_2\\hrmssoftwaewTeating\\backend\\tests\\placeholderService.test.js:15:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The validation function is expected to return "true". Received false
+    
+    Caught error:
+    
+    ReferenceError: formatDate is not defined
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  stack: |-
+    TestContext.<anonymous> (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/tests/placeholderService.test.js:16:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: reports unknown placeholders without removing them
+not ok 27 - reports unknown placeholders without removing them
+  ---
+  duration_ms: 1.4753
+  type: 'test'
+  location: 'C:\\Users\\pc\\hrmsReactback\\hrmsReact 2\\hrmsReact\\hrmsFrontendNAvigationwithoutdb_2\\hrmssoftwaewTeating\\backend\\tests\\placeholderService.test.js:19:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The validation function is expected to return "true". Received false
+    
+    Caught error:
+    
+    ReferenceError: formatDate is not defined
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  stack: |-
+    TestContext.<anonymous> (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/tests/placeholderService.test.js:20:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# [LETTER_BRANCH_RESOLUTION] {
+#   inputBranch: 'Bangalore',
+#   normalizedBranch: 'Bangalore',
+#   addressSelected: 'Raheja Arcade, 16 & 17, 5th Block,<br>Opp. Nexus Mall, Koramangala,<br>Bengaluru, Karnataka - 560095<br>Phone Number: +91 9440467000 / +91 8970567999<br>Email: info@vjcoverseas.com<br>Website: www.vjcoverseas.com',
+#   officeLocationSelected: 'Bengaluru'
+# }
+# Subtest: registered Offer and Experience templates validate with complete input
+not ok 28 - registered Offer and Experience templates validate with complete input
+  ---
+  duration_ms: 33.9752
+  type: 'test'
+  location: 'C:\\Users\\pc\\hrmsReactback\\hrmsReact 2\\hrmsReact\\hrmsFrontendNAvigationwithoutdb_2\\hrmssoftwaewTeating\\backend\\tests\\placeholderService.test.js:23:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Got unwanted exception.
+    Actual message: "formatDate is not defined"
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  actual:
+  error: 'formatDate is not defined'
+  name: 'ReferenceError'
+  stack: |-
+    renderPlaceholders (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/utils/placeholderService.js:103:51)
+    file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/tests/placeholderService.test.js:26:29
+    getActual (node:assert:530:5)
+    Function.doesNotThrow (node:assert:696:32)
+    TestContext.<anonymous> (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/tests/placeholderService.test.js:26:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  operator: 'doesNotThrow'
+  stack: |-
+    TestContext.<anonymous> (file:///C:/Users/pc/hrmsReactback/hrmsReact%202/hrmsReact/hrmsFrontendNAvigationwithoutdb_2/hrmssoftwaewTeating/backend/tests/placeholderService.test.js:26:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: Experience template has no orphan paragraph close or relative image asset
+ok 29 - Experience template has no orphan paragraph close or relative image asset
+  ---
+  duration_ms: 11.0837
+  type: 'test'
+  ...
+# ◇ injected env (15) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+# Subtest: late minute calculation
+    # Subtest: 09:55:00 returns 0
+    ok 1 - 09:55:00 returns 0
+      ---
+      duration_ms: 1.568
+      type: 'test'
+      ...
+    # Subtest: 10:00:00 returns 0
+    ok 2 - 10:00:00 returns 0
+      ---
+      duration_ms: 0.2466
+      type: 'test'
+      ...
+    # Subtest: 10:05:00 returns 0
+    ok 3 - 10:05:00 returns 0
+      ---
+      duration_ms: 0.1159
+      type: 'test'
+      ...
+    # Subtest: 10:10:00 returns 0
+    ok 4 - 10:10:00 returns 0
+      ---
+      duration_ms: 0.1306
+      type: 'test'
+      ...
+    # Subtest: 10:12:00 returns 0
+    ok 5 - 10:12:00 returns 0
+      ---
+      duration_ms: 0.1072
+      type: 'test'
+      ...
+    # Subtest: 10:15:00 returns 0
+    ok 6 - 10:15:00 returns 0
+      ---
+      duration_ms: 0.1008
+      type: 'test'
+      ...
+    # Subtest: 10:16:00 returns 1
+    ok 7 - 10:16:00 returns 1
+      ---
+      duration_ms: 0.109
+      type: 'test'
+      ...
+    # Subtest: 10:20:00 returns 5
+    ok 8 - 10:20:00 returns 5
+      ---
+      duration_ms: 0.2335
+      type: 'test'
+      ...
+    # Subtest: 10:29:00 returns 14
+    ok 9 - 10:29:00 returns 14
+      ---
+      duration_ms: 0.2808
+      type: 'test'
+      ...
+    # Subtest: 10:30:00 returns 0
+    ok 10 - 10:30:00 returns 0
+      ---
+      duration_ms: 0.5936
+      type: 'test'
+      ...
+    # Subtest: 10:35:00 returns 0
+    ok 11 - 10:35:00 returns 0
+      ---
+      duration_ms: 0.2181
+      type: 'test'
+      ...
+    # Subtest: 11:00:00 returns 0
+    ok 12 - 11:00:00 returns 0
+      ---
+      duration_ms: 0.1072
+      type: 'test'
+      ...
+    # Subtest: 16:10:00 returns 0
+    ok 13 - 16:10:00 returns 0
+      ---
+      duration_ms: 0.0671
+      type: 'test'
+      ...
+    1..13
+ok 30 - late minute calculation
+  ---
+  duration_ms: 7.0045
+  type: 'suite'
+  ...
+# Subtest: late login detection
+    # Subtest: on-time at 10:00 is not late
+    ok 1 - on-time at 10:00 is not late
+      ---
+      duration_ms: 0.3185
+      type: 'test'
+      ...
+    # Subtest: 10:10 is on-time grace and not late
+    ok 2 - 10:10 is on-time grace and not late
+      ---
+      duration_ms: 0.1863
+      type: 'test'
+      ...
+    # Subtest: 10:20 is in the late login window
+    ok 3 - 10:20 is in the late login window
+      ---
+      duration_ms: 0.1758
+      type: 'test'
+      ...
+    # Subtest: 10:31 is late and beyond the full-day login window
+    ok 4 - 10:31 is late and beyond the full-day login window
+      ---
+      duration_ms: 0.1449
+      type: 'test'
+      ...
+    1..4
+ok 31 - late login detection
+  ---
+  duration_ms: 1.0867
+  type: 'suite'
+  ...
+# Subtest: half-day slot validation
+    # Subtest: slot A requires login at or before 10:00 and 240 effective minutes
+    ok 1 - slot A requires login at or before 10:00 and 240 effective minutes
+      ---
+      duration_ms: 0.4312
+      type: 'test'
+      ...
+    # Subtest: slot B requires login at or before 14:30 and 240 effective minutes
+    ok 2 - slot B requires login at or before 14:30 and 240 effective minutes
+      ---
+      duration_ms: 0.1327
+      type: 'test'
+      ...
+    # Subtest: 10:30 to 15:00 is not a valid half-day slot
+    ok 3 - 10:30 to 15:00 is not a valid half-day slot
+      ---
+      duration_ms: 0.1197
+      type: 'test'
+      ...
+    # Subtest: 2:00 PM to 6:00 PM counts afternoon effective work from 2:30 PM
+    ok 4 - 2:00 PM to 6:00 PM counts afternoon effective work from 2:30 PM
+      ---
+      duration_ms: 0.3301
+      type: 'test'
+      ...
+    1..4
+ok 32 - half-day slot validation
+  ---
+  duration_ms: 2.4365
+  type: 'suite'
+  ...
+# Subtest: day classification policy
+    # Subtest: 9:50 to 19:00 with 9 gross hours from office start is full day
+    ok 1 - 9:50 to 19:00 with 9 gross hours from office start is full day
+      ---
+      duration_ms: 3.5075
+      type: 'test'
+      ...
+    # Subtest: 10:12 to 19:00 is half day because early login worked at least 4 hours
+    ok 2 - 10:12 to 19:00 is half day because early login worked at least 4 hours
+      ---
+      duration_ms: 1.1623
+      type: 'test'
+      ...
+    # Subtest: 10:12 to 19:12 is full day within on-time grace
+    ok 3 - 10:12 to 19:12 is full day within on-time grace
+      ---
+      duration_ms: 1.1072
+      type: 'test'
+      ...
+    # Subtest: 10:20 to 19:20 is full day but counts as late login
+    ok 4 - 10:20 to 19:20 is full day but counts as late login
+      ---
+      duration_ms: 1.1824
+      type: 'test'
+      ...
+    # Subtest: 10:06 to 19:06 is full day even with a normal break because full day uses gross hours
+    ok 5 - 10:06 to 19:06 is full day even with a normal break because full day uses gross hours
+      ---
+      duration_ms: 0.8253
+      type: 'test'
+      ...
+    # Subtest: 10:30 to 15:00 is half day when gross duration is at least 4 hours
+    ok 6 - 10:30 to 15:00 is half day when gross duration is at least 4 hours
+      ---
+      duration_ms: 0.812
+      type: 'test'
+      ...
+    # Subtest: 11:30 to 15:30 with 4 total hours is half day
+    ok 7 - 11:30 to 15:30 with 4 total hours is half day
+      ---
+      duration_ms: 0.6507
+      type: 'test'
+      ...
+    # Subtest: 14:30 to 19:00 is afternoon half day with required checkout met
+    ok 8 - 14:30 to 19:00 is afternoon half day with required checkout met
+      ---
+      duration_ms: 0.91
+      type: 'test'
+      ...
+    # Subtest: 10:00 to 14:15 is half day because early login worked at least 4 hours
+    ok 9 - 10:00 to 14:15 is half day because early login worked at least 4 hours
+      ---
+      duration_ms: 1.1673
+      type: 'test'
+      ...
+    # Subtest: 10:00 to 14:00 with a 15 minute break is half day because half day uses gross hours
+    ok 10 - 10:00 to 14:00 with a 15 minute break is half day because half day uses gross hours
+      ---
+      duration_ms: 0.84
+      type: 'test'
+      ...
+    # Subtest: 10:05 to 14:30 is half day because early login worked at least 4 hours
+    ok 11 - 10:05 to 14:30 is half day because early login worked at least 4 hours
+      ---
+      duration_ms: 0.7989
+      type: 'test'
+      ...
+    # Subtest: 14:30 to 18:45 with a 15 minute break is afternoon half day
+    ok 12 - 14:30 to 18:45 with a 15 minute break is afternoon half day
+      ---
+      duration_ms: 0.5972
+      type: 'test'
+      ...
+    # Subtest: 14:35 to 19:00 is afternoon half day when required checkout is met
+    ok 13 - 14:35 to 19:00 is afternoon half day when required checkout is met
+      ---
+      duration_ms: 0.6186
+      type: 'test'
+      ...
+    # Subtest: less than 4 gross hours is absent
+    ok 14 - less than 4 gross hours is absent
+      ---
+      duration_ms: 0.2511
+      type: 'test'
+      ...
+    # Subtest: pre-10:30 login with 4 to less than 9 gross hours is half day
+    ok 15 - pre-10:30 login with 4 to less than 9 gross hours is half day
+      ---
+      duration_ms: 0.233
+      type: 'test'
+      ...
+    # Subtest: 10:00 to 18:00 with 8 gross hours is half day
+    ok 16 - 10:00 to 18:00 with 8 gross hours is half day
+      ---
+      duration_ms: 0.1755
+      type: 'test'
+      ...
+    # Subtest: 10:00 to 19:00 with a 1 hour break is full day with 9 gross hours
+    ok 17 - 10:00 to 19:00 with a 1 hour break is full day with 9 gross hours
+      ---
+      duration_ms: 0.1672
+      type: 'test'
+      ...
+    # Subtest: 10:00 to 19:00 with a 61 minute break is half day because break limit is exceeded
+    ok 18 - 10:00 to 19:00 with a 61 minute break is half day because break limit is exceeded
+      ---
+      duration_ms: 0.1661
+      type: 'test'
+      ...
+    # Subtest: 10:10 to 19:10 with a 1 hour break is full day within on-time grace
+    ok 19 - 10:10 to 19:10 with a 1 hour break is full day within on-time grace
+      ---
+      duration_ms: 0.1332
+      type: 'test'
+      ...
+    # Subtest: deducts breaks from morning half-day production
+    ok 20 - deducts breaks from morning half-day production
+      ---
+      duration_ms: 0.1253
+      type: 'test'
+      ...
+    # Subtest: deducts breaks from afternoon half-day production
+    ok 21 - deducts breaks from afternoon half-day production
+      ---
+      duration_ms: 0.3015
+      type: 'test'
+      ...
+    # Subtest: 01:46 to 14:46 uses gross login-to-logout hours and is full day
+    ok 22 - 01:46 to 14:46 uses gross login-to-logout hours and is full day
+      ---
+      duration_ms: 0.622
+      type: 'test'
+      ...
+    # Subtest: 10:00 to 19:00 with 9 gross hours is full day
+    ok 23 - 10:00 to 19:00 with 9 gross hours is full day
+      ---
+      duration_ms: 0.4784
+      type: 'test'
+      ...
+    1..23
+ok 33 - day classification policy
+  ---
+  duration_ms: 18.5354
+  type: 'suite'
+  ...
+# Subtest: 1+1 leave penalty
+    # Subtest: computeOnePlusOnePenalty sets penalty_days
+    ok 1 - computeOnePlusOnePenalty sets penalty_days
+      ---
+      duration_ms: 0.5188
+      type: 'test'
+      ...
+    # Subtest: sudden leave on approval
+    ok 2 - sudden leave on approval
+      ---
+      duration_ms: 0.5777
+      type: 'test'
+      ...
+    # Subtest: Saturday detection
+    ok 3 - Saturday detection
+      ---
+      duration_ms: 0.2628
+      type: 'test'
+      ...
+    1..3
+ok 34 - 1+1 leave penalty
+  ---
+  duration_ms: 1.6317
+  type: 'suite'
+  ...
+# Subtest: proxy detection logic
+    # Subtest: logged_by must equal subject
+    ok 1 - logged_by must equal subject
+      ---
+      duration_ms: 0.2122
+      type: 'test'
+      ...
+    1..1
+ok 35 - proxy detection logic
+  ---
+  duration_ms: 0.3093
+  type: 'suite'
+  ...
+# Subtest: monthly late count
+    # Subtest: counts all late-window logins with no monthly cap
+    ok 1 - counts all late-window logins with no monthly cap
+      ---
+      duration_ms: 2.3809
+      type: 'test'
+      ...
+    # Subtest: counts morning-track 10:15 or later logins as late, excluding afternoon track
+    ok 2 - counts morning-track 10:15 or later logins as late, excluding afternoon track
+      ---
+      duration_ms: 0.4218
+      type: 'test'
+      ...
+    # Subtest: does not downgrade because of a monthly late-login cap
+    ok 3 - does not downgrade because of a monthly late-login cap
+      ---
+      duration_ms: 0.4115
+      type: 'test'
+      ...
+    # Subtest: marks login after 2:30 PM half day when required checkout is met
+    ok 4 - marks login after 2:30 PM half day when required checkout is met
+      ---
+      duration_ms: 0.5121
+      type: 'test'
+      ...
+    1..4
+ok 36 - monthly late count
+  ---
+  duration_ms: 4.0799
+  type: 'suite'
+  ...
+# [DB_READY] Database connected successfully
+1..36
+# tests 123
+# suites 27
+# pass 116
+# fail 7
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 31500.4572

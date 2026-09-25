@@ -251,7 +251,7 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
 
     const user = userResult.rows[0];
 
-    // Already checked in
+    // Check for existing attendance record
     const existing = await pool.query(
       `SELECT * FROM attendance_records
        WHERE user_id = $1
@@ -259,45 +259,74 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
       [userId, date]
     );
 
+    let result;
+
     if (existing.rows.length) {
+      const existingRecord = existing.rows[0];
 
-      return res.status(400).json({
-        message: "Already checked in today"
-      });
+      // If already checked in (has check_in_time), reject
+      if (existingRecord.check_in_time) {
+        return res.status(400).json({
+          message: "Already checked in today"
+        });
+      }
+
+      // If record exists but no check_in_time (e.g., half-day leave), allow check-in by updating
+      const lateMinutes = calculateLateMinutes(currentTime);
+
+      result = await pool.query(
+        `
+        UPDATE attendance_records
+        SET check_in_time = $1,
+            status = $2,
+            late_minutes = $3,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $4 AND date = $5
+        RETURNING *
+        `,
+        [
+          currentTime,
+          'present',
+          lateMinutes,
+          userId,
+          date
+        ]
+      );
+    } else {
+      // No existing record, create new one
+      const lateMinutes = calculateLateMinutes(currentTime);
+      const status = 'present';
+
+      result = await pool.query(
+        `
+        INSERT INTO attendance_records
+        (
+          user_id,
+          date,
+          check_in_time,
+          check_out_time,
+          status,
+          late_minutes,
+          production_hours,
+          total_break_minutes,
+          branch,
+          department
+        )
+        VALUES
+        ($1,$2,$3,NULL,$4,$5,0,0,$6,$7)
+        RETURNING *
+        `,
+        [
+          userId,
+          date,
+          currentTime,
+          status,
+          lateMinutes,
+          user.branch,
+          user.department
+        ]
+      );
     }
-
-    const lateMinutes = calculateLateMinutes(currentTime);
-    const status = 'present';
-
-    const result = await pool.query(
-      `
-      INSERT INTO attendance_records
-      (
-        user_id,
-        date,
-        check_in_time,
-        check_out_time,
-        status,
-        late_minutes,
-        production_hours,
-        total_break_minutes,
-        branch,
-        department
-      )
-      VALUES
-      ($1,$2,$3,NULL,$4,$5,0,0,$6,$7)
-      RETURNING *
-      `,
-      [
-        userId,
-        date,
-        currentTime,
-        status,
-        lateMinutes,
-        user.branch,
-        user.department
-      ]
-    );
     // 🔄 SYNC — mark this employee online for invoice round-robin
     fetch("https://invoice.vjcoverseas.com/api/departments/staff/online", {
       method: "POST",

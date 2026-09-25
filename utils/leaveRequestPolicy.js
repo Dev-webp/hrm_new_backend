@@ -60,11 +60,11 @@ export function halfDaySlotForSession(session) {
   return null;
 }
 
-export function resolveLeaveBalanceUsage({ usePaidLeave, requestedDays, availableBalance }) {
+export function resolveLeaveBalanceUsage({ requestedDays, availableBalance }) {
   const requested = Number(requestedDays || 0);
   const available = Number(availableBalance || 0);
-  const paidDays = usePaidLeave ? Math.min(requested, available) : 0;
-  const unpaidDays = Math.max(0, requested - paidDays);
+  const paidDays = Math.min(requested, available);
+  const unpaidDays = requested - paidDays;
 
   return {
     paidDays,
