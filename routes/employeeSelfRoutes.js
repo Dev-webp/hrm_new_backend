@@ -5,6 +5,7 @@ import { calculateLateMinutes, formatDateStr } from "../utils/attendancePolicy.j
 import {
   getDisplayAttendanceStatus,
   recalcAttendanceForUserDate,
+  syncInvoiceBreakStatus,
 } from "./attendanceRoutes.js";
 import { attachTotalBreakMinutes, calculateBreakMinutesFromRows } from "../utils/breakMinutes.js";
 
@@ -803,6 +804,14 @@ router.put("/employee/my-breaks", verifyToken, async (req, res) => {
     } catch (recalcErr) {
       console.warn("Employee break recalc attendance warning:", recalcErr.message);
     }
+
+    // Sync Invoice availability based on active break
+    const hasActiveBreak = Object.values(breaks).some(
+      (b) => b && typeof b === "object" && b.start && !b.end
+    ) || (Array.isArray(breaks.break3Sessions) &&
+      breaks.break3Sessions.some((b) => b.start && !b.end));
+
+    await syncInvoiceBreakStatus(req.user.email, !hasActiveBreak);
 
     const breakPolicy = await applyBreakAttendancePolicy(req.user.id, date);
     res.json({

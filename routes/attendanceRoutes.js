@@ -121,6 +121,35 @@ async function setNamedBreakTime({ userId, dateStr, breakType, action, timeStr }
   );
 }
 
+// ── INVOICE SYNC — break/lunch availability ─────────────────────
+export async function syncInvoiceBreakStatus(email, isOnline) {
+  console.log("🔄 INVOICE BREAK SYNC:", { email, isOnline });
+  try {
+    const endpoint = isOnline
+      ? "https://invoice.vjcoverseas.com/api/departments/staff/online"
+      : "https://invoice.vjcoverseas.com/api/departments/staff/offline";
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+
+    if (!response.ok) {
+      console.warn(
+        `Invoice break-status sync returned HTTP ${response.status} for ${email}`
+      );
+    }
+  } catch (err) {
+    // Non-fatal: HRMS break/lunch action must still succeed.
+    console.error(
+      "Invoice break-status sync error (non-fatal):",
+      err.message
+    );
+  }
+}
+// ── END INVOICE SYNC ─────────────────────────────────────────────
+
 // ═══════════════════════════════════════════════════════════════════
 // MATERIALIZED VIEW REFRESH (throttled)
 // ═══════════════════════════════════════════════════════════════════
@@ -1191,6 +1220,8 @@ router.post("/attendance", verifyToken, async (req, res) => {
       case "break_out": {
         await setNamedBreakTime({ userId, dateStr: today, breakType: "break1", action: action === "break_in" ? "start" : "end", timeStr });
         await recalcAttendanceForUserDateIfFinal(userId, today);
+        // 🔄 SYNC — break in = unavailable, break out = available for Invoice leads
+        await syncInvoiceBreakStatus(req.user.email, action === "break_out");
         break;
       }
 
@@ -1198,6 +1229,8 @@ router.post("/attendance", verifyToken, async (req, res) => {
       case "break_out_2": {
         await setNamedBreakTime({ userId, dateStr: today, breakType: "break2", action: action === "break_in_2" ? "start" : "end", timeStr });
         await recalcAttendanceForUserDateIfFinal(userId, today);
+        // 🔄 SYNC — break in = unavailable, break out = available for Invoice leads
+        await syncInvoiceBreakStatus(req.user.email, action === "break_out_2");
         break;
       }
 
@@ -1205,6 +1238,8 @@ router.post("/attendance", verifyToken, async (req, res) => {
       case "lunch_out": {
         await setNamedBreakTime({ userId, dateStr: today, breakType: "lunch", action: action === "lunch_in" ? "start" : "end", timeStr });
         await recalcAttendanceForUserDateIfFinal(userId, today);
+        // 🔄 SYNC — lunch in = unavailable, lunch out = available for Invoice leads
+        await syncInvoiceBreakStatus(req.user.email, action === "lunch_out");
         break;
       }
 
