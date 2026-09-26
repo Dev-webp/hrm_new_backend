@@ -347,7 +347,7 @@ router.get(
              check_in_time, check_out_time, status,
              late_minutes, production_hours,
              total_break_minutes, half_day_slot,
-             leave_type, leave_status,
+             is_paid_leave, leave_type, leave_status,
              post_login_idle_minutes, misuse_of_time
            FROM attendance_records
            WHERE user_id = $1 AND date BETWEEN $2 AND $3
@@ -475,6 +475,11 @@ router.get(
             b2:    { in: fmtT(b2.start_time),     out: fmtT(b2.end_time)    },
             b3:    { in: fmtT(b3.start_time),     out: fmtT(b3.end_time)    },
           },
+          // Add raw attendance fields for frontend status determination
+          half_day_slot: att?.half_day_slot || null,
+          is_paid_leave: att?.is_paid_leave || null,
+          leave_type: att?.leave_type || null,
+          leave_request_id: att?.leave_request_id || null,
         });
       }
 
@@ -647,6 +652,11 @@ function buildEmptyRecord(dateStr, status) {
       b2:    { in: "—", out: "—" },
       b3:    { in: "—", out: "—" },
     },
+    // Add empty values for consistency
+    half_day_slot: null,
+    is_paid_leave: null,
+    leave_type: null,
+    leave_request_id: null,
   };
 }
 

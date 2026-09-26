@@ -84,7 +84,14 @@ function finiteNumber(value, fallback = 0) {
 
 function safeDateString(value, fallback = null) {
   if (!value) return fallback;
-  const raw = value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+  // If it's a Date object, extract date parts directly to avoid UTC timezone shifts
+  if (value instanceof Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+  const raw = String(value).slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : fallback;
 }
 
@@ -257,7 +264,10 @@ function buildCalendarMaps(data) {
     const start = new Date(leave.from_date + "T00:00:00");
     const end   = new Date(leave.to_date   + "T00:00:00");
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-      approvedLeaveSet.add(d.toISOString().slice(0, 10));
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      approvedLeaveSet.add(`${year}-${month}-${day}`);
     }
   }
 

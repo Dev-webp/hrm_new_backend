@@ -178,6 +178,7 @@ function liveAbsentSql(attendanceAlias = "a", leaveAlias = "l") {
         'leave',
         'paid_leave',
         'unpaid_leave',
+        'half_day',
         'holiday'
       )
     )

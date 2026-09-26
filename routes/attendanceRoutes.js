@@ -523,7 +523,7 @@ async function finalizeForgottenCheckoutsBeforeToday() {
        AND check_in_time IS NOT NULL
        AND check_out_time IS NULL
        AND COALESCE(status, '') NOT IN (
-         'leave', 'paid_leave', 'unpaid_leave', 'holiday', 'absent'
+         'leave', 'paid_leave', 'unpaid_leave', 'half_day', 'holiday', 'absent'
        )`,
     [today]
   );
@@ -644,7 +644,7 @@ async function recalcAttendanceForUserDate(userId, dateStr, options = {}) {
 
     if (
       isPastAttendanceDate(dateStr) &&
-      !["leave", "paid_leave", "unpaid_leave", "holiday"].includes(currentStatus)
+      !["leave", "paid_leave", "unpaid_leave", "half_day", "holiday"].includes(currentStatus)
     ) {
       await pool.query(
         `UPDATE attendance_records
@@ -659,7 +659,7 @@ async function recalcAttendanceForUserDate(userId, dateStr, options = {}) {
       return;
     }
 
-    const openStatus = ["leave", "paid_leave", "unpaid_leave", "holiday"].includes(currentStatus)
+    const openStatus = ["leave", "paid_leave", "unpaid_leave", "half_day", "holiday"].includes(currentStatus)
       ? currentStatus
       : "absent";
 
@@ -2410,10 +2410,13 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
 
     const leaveByUserDate = new Map();
     for (const lv of leaveResult.rows) {
-      const cur = new Date(lv.from_date);
-      const to = new Date(lv.to_date);
+      const cur = new Date(lv.from_date + "T00:00:00");
+      const to = new Date(lv.to_date + "T00:00:00");
       while (cur <= to) {
-        const dateStr = cur.toISOString().slice(0, 10);
+        const year = cur.getFullYear();
+        const month = String(cur.getMonth() + 1).padStart(2, "0");
+        const day = String(cur.getDate()).padStart(2, "0");
+        const dateStr = `${year}-${month}-${day}`;
         if (dateStr >= start && dateStr <= end) {
           leaveByUserDate.set(`${lv.user_id}_${dateStr}`, lv.leave_type);
         }
@@ -2441,10 +2444,13 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
 
     // Synthesize rows for approved-leave days with NO attendance_records row.
     for (const lv of leaveResult.rows) {
-      const cur = new Date(lv.from_date);
-      const to = new Date(lv.to_date);
+      const cur = new Date(lv.from_date + "T00:00:00");
+      const to = new Date(lv.to_date + "T00:00:00");
       while (cur <= to) {
-        const dateStr = cur.toISOString().slice(0, 10);
+        const year = cur.getFullYear();
+        const month = String(cur.getMonth() + 1).padStart(2, "0");
+        const day = String(cur.getDate()).padStart(2, "0");
+        const dateStr = `${year}-${month}-${day}`;
         if (dateStr >= start && dateStr <= end && !seenUserDate.has(`${lv.user_id}_${dateStr}`)) {
           const synthetic = {
             user_id: lv.user_id,
@@ -3422,6 +3428,12 @@ router.get(
 
           CASE
 
+            -- HALF-DAY LEAVE (priority over paid/unpaid)
+            WHEN lr.id IS NOT NULL
+              AND LOWER(COALESCE(lr.status, '')) = 'approved'
+              AND (lr.leave_duration_type = 'half_day' OR lr.paid_days = 0.5 OR lr.unpaid_days = 0.5)
+            THEN 'half_day'
+
             -- PAID LEAVE
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
@@ -3459,7 +3471,15 @@ router.get(
 
           ar.total_break_minutes,
 
-          ar.half_day_slot,
+          -- ================================================
+          -- HALF DAY SLOT (from attendance or leave request)
+          -- ================================================
+          CASE
+            WHEN ar.half_day_slot IS NOT NULL THEN ar.half_day_slot
+            WHEN lr.leave_duration_type = 'half_day' AND lr.half_day_session = 'morning' THEN 'SLOT_A'
+            WHEN lr.leave_duration_type = 'half_day' AND lr.half_day_session = 'afternoon' THEN 'SLOT_B'
+            ELSE NULL
+          END AS half_day_slot,
 
           ar.post_login_idle_minutes,
 
@@ -3487,6 +3507,8 @@ router.get(
           lr.id AS leave_request_id,
 
           lr.leave_type AS request_leave_type,
+          lr.leave_duration_type,
+          lr.half_day_session,
 
           lr.leave_type,
 
@@ -3665,6 +3687,14 @@ router.get(
           };
         }
 
+        if (row.status === "half_day") {
+          return {
+            ...row,
+            status: "half_day",
+            is_half_day: true,
+            isHalfDay: true,
+          };
+        }
 
         // ======================================================
         // NORMAL ATTENDANCE
@@ -3691,7 +3721,8 @@ router.get(
         response.filter(
           (row) =>
             row.status === "paid_leave" ||
-            row.status === "unpaid_leave"
+            row.status === "unpaid_leave" ||
+            row.status === "half_day"
         )
       );
 
@@ -3754,10 +3785,30 @@ router.get(
           -- DATE-LEVEL ATTENDANCE IS THE SOURCE OF TRUTH.
           -- A leave request can be mixed paid/unpaid, so it must never
           -- overwrite a persisted paid_leave/unpaid_leave day.
+          -- Half-day status has priority over leave type computation.
           -- ================================================
           CASE
-            WHEN ar.id IS NOT NULL
-            THEN ${normalizedAttendanceStatusSql("ar")}
+            WHEN ar.id IS NOT NULL THEN
+              CASE
+                -- Priority 1: Half-day status
+                WHEN ar.status = 'half_day' OR ar.half_day_slot IS NOT NULL
+                THEN 'half_day'
+                
+                -- Priority 2: Use is_paid_leave flag for paid/unpaid leave
+                WHEN ar.is_paid_leave = true
+                THEN 'paid_leave'
+                
+                WHEN ar.is_paid_leave = false AND (ar.leave_type = 'unpaid_leave' OR ar.leave_type = 'unpaid')
+                THEN 'unpaid_leave'
+                
+                -- Priority 3: Fall back to raw status
+                ELSE COALESCE(ar.status, 'absent')
+              END
+
+            WHEN lr.id IS NOT NULL
+              AND LOWER(COALESCE(lr.status, '')) = 'approved'
+              AND (lr.leave_duration_type = 'half_day' OR lr.paid_days = 0.5 OR lr.unpaid_days = 0.5)
+            THEN 'half_day'
 
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
@@ -3780,7 +3831,16 @@ router.get(
           ar.late_minutes,
           ar.production_hours,
           ar.total_break_minutes,
-          ar.half_day_slot,
+          -- ================================================
+          -- HALF DAY SLOT (from attendance or leave request)
+          -- ================================================
+          CASE
+            WHEN ar.half_day_slot IS NOT NULL THEN ar.half_day_slot
+            WHEN lr.leave_duration_type = 'half_day' AND lr.half_day_session = 'morning' THEN 'SLOT_A'
+            WHEN lr.leave_duration_type = 'half_day' AND lr.half_day_session = 'afternoon' THEN 'SLOT_B'
+            ELSE NULL
+          END AS half_day_slot,
+
           ar.leave_type AS attendance_leave_type,
           ar.leave_status AS attendance_leave_status,
           ar.is_paid_leave AS attendance_is_paid_leave,
@@ -3792,6 +3852,8 @@ router.get(
           -- ================================================
           lr.id AS leave_request_id,
           lr.leave_type AS request_leave_type,
+          lr.leave_duration_type,
+          lr.half_day_session,
           COALESCE(ar.leave_type, lr.leave_type) AS leave_type,
           COALESCE(ar.leave_status, lr.status) AS leave_status,
 
@@ -3809,7 +3871,8 @@ router.get(
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
               AND COALESCE(lr.paid_days, 0) > 0
             THEN true
-            ELSE COALESCE(ar.is_paid_leave, false)
+
+            ELSE false
           END AS is_paid_leave,
 
           -- ================================================
@@ -3885,6 +3948,15 @@ router.get(
           };
         }
 
+        if (row.status === "half_day") {
+          return {
+            ...row,
+            status: "half_day",
+            is_half_day: true,
+            isHalfDay: true,
+          };
+        }
+
         return withDisplayAttendanceStatus(
           row,
           row.date,
@@ -3921,7 +3993,10 @@ router.get("/attendance/late-trend", verifyToken, async (req, res) => {
     const end  = new Date(baseDate);
     const dates = Array.from({ length: 5 }, (_, i) => {
       const d = new Date(end); d.setDate(end.getDate() - (4 - i));
-      return d.toISOString().slice(0, 10);
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
     });
     let q = `SELECT TO_CHAR(a.date,'YYYY-MM-DD') AS date, COUNT(*) AS late
              FROM attendance_records a

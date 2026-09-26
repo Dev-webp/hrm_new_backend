@@ -348,12 +348,28 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
       // FINAL ATTENDANCE STATUS
       //
       // IMPORTANT:
-      // If paid -> paid_leave
-      // If unpaid -> unpaid_leave
+      // If leave request is half-day -> status = half_day
+      // If leave request is full-day:
+      //   - If paid -> paid_leave
+      //   - If unpaid -> unpaid_leave
       // ========================================================
 
-      const finalStatus = allocation.status;
-      const finalLeaveType = allocation.leaveType;
+      let finalStatus;
+      let finalLeaveType;
+      let finalHalfDaySlot = halfDaySlot;
+
+      if (durationType === "half_day" || halfDaySlot) {
+        // Half-day leave request - use half_day status
+        finalStatus = "half_day";
+        finalLeaveType = allocation.leaveType; // Still track paid/unpaid for payroll
+        finalHalfDaySlot = halfDaySlot || "INVALID";
+        console.log("HALF-DAY LEAVE REQUEST:", { dateStr, session: leave.half_day_session, slot: finalHalfDaySlot });
+      } else {
+        // Full-day leave request - use paid_leave or unpaid_leave status
+        finalStatus = allocation.status;
+        finalLeaveType = allocation.leaveType;
+        finalHalfDaySlot = null;
+      }
 
       console.log(
         "INSERTING ATTENDANCE:",
@@ -364,6 +380,7 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
           leave_type: finalLeaveType,
           is_paid_leave: isPaid,
           leave_request_id: leave.id,
+          half_day_slot: finalHalfDaySlot,
         }
       );
 
@@ -427,7 +444,7 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
           finalLeaveType,
           isPaid,
           leave.id,
-          halfDaySlot,
+          finalHalfDaySlot,
           user.branch || leave.branch || null,
           user.department || leave.department || null,
         ]
@@ -464,12 +481,27 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
 }
 
 async function recalcLeaveAttendanceDates(leave, source) {
-  const from = new Date(String(leave.from_date).slice(0, 10));
-  const to = new Date(String(leave.to_date).slice(0, 10));
+  // ============================================================
+  // SAFE DATE HANDLING
+  // ============================================================
+  // Use toLocalDateString to avoid UTC timezone shifts
+  // ============================================================
+
+  const fromDateStr = toLocalDateString(leave.from_date);
+  const toDateStr = toLocalDateString(leave.to_date);
+
+  if (!fromDateStr || !toDateStr) return;
+
+  const from = new Date(`${fromDateStr}T00:00:00`);
+  const to = new Date(`${toDateStr}T00:00:00`);
+
   if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return;
 
   for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
-    const dateStr = d.toISOString().slice(0, 10);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    const dateStr = `${year}-${month}-${day}`;
     await recalcAttendanceForUserDate(leave.user_id, dateStr, { source });
   }
 }
