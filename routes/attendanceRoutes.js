@@ -27,6 +27,8 @@ import {
   withComputedAttendanceStatus,
 } from "../utils/computedAttendanceStatus.js";
 import { adjustLeaveBalanceForAttendanceStatusChange } from "../utils/leavePolicy.js";
+import { applySandwichPolicy, getSandwichSummary } from "../utils/sandwichPolicy.js";
+import { toDateStr } from "../utils/dateHelper.js";
 
 // ── Policy engine (pure functions, no DB calls) ──────────────────
 import {
@@ -1790,7 +1792,110 @@ router.get("/attendance/self/history", verifyToken, async (req, res) => {
     );
     const holidaySet = await fetchHolidaySetForDateRange(start, end);
     const logsByDate = Object.fromEntries(result.rows.map((row) => [row.date, row]));
-    res.json(result.rows.map((row) => withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate })));
+    
+    // Get user's joining_date for sandwich policy
+    const userResult = await pool.query(
+      `SELECT joining_date FROM users WHERE id = $1`,
+      [req.user.id]
+    );
+    const joiningDate = userResult.rows[0]?.joining_date || null;
+    
+    // Get approved leave requests for this user in the date range
+    const leaveResult = await pool.query(
+      `SELECT id, from_date, to_date, leave_type, status, leave_duration_type
+       FROM leave_requests
+       WHERE user_id = $1
+         AND status = 'approved'
+         AND from_date <= $2
+         AND to_date >= $3
+       ORDER BY from_date`,
+      [req.user.id, end, start]
+    );
+    
+    // Apply sandwich policy for this user
+    const attMap = new Map();
+    for (const row of result.rows) {
+      attMap.set(row.date, row);
+    }
+    
+    // Build allDates from the full date range (not just dates with attendance records)
+    const allDates = [];
+    const startDate = new Date(start + "T00:00:00");
+    const endDate = new Date(end + "T00:00:00");
+    for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+      const dateStr = d.toISOString().slice(0, 10);
+      allDates.push(dateStr);
+    }
+    
+    const holidayMap = new Map();
+    holidaySet.forEach((date) => {
+      holidayMap.set(date, { name: 'Holiday' });
+    });
+    
+    const { sandwichResults } = applySandwichPolicy({
+      attMap,
+      holidayMap,
+      halfDayLeaveMap: new Map(),
+      allDates,
+      leaves: leaveResult.rows,
+    }, {
+      todayStr: new Date().toISOString().slice(0, 10),
+      joiningDate,
+    });
+    
+    // Create a date -> sandwich result map
+    const sandwichMap = new Map();
+    for (const sr of sandwichResults) {
+      if (!sandwichMap.has(sr.date)) {
+        sandwichMap.set(sr.date, []);
+      }
+      sandwichMap.get(sr.date).push(sr);
+    }
+    
+    // Embed sandwich metadata in each row
+    const rowsWithSandwich = result.rows.map((row) => {
+      const rowWithStatus = withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate });
+      if (sandwichMap.has(row.date)) {
+        rowWithStatus.sandwich = sandwichMap.get(row.date);
+      }
+      return rowWithStatus;
+    });
+    
+    // Add rows for dates without attendance records but with sandwich results
+    // Only create synthetic rows for Sundays with applied=true
+    const dateSet = new Set(result.rows.map(r => r.date));
+    for (const date of allDates) {
+      if (!dateSet.has(date) && sandwichMap.has(date)) {
+        const sandwichResults = sandwichMap.get(date);
+        // Check if this is a Sunday with applied sandwich
+        const isSundayWithAppliedSandwich = sandwichResults.some(s => s.applied === true);
+        const dayOfWeek = new Date(date + "T00:00:00").getDay();
+        
+        if (dayOfWeek === 0 && isSundayWithAppliedSandwich) {
+          // This date has no attendance record but has an applied sandwich result
+          // Create a minimal row for it
+          const sandwichRow = {
+            date,
+            status: 'sunday', // Will be overridden by sandwich status in frontend
+            check_in_time: null,
+            check_out_time: null,
+            late_minutes: 0,
+            production_hours: 0,
+            total_break_minutes: 0,
+            half_day_slot: null,
+            leave_type: null,
+            leave_status: null,
+            sandwich: sandwichResults,
+          };
+          rowsWithSandwich.push(sandwichRow);
+        }
+      }
+    }
+    
+    // Sort by date
+    rowsWithSandwich.sort((a, b) => a.date.localeCompare(b.date));
+    
+    res.json(rowsWithSandwich);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -2391,6 +2496,16 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
     const result = await pool.query(query, params);
     const holidaySet = await fetchHolidaySetForDateRange(start, end);
     const summary = new Map();
+    
+    // Build attendance map for sandwich processing
+    const attMap = new Map();
+    const allDates = [];
+
+    for (const row of result.rows) {
+      const key = `${row.user_id}:${row.date}`;
+      attMap.set(key, row);
+      if (!allDates.includes(row.date)) allDates.push(row.date);
+    }
 
     for (const row of result.rows) {
       if (!summary.has(row.date)) {
@@ -2402,6 +2517,7 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
           leave: 0,
           late: 0,
           total: 0,
+          sandwich: [], // Store sandwich results for this date
         });
       }
 
@@ -2426,8 +2542,61 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
       // evaluateLateLogin() call with its own late-window assumptions.
       if (Number(computed.late_minutes) > 0) item.late += 1;
     }
+    
+    // Apply sandwich policy for each user separately
+    // Get unique user IDs from the results
+    const userIds = [...new Set(result.rows.map(r => r.user_id))];
+    const sandwichMap = new Map(); // date -> array of sandwich results for that date
+    
+    for (const userId of userIds) {
+      // Build user-specific attendance map
+      const userAttMap = new Map();
+      for (const row of result.rows) {
+        if (row.user_id === userId) {
+          userAttMap.set(row.date, row);
+        }
+      }
+      
+      // Build allDates array from userAttMap
+      const allDates = [...userAttMap.keys()];
+      
+      // Apply sandwich policy for this user
+      const sandwichData = {
+        attMap: userAttMap,
+        holidayMap,
+        halfDayLeaveMap: new Map(),
+        allDates,
+      };
+      
+      const { sandwichResults } = applySandwichPolicy(sandwichData, {
+        todayStr: new Date().toISOString().slice(0, 10),
+      });
+      
+      // Collect sandwich results by date
+      for (const result of sandwichResults) {
+        if (!sandwichMap.has(result.date)) {
+          sandwichMap.set(result.date, []);
+        }
+        sandwichMap.get(result.date).push({ ...result, user_id: userId });
+        
+        // Update summary for sandwich Sundays
+        if (result.applied) {
+          const summaryItem = summary.get(result.date);
+          if (summaryItem) {
+            // Add sandwich metadata to the summary item
+            summaryItem.sandwich = summaryItem.sandwich || [];
+            summaryItem.sandwich.push({
+              user_id: userId,
+              reason: result.reason,
+            });
+          }
+        }
+      }
+    }
 
-    res.json([...summary.values()]);
+    // Return array for backward compatibility, with sandwich metadata embedded
+    const summaryArray = [...summary.values()];
+    res.json(summaryArray);
   } catch (err) {
     console.error("GET /attendance/range/summary error:", err);
     res.status(500).json({ message: err.message });
@@ -2490,8 +2659,8 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
 
     const leaveByUserDate = new Map();
     for (const lv of leaveResult.rows) {
-      const cur = new Date(lv.from_date);
-      const to = new Date(lv.to_date);
+      const cur = new Date(toDateStr(lv.from_date) + "T00:00:00");
+      const to = new Date(toDateStr(lv.to_date) + "T00:00:00");
       while (cur <= to) {
         const dateStr = cur.toISOString().slice(0, 10);
         if (dateStr >= start && dateStr <= end) {
@@ -2521,8 +2690,8 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
 
     // Synthesize rows for approved-leave days with NO attendance_records row.
     for (const lv of leaveResult.rows) {
-      const cur = new Date(lv.from_date);
-      const to = new Date(lv.to_date);
+      const cur = new Date(toDateStr(lv.from_date) + "T00:00:00");
+      const to = new Date(toDateStr(lv.to_date) + "T00:00:00");
       while (cur <= to) {
         const dateStr = cur.toISOString().slice(0, 10);
         if (dateStr >= start && dateStr <= end && !seenUserDate.has(`${lv.user_id}_${dateStr}`)) {

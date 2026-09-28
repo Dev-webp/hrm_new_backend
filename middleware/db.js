@@ -3,6 +3,10 @@ import pkg from "pg";
 
 dotenv.config();
 
+// Set DATE type parser to return string directly without UTC conversion
+// This prevents timezone issues with DATE columns
+pkg.types.setTypeParser(1082, v => v);
+
 const { Pool } = pkg;
 
 const isProduction = process.env.NODE_ENV === "production";

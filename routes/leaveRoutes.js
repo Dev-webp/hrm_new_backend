@@ -2,6 +2,7 @@ import express from "express";
 import { pool } from "../middleware/db.js";
 import { verifyToken, authorizeRoles, canAccessAllBranches, normalizeBranchFilter } from "../middleware/auth.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
+import { toDateStr } from "../utils/dateHelper.js";
 
 import {
   evaluateLeaveOnApproval,
@@ -50,7 +51,8 @@ function sameNumber(left, right) {
 }
 
 async function buildApprovalPreview(leave, includeSundayPenalty = false) {
-  const fromDate = new Date(leave.from_date);
+  const fromDateStr = toDateStr(leave.from_date);
+  const fromDate = new Date(fromDateStr + "T00:00:00");
   if (Number.isNaN(fromDate.getTime())) throw new Error("Invalid leave from_date");
 
   const balance = await getProfessionalLeaveBalance(leave.user_id, fromDate);
@@ -606,8 +608,10 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
 }
 
 async function recalcLeaveAttendanceDates(leave, source) {
-  const from = new Date(String(leave.from_date).slice(0, 10));
-  const to = new Date(String(leave.to_date).slice(0, 10));
+  const fromStr = toDateStr(leave.from_date);
+  const toStr = toDateStr(leave.to_date);
+  const from = new Date(fromStr + "T00:00:00");
+  const to = new Date(toStr + "T00:00:00");
   if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return;
 
   for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
@@ -1009,7 +1013,8 @@ const changeLeaveStatus = async (req, res) => {
       let approvedPreview = null;
 
       if (status === "approved") {
-        const fromDateObj = new Date(leave.from_date);
+        const fromDateStr = toDateStr(leave.from_date);
+        const fromDateObj = new Date(fromDateStr + "T00:00:00");
 
         if (Number.isNaN(fromDateObj.getTime())) {
           return res.status(400).json({
