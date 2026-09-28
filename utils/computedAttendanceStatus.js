@@ -4,6 +4,7 @@ import {
   classifyDayPolicy,
   formatDateStr,
   parseDateStr,
+  timeToSeconds,
 } from "./attendancePolicy.js";
 
 const STATUS_LABELS = {
@@ -13,6 +14,7 @@ const STATUS_LABELS = {
   absent: "Absent",
   paid_leave: "Paid Leave",
   unpaid_leave: "Unpaid Leave",
+  mixed_leave: "Mixed Leave",
   leave: "Leave",
   holiday: "Holiday",
   sunday: "Sunday / Weekly Off",
@@ -28,6 +30,7 @@ const POLICY_STATUS_MAP = {
   half_day: "half_day",
   paid_leave: "paid_leave",
   unpaid_leave: "unpaid_leave",
+  mixed_leave: "mixed_leave",
   leave: "leave",
   holiday: "holiday",
   absent: "absent",
@@ -133,6 +136,44 @@ function withComputedFields(record, computed) {
   };
 }
 
+function normalizeToken(value) {
+  return String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+const PAID_LEAVE_TYPES = new Set(["paid_leave", "paid", "earned", "pl"]);
+const UNPAID_LEAVE_TYPES = new Set(["unpaid_leave", "unpaid", "loss_of_pay", "lop"]);
+
+function resolveLeaveContext(record = {}) {
+  const rawStatus = normalizeToken(record.status ?? record.day_status ?? record.attendance_status);
+  const leaveType = normalizeToken(record.leave_type ?? record.leaveType);
+  const leaveStatus = normalizeToken(record.leave_status ?? record.leaveStatus);
+  const durationType = normalizeToken(record.leave_duration_type);
+  const slot = String(record.half_day_slot || "").toUpperCase();
+  const paidDays = Number(record.paid_days ?? record.paidDays ?? 0);
+  const unpaidDays = Number(record.unpaid_days ?? record.unpaidDays ?? 0);
+  const approved = leaveStatus === "approved";
+
+  // Half-day is decided FIRST, so a paid half-day is never read as a full paid-leave day.
+  const isHalfDayLeave =
+    durationType === "half_day" ||
+    (approved && (slot === "SLOT_A" || slot === "SLOT_B" || rawStatus === "half_day"));
+
+  const storedFullLeave = ["paid_leave", "unpaid_leave", "leave"].includes(rawStatus);
+  const isFullDayLeave =
+    !isHalfDayLeave &&
+    (storedFullLeave || (approved && (leaveType !== "" || paidDays > 0 || unpaidDays > 0)));
+
+  let kind = "leave";
+  if (rawStatus === "paid_leave") kind = "paid_leave";
+  else if (rawStatus === "unpaid_leave") kind = "unpaid_leave";
+  else if (PAID_LEAVE_TYPES.has(leaveType) || record.is_paid_leave === true || record.isPaidLeave === true) kind = "paid_leave";
+  else if (UNPAID_LEAVE_TYPES.has(leaveType) || record.is_unpaid_leave === true || record.isUnpaidLeave === true) kind = "unpaid_leave";
+  else if (paidDays > 0 && unpaidDays === 0) kind = "paid_leave";
+  else if (unpaidDays > 0 && paidDays === 0) kind = "unpaid_leave";
+
+  return { isHalfDayLeave, isFullDayLeave, kind };
+}
+
 export function getLiveAttendanceStatus(record = {}, context = {}) {
   const dateStr = normalizeDateStr(context.dateStr || record?.date);
   const todayStr = normalizeDateStr(context.todayStr) || todayDateStr();
@@ -183,88 +224,90 @@ export function getComputedAttendanceStatus(record = {}, context = {}) {
     (dateStr
       ? buildMonthlyLateStats(
           logsByDate,
-          new Date(
-            parseDateStr(dateStr).getFullYear(),
-            parseDateStr(dateStr).getMonth() + 1,
-            0
-          ).getDate(),
+          new Date(parseDateStr(dateStr).getFullYear(), parseDateStr(dateStr).getMonth() + 1, 0).getDate(),
           parseDateStr(dateStr).getFullYear(),
           parseDateStr(dateStr).getMonth() + 1
         )
       : {});
 
   const log = buildPolicyLog(record);
-
-  // Leave must be resolved BEFORE live attendance / punch / sunday / holiday /
-  // missing checkout / absent / classifyDayPolicy — otherwise leave can be
-  // misclassified as absent.
-  const rawStatus = String(
-    record?.status || record?.day_status || record?.attendance_status || ""
-  )
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-
-  const leaveType = String(record?.leave_type || record?.leaveType || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-
-  const isPaidLeave =
-    rawStatus === "paid_leave" ||
-    rawStatus === "paid" ||
-    leaveType === "paid_leave" ||
-    leaveType === "paid" ||
-    record?.is_paid_leave === true ||
-    record?.isPaidLeave === true ||
-    Number(record?.paid_days ?? record?.paidDays ?? 0) > 0;
-
-  const isUnpaidLeave =
-    rawStatus === "unpaid_leave" ||
-    rawStatus === "unpaid" ||
-    leaveType === "unpaid_leave" ||
-    leaveType === "unpaid" ||
-    record?.is_unpaid_leave === true ||
-    record?.isUnpaidLeave === true ||
-    Number(record?.unpaid_days ?? record?.unpaidDays ?? 0) > 0;
-
-  if (isPaidLeave) {
-    return {
-      computed_status: "paid_leave",
-      display_status: "Paid Leave",
-      policy_status: "paid_leave",
-      policy_bucket: "paid_leave",
-      policy_reason: record?.policy_reason || record?.reason || "Paid leave",
-      policy_flags: ["paid_leave"],
-      late_minutes: 0,
-      production_hours: 0,
-      total_break_minutes: Number(record?.total_break_minutes || 0),
-      attendance_track: null,
-      required_checkout_time: null,
-    };
-  }
-
-  if (isUnpaidLeave) {
-    return {
-      computed_status: "unpaid_leave",
-      display_status: "Unpaid Leave",
-      policy_status: "unpaid_leave",
-      policy_bucket: "unpaid_leave",
-      policy_reason: record?.policy_reason || record?.reason || "Unpaid leave",
-      policy_flags: ["unpaid_leave"],
-      late_minutes: 0,
-      production_hours: 0,
-      total_break_minutes: Number(record?.total_break_minutes || 0),
-      attendance_track: null,
-      required_checkout_time: null,
-    };
-  }
-
   const hasPunch = Boolean(log?.office_in || log?.office_out);
+  const leave = resolveLeaveContext(record);
+  const totalBreak = Number(record?.total_break_minutes || 0);
 
+  // ============================================================
+  // IMPORTANT: Half-day leave must NOT determine attendance status
+  // ============================================================
+  // Business rule: Attendance status must be determined by actual
+  // punch data and attendance policy, NOT by leave request type.
+  // However, if punch data exists with leave metadata, calculate
+  // actual attendance status from the punch data.
+  // ============================================================
+
+  // If punch data exists, calculate status from work hours
+  if (hasPunch) {
+    const inSec = timeToSeconds(log.office_in);
+    const outSec = timeToSeconds(log.office_out);
+    const grossWorkSec = Math.max(0, outSec - inSec);
+    const grossWorkHours = grossWorkSec / 3600;
+
+    let calculatedStatus = "absent";
+    let halfDaySlot = null;
+    let prodHours = grossWorkHours;
+
+    if (grossWorkHours >= 6) {
+      calculatedStatus = "full_day";
+    } else if (grossWorkHours >= 3) {
+      calculatedStatus = "half_day";
+      // Determine slot based on check-in time
+      const inMin = inSec / 60;
+      if (inMin < 810) { // Before 13:30
+        halfDaySlot = "SLOT_A"; // Morning
+      } else {
+        halfDaySlot = "SLOT_B"; // Afternoon
+      }
+    }
+
+    return {
+      computed_status: calculatedStatus,
+      display_status: labelFor(calculatedStatus),
+      policy_status: calculatedStatus,
+      policy_bucket: calculatedStatus,
+      policy_reason: "Calculated from punch data",
+      policy_flags: ["punch_data", ...(leave.isFullDayLeave ? ["leave_present"] : [])],
+      half_day_slot: halfDaySlot,
+      late_minutes: calculateLateMinutes(log.office_in),
+      production_hours: prodHours,
+      total_break_minutes: totalBreak,
+      attendance_track: null,
+      required_checkout_time: null,
+    };
+  }
+
+  // 1. Approved full-day leave WINS, even if there is punch data
+  if (leave.isFullDayLeave) {
+    return {
+      computed_status: leave.kind,
+      display_status: labelFor(leave.kind),
+      policy_status: leave.kind,
+      policy_bucket: leave.kind,
+      policy_reason: hasPunch
+        ? "Approved leave takes priority over punch data"
+        : record?.policy_reason || record?.reason || labelFor(leave.kind),
+      policy_flags: [leave.kind, "approved_leave_wins", ...(hasPunch ? ["punch_ignored_on_leave_day"] : [])],
+      late_minutes: 0,
+      production_hours: 0,
+      total_break_minutes: totalBreak,
+      attendance_track: null,
+      required_checkout_time: null,
+    };
+  }
+
+  // 3. Checked in, not checked out yet
   const liveStatus = getLiveAttendanceStatus(record, { ...context, dateStr, todayStr });
   if (liveStatus) return liveStatus;
 
+  // 4. Sunday / company holiday with no punch
   if (!hasPunch && isSunday(dateStr)) {
     return {
       computed_status: "sunday",
@@ -295,33 +338,14 @@ export function getComputedAttendanceStatus(record = {}, context = {}) {
     };
   }
 
-  if (log?.office_in && !log?.office_out) {
-    return {
-      computed_status: "absent",
-      display_status: labelFor("absent"),
-      policy_status: "absent",
-      policy_reason: "Missing check-in or checkout",
-      policy_flags:
-        dateStr && dateStr < todayStr
-          ? ["missing_checkout_previous_date"]
-          : ["missing_checkout"],
-      late_minutes: calculateLateMinutes(log.office_in),
-      production_hours: 0,
-      total_break_minutes: Number(record?.total_break_minutes || 0),
-      attendance_track: null,
-      required_checkout_time: null,
-    };
-  }
-
+  // 5. No punch, no leave data: past = absent, today/future = no_record
   if (!hasPunch && !record?.leave_type && !record?.leave_status) {
+    const status = dateStr && dateStr >= todayStr ? "no_record" : noRecordStatus;
     return {
-      computed_status: noRecordStatus,
-      display_status: labelFor(noRecordStatus),
-      policy_status: noRecordStatus,
-      policy_reason:
-        noRecordStatus === "no_record"
-          ? "No attendance record"
-          : "No attendance record - absent",
+      computed_status: status,
+      display_status: labelFor(status),
+      policy_status: status,
+      policy_reason: status === "no_record" ? "No attendance record" : "No attendance record - absent",
       policy_flags: ["no_attendance_record"],
       late_minutes: 0,
       production_hours: 0,
@@ -331,6 +355,7 @@ export function getComputedAttendanceStatus(record = {}, context = {}) {
     };
   }
 
+  // 6. Normal punch-based policy
   const policy = classifyDayPolicy({ dateStr, log, holidaySet, monthlyLateStats, logsByDate });
   const computedStatus = POLICY_STATUS_MAP[policy.bucket] || "absent";
 

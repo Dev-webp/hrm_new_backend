@@ -19,6 +19,11 @@ import {
   halfDaySlotForSession,
 } from "../utils/leaveRequestPolicy.js";
 import { recalcAttendanceForUserDate } from "./attendanceRoutes.js";
+import {
+  timeToSeconds,
+  classifyDayPolicy,
+  resolveHalfDaySlot,
+} from "../utils/attendancePolicy.js";
 
 const router = express.Router();
 
@@ -345,30 +350,134 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
       paidRemaining = allocation.paidRemaining;
 
       // ========================================================
-      // FINAL ATTENDANCE STATUS
-      //
-      // IMPORTANT:
-      // If leave request is half-day -> status = half_day
-      // If leave request is full-day:
-      //   - If paid -> paid_leave
-      //   - If unpaid -> unpaid_leave
+      // HALF-DAY LEAVE: NEVER WRITE ATTENDANCE STATUS
+      // ========================================================
+      // Business rule: Half-day leave must never set or overwrite attendance_records.status
+      // Attendance status must be determined independently by the attendance system
+      // Only leave metadata is written for payroll purposes
       // ========================================================
 
-      let finalStatus;
-      let finalLeaveType;
-      let finalHalfDaySlot = halfDaySlot;
+      if (durationType === "half_day") {
+        console.log(
+          "HALF-DAY LEAVE SYNC:",
+          dateStr,
+          "Only writing leave metadata, NOT status"
+        );
 
-      if (durationType === "half_day" || halfDaySlot) {
-        // Half-day leave request - use half_day status
-        finalStatus = "half_day";
-        finalLeaveType = allocation.leaveType; // Still track paid/unpaid for payroll
-        finalHalfDaySlot = halfDaySlot || "INVALID";
-        console.log("HALF-DAY LEAVE REQUEST:", { dateStr, session: leave.half_day_session, slot: finalHalfDaySlot });
-      } else {
-        // Full-day leave request - use paid_leave or unpaid_leave status
-        finalStatus = allocation.status;
-        finalLeaveType = allocation.leaveType;
-        finalHalfDaySlot = null;
+        await pool.query(
+          `
+          INSERT INTO attendance_records (
+            user_id,
+            date,
+            leave_type,
+            leave_status,
+            is_paid_leave,
+            leave_request_id,
+            half_day_slot,
+            branch,
+            department
+          )
+          VALUES (
+            $1,
+            $2::date,
+            $3,
+            'approved',
+            $4,
+            $5,
+            $6,
+            $7,
+            $8
+          )
+          ON CONFLICT (user_id, date)
+          DO UPDATE SET
+            leave_type = EXCLUDED.leave_type,
+            leave_status = EXCLUDED.leave_status,
+            is_paid_leave = EXCLUDED.is_paid_leave,
+            leave_request_id = EXCLUDED.leave_request_id,
+            half_day_slot = EXCLUDED.half_day_slot,
+            -- Do NOT touch status, check_in_time, check_out_time
+            branch = COALESCE(EXCLUDED.branch, attendance_records.branch),
+            department = COALESCE(EXCLUDED.department, attendance_records.department),
+            updated_at = CURRENT_TIMESTAMP
+          `,
+          [
+            leave.user_id,
+            dateStr,
+            allocation.leaveType,
+            isPaid,
+            leave.id,
+            halfDaySlot,
+            user.branch || leave.branch || null,
+            user.department || leave.department || null,
+          ]
+        );
+
+        // Trigger attendance recalculation to let attendance engine set the status
+        await recalcAttendanceForUserDate(leave.user_id, dateStr, { source: "half_day_leave_sync" });
+
+        console.log("✅ HALF-DAY LEAVE SYNC COMPLETE:", dateStr);
+        current.setDate(current.getDate() + 1);
+        continue;
+      }
+
+      // ========================================================
+      // FULL-DAY LEAVE: Keep existing behavior
+      // ========================================================
+
+      // Check for existing punch data
+      const existingAttendance = await pool.query(
+        `
+        SELECT check_in_time, check_out_time, status
+        FROM attendance_records
+        WHERE user_id = $1 AND date = $2::date
+        `,
+        [leave.user_id, dateStr]
+      );
+
+      const hasPunch = existingAttendance.rows.length > 0 && 
+                      (existingAttendance.rows[0].check_in_time || existingAttendance.rows[0].check_out_time);
+
+      let finalStatus = allocation.status;
+      let finalLeaveType = allocation.leaveType;
+      let calculatedHalfDaySlot = halfDaySlot;
+
+      // If employee has punch data, calculate actual status
+      if (hasPunch) {
+        const rec = existingAttendance.rows[0];
+        const checkIn = rec.check_in_time;
+        const checkOut = rec.check_out_time;
+        
+        if (checkIn && checkOut) {
+          // Calculate work hours
+          const inSec = timeToSeconds(checkIn);
+          const outSec = timeToSeconds(checkOut);
+          const grossWorkSec = Math.max(0, outSec - inSec);
+          const grossWorkHours = grossWorkSec / 3600;
+          
+          // Use attendance policy to determine if it qualifies as half-day
+          const log = {
+            office_in: checkIn,
+            office_out: checkOut,
+            total_break_minutes: 0 // Simplified for sync
+          };
+          
+          const { bucket } = classifyDayPolicy({
+            dateStr,
+            log,
+            holidaySet: holidayDates,
+            logsByDate: {}
+          });
+          
+          // If work qualifies as half-day, use half_day status
+          if (bucket === "half_day") {
+            finalStatus = "half_day";
+            calculatedHalfDaySlot = resolveHalfDaySlot(log);
+            console.log("HALF-DAY WORK DETECTED:", dateStr, "Work hours:", grossWorkHours.toFixed(2));
+          } else if (bucket === "full_day" || bucket === "present") {
+            finalStatus = "full_day";
+            console.log("FULL-DAY WORK DETECTED:", dateStr, "Work hours:", grossWorkHours.toFixed(2));
+          }
+        }
       }
 
       console.log(
@@ -380,12 +489,16 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
           leave_type: finalLeaveType,
           is_paid_leave: isPaid,
           leave_request_id: leave.id,
-          half_day_slot: finalHalfDaySlot,
+          has_punch: hasPunch,
         }
       );
 
       // ========================================================
-      // INSERT / UPDATE ATTENDANCE RECORD
+      // INSERT / UPDATE ATTENDANCE RECORD (FULL-DAY LEAVE ONLY)
+      // ========================================================
+      // IMPORTANT: Preserve existing punch data (check_in_time, check_out_time, etc.)
+      // Only update status and leave metadata if no punch data exists,
+      // or if status needs to be updated based on punch data
       // ========================================================
 
       await pool.query(
@@ -431,9 +544,21 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
 
           half_day_slot = EXCLUDED.half_day_slot,
 
-          branch = EXCLUDED.branch,
+          branch = COALESCE(EXCLUDED.branch, attendance_records.branch),
 
-          department = EXCLUDED.department,
+          department = COALESCE(EXCLUDED.department, attendance_records.department),
+
+          -- Preserve existing punch data
+          check_in_time = COALESCE(attendance_records.check_in_time, EXCLUDED.check_in_time),
+
+          check_out_time = COALESCE(attendance_records.check_out_time, EXCLUDED.check_out_time),
+
+          total_break_minutes = COALESCE(attendance_records.total_break_minutes, EXCLUDED.total_break_minutes),
+
+          late_minutes = COALESCE(attendance_records.late_minutes, EXCLUDED.late_minutes),
+
+          -- For leave days, production_hours should be 0
+          production_hours = CASE WHEN EXCLUDED.status IN ('paid_leave', 'unpaid_leave', 'half_day') THEN 0 ELSE COALESCE(attendance_records.production_hours, EXCLUDED.production_hours) END,
 
           updated_at = CURRENT_TIMESTAMP
         `,
@@ -444,7 +569,7 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
           finalLeaveType,
           isPaid,
           leave.id,
-          finalHalfDaySlot,
+          calculatedHalfDaySlot,
           user.branch || leave.branch || null,
           user.department || leave.department || null,
         ]
@@ -481,27 +606,12 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
 }
 
 async function recalcLeaveAttendanceDates(leave, source) {
-  // ============================================================
-  // SAFE DATE HANDLING
-  // ============================================================
-  // Use toLocalDateString to avoid UTC timezone shifts
-  // ============================================================
-
-  const fromDateStr = toLocalDateString(leave.from_date);
-  const toDateStr = toLocalDateString(leave.to_date);
-
-  if (!fromDateStr || !toDateStr) return;
-
-  const from = new Date(`${fromDateStr}T00:00:00`);
-  const to = new Date(`${toDateStr}T00:00:00`);
-
+  const from = new Date(String(leave.from_date).slice(0, 10));
+  const to = new Date(String(leave.to_date).slice(0, 10));
   if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return;
 
   for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    const dateStr = `${year}-${month}-${day}`;
+    const dateStr = d.toISOString().slice(0, 10);
     await recalcAttendanceForUserDate(leave.user_id, dateStr, { source });
   }
 }
@@ -780,7 +890,7 @@ router.get(
 router.get(
   "/manager-leaves/pending-count",
   verifyToken,
-  authorizeRoles("OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     try {
       const params = [];

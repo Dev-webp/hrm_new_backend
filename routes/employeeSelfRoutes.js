@@ -3,9 +3,9 @@ import { pool } from "../middleware/db.js";
 import { canAccessUserAttendance, verifyToken } from "../middleware/auth.js";
 import { calculateLateMinutes, formatDateStr } from "../utils/attendancePolicy.js";
 import {
+  assertNotOnFullDayLeave,
   getDisplayAttendanceStatus,
   recalcAttendanceForUserDate,
-  syncInvoiceBreakStatus,
 } from "./attendanceRoutes.js";
 import { attachTotalBreakMinutes, calculateBreakMinutesFromRows } from "../utils/breakMinutes.js";
 
@@ -243,6 +243,8 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
     const currentTime =
       now.toTimeString().split(' ')[0];
 
+    await assertNotOnFullDayLeave(userId, date);
+
     const userResult = await pool.query(
       `SELECT branch, department
        FROM users
@@ -279,7 +281,7 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
         `
         UPDATE attendance_records
         SET check_in_time = $1,
-            status = $2,
+            status = CASE WHEN leave_request_id IS NOT NULL THEN status ELSE $2 END,
             late_minutes = $3,
             updated_at = CURRENT_TIMESTAMP
         WHERE user_id = $4 AND date = $5
@@ -341,7 +343,7 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
 
     console.error("POST /employee/check-in error:", err);
 
-    res.status(500).json({
+    res.status(err.statusCode || 500).json({
       message: err.message
     });
   }
@@ -465,7 +467,7 @@ router.get("/employee/attendance-summary", verifyToken, async (req, res) => {
          COUNT(*) FILTER (WHERE status = 'half_day') AS half_days,
          COUNT(*) FILTER (WHERE status = 'absent') AS absent_days,
          COUNT(*) FILTER (
-           WHERE status = 'leave'
+           WHERE status IN ('leave','paid_leave','unpaid_leave')
              AND COALESCE(leave_status, 'approved') = 'approved'
          ) AS leave_days,
          COUNT(*) FILTER (
@@ -804,14 +806,6 @@ router.put("/employee/my-breaks", verifyToken, async (req, res) => {
     } catch (recalcErr) {
       console.warn("Employee break recalc attendance warning:", recalcErr.message);
     }
-
-    // Sync Invoice availability based on active break
-    const hasActiveBreak = Object.values(breaks).some(
-      (b) => b && typeof b === "object" && b.start && !b.end
-    ) || (Array.isArray(breaks.break3Sessions) &&
-      breaks.break3Sessions.some((b) => b.start && !b.end));
-
-    await syncInvoiceBreakStatus(req.user.email, !hasActiveBreak);
 
     const breakPolicy = await applyBreakAttendancePolicy(req.user.id, date);
     res.json({

@@ -120,7 +120,7 @@ router.get(
 router.get(
   "/notifications/unread-count",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     try {
       res.json({ count: await unreadCountFor(req.user) });

@@ -84,14 +84,7 @@ function finiteNumber(value, fallback = 0) {
 
 function safeDateString(value, fallback = null) {
   if (!value) return fallback;
-  // If it's a Date object, extract date parts directly to avoid UTC timezone shifts
-  if (value instanceof Date) {
-    const year = value.getFullYear();
-    const month = String(value.getMonth() + 1).padStart(2, "0");
-    const day = String(value.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
-  }
-  const raw = String(value).slice(0, 10);
+  const raw = value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : fallback;
 }
 
@@ -251,6 +244,19 @@ WHERE user_id = $1
 }
 
 // ============================================================
+// Helper: Iterate dates using UTC to avoid timezone bugs
+// ============================================================
+function eachDate(from, to) {
+  const [fy, fm, fd] = from.split("-").map(Number);
+  const [ty, tm, td] = to.split("-").map(Number);
+  const out = [];
+  for (let t = Date.UTC(fy, fm - 1, fd); t <= Date.UTC(ty, tm - 1, td); t += 86400000) {
+    out.push(new Date(t).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+// ============================================================
 // STEP 2: Build calendar maps
 // ============================================================
 function buildCalendarMaps(data) {
@@ -260,14 +266,20 @@ function buildCalendarMaps(data) {
   const attMap     = new Map(attendance.map(a => [a.date, a]));
 
   const approvedLeaveSet = new Set();
+  const halfDayLeaveMap = new Map(); // date -> { paid, unpaid } (each 0..0.5)
+  
   for (const leave of leaves) {
-    const start = new Date(leave.from_date + "T00:00:00");
-    const end   = new Date(leave.to_date   + "T00:00:00");
-    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-      const year = d.getFullYear();
-      const month = String(d.getMonth() + 1).padStart(2, "0");
-      const day = String(d.getDate()).padStart(2, "0");
-      approvedLeaveSet.add(`${year}-${month}-${day}`);
+    const isHalf = String(leave.leave_duration_type || "").toLowerCase() === "half_day";
+    for (const ds of eachDate(leave.from_date, leave.to_date)) {
+      if (isHalf) {
+        const paid = Math.min(0.5, Math.max(0, Number(leave.paid_days) || 0));
+        const unpaid = Number(leave.unpaid_days) > 0
+          ? Math.min(0.5, Number(leave.unpaid_days))
+          : round2(0.5 - paid);
+        halfDayLeaveMap.set(ds, { paid, unpaid });
+      } else {
+        approvedLeaveSet.add(ds);
+      }
     }
   }
 
@@ -284,7 +296,10 @@ function buildCalendarMaps(data) {
     else                         workingDays.push(ds);
   }
 
-  return { holidayMap, attMap, approvedLeaveSet, allDates, activeDates, sundayDates, holidayDates, workingDays };
+  return { 
+    holidayMap, attMap, approvedLeaveSet, halfDayLeaveMap,
+    allDates, activeDates, sundayDates, holidayDates, workingDays 
+  };
 }
 
 // ============================================================
@@ -304,18 +319,30 @@ function isGraceLateLogin(rec = {}) {
     && checkInMinutes < AFTERNOON_HALF_DAY_START_MINUTES;
 }
 
-function tallyAttendance(workingDays, attMap, approvedLeaveSet, holidayMap = new Map()) {
+function tallyAttendance(workingDays, attMap, approvedLeaveSet, holidayMap = new Map(), halfDayLeaveMap = new Map()) {
   let fullDays           = 0;
   let halfDays           = 0;
   let absentDays         = 0;        // raw absent (no attendance record, no approved leave)
   let formalLeaveCount   = 0;        // approved leave_requests days that fall on working days
   let lateLogins         = 0;
+  let halfLeavePaid      = 0;
+  let halfLeaveUnpaid    = 0;
+  let halfLeaveAbsent    = 0;
   const lateDates        = [];
   const halfDayDates     = [];
   const absentDates      = [];
 
   for (const ds of workingDays) {
     const rec = attMap.get(ds);
+
+    const hl = halfDayLeaveMap.get(ds);
+    if (hl) {
+      halfLeavePaid += hl.paid;
+      halfLeaveUnpaid += hl.unpaid;
+      const worked = rec && (rec.check_in_time || rec.check_out_time);
+      if (!worked) halfLeaveAbsent += 0.5; // other half not worked
+      continue; // never also counted as halfDays / formalLeave
+    }
 
     if (!rec) {
       // No check-in at all
@@ -339,7 +366,8 @@ function tallyAttendance(workingDays, attMap, approvedLeaveSet, holidayMap = new
     } else if (status === "half_day") {
       halfDays++;
       halfDayDates.push(ds);
-    } else if (status === "leave") {
+    } else if (["leave", "paid_leave", "unpaid_leave"].includes(status)) {
+      // Fix (d): paid_leave and unpaid_leave should count as formal leave
       if (approvedLeaveSet.has(ds)) formalLeaveCount++;
       else { absentDays++; absentDates.push(ds); }
     } else {
@@ -354,6 +382,7 @@ function tallyAttendance(workingDays, attMap, approvedLeaveSet, holidayMap = new
   return {
     fullDays, halfDays, absentDays, formalLeaveCount,
     lateLogins, lateLoginHalfDays, lateDates, halfDayDates, absentDates,
+    halfLeavePaid, halfLeaveUnpaid, halfLeaveAbsent,
   };
 }
 
@@ -395,29 +424,25 @@ function computeApprovedLeaveSplit(leaves) {
 // paidLeaveUsed = min(quota, totalAbsences)
 // unpaidLeaveDays = totalAbsences - paidLeaveUsed
 // ============================================================
-function computePaidLeave(joiningDate, monthStart, absentDays, formalLeaveCount) {
+function computePaidLeave(joiningDate, monthStart, absentDays, formalLeaveCount, halfLeavePaid = 0) {
   const monthsCompleted  = monthsBetween(joiningDate, monthStart);
   const eligible         = monthsCompleted >= PAID_LEAVE_ELIGIBILITY_MONTHS;
   const allowedPaidLeave = eligible ? PAID_LEAVE_PER_MONTH : 0;
 
 
-
-
-
-  // Total days the employee was NOT present on working days
+  // Half-day paid leave consumes quota first
+  const usedByHalf   = Math.min(halfLeavePaid, allowedPaidLeave);
+  const quotaLeft    = allowedPaidLeave - usedByHalf;
   const totalAbsences = absentDays + formalLeaveCount;
+  const paidFromAbs   = Math.min(quotaLeft, totalAbsences);
 
-  // Paid leave absorbs absences up to quota
-  const paidLeaveUsed  = Math.min(allowedPaidLeave, totalAbsences);
-  // Remaining absences beyond quota are unpaid
-  const unpaidLeaveDays = Math.max(0, totalAbsences - paidLeaveUsed);
 
   return {
     monthsCompleted,
     eligible,
     allowedPaidLeave,
-    paidLeaveUsed,
-    unpaidLeaveDays,
+    paidLeaveUsed: usedByHalf + paidFromAbs,
+    unpaidLeaveDays: Math.max(0, totalAbsences - paidFromAbs),
     totalAbsences,
   };
 }
@@ -492,21 +517,22 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
   if (monthlySalary <= 0) throw new Error("Employee has no salary configured");
 
   const maps = buildCalendarMaps(data);
-  const { sundayDates, holidayDates, workingDays, attMap, approvedLeaveSet, holidayMap, activeDates } = maps;
+  const { sundayDates, holidayDates, workingDays, attMap, approvedLeaveSet, holidayMap, activeDates, halfDayLeaveMap } = maps;
 
-  const tally = tallyAttendance(workingDays, attMap, approvedLeaveSet, holidayMap);
+  const tally = tallyAttendance(workingDays, attMap, approvedLeaveSet, holidayMap, halfDayLeaveMap);
 
   // ✅ Pass BOTH absentDays and formalLeaveCount to the fixed function
   const approvedLeaveSplit = computeApprovedLeaveSplit(data.leaves);
   const leaveCalc = computePaidLeave(
     employee.joining_date,
     monthStart,
-    Number(tally.absentDays || 0),
-    Number(tally.formalLeaveCount || 0)
+    Number(tally.absentDays || 0) + Number(tally.halfLeaveAbsent || 0),
+    Number(tally.formalLeaveCount || 0),
+    Number(tally.halfLeavePaid || 0)
   );
   leaveCalc.penaltyDays = approvedLeaveSplit.penaltyDays;
   leaveCalc.paidLeaveUsed = round2(leaveCalc.paidLeaveUsed);
-  leaveCalc.unpaidLeaveDays = round2(leaveCalc.unpaidLeaveDays);
+  leaveCalc.unpaidLeaveDays = round2(leaveCalc.unpaidLeaveDays) + Number(tally.halfLeaveUnpaid || 0); // ledger-unpaid half days
   leaveCalc.totalAbsences = round2(leaveCalc.totalAbsences);
   leaveCalc.totalAbsenceDays = leaveCalc.totalAbsences;
 
