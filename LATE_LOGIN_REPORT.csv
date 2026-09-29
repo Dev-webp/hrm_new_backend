@@ -1,0 +1,313 @@
+user_id,name,email,department,branch,year,month,late_count,delta,delta_direction
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2025,10,0,,no_previous_month
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2025,11,0,0,flat
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2025,12,0,0,flat
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2026,1,0,0,flat
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2026,2,0,0,flat
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2026,3,0,0,flat
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2026,4,0,0,flat
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2026,5,0,0,flat
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2026,6,1,1,up
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2026,7,1,0,flat
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2026,8,0,-1,down
+3,"Bangalore Manager","manager.blr@hrms.com","Branch Manager","Bangalore",2026,9,1,1,up
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2025,10,0,,no_previous_month
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2025,11,0,0,flat
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2025,12,0,0,flat
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2026,1,0,0,flat
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2026,2,0,0,flat
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2026,3,0,0,flat
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2026,4,0,0,flat
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2026,5,0,0,flat
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2026,6,0,0,flat
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2026,7,1,1,up
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2026,8,0,-1,down
+37,"BHAVYA","bhavya@vjcoverseas.com","IT Department","Bangalore",2026,9,2,2,up
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2025,10,0,,no_previous_month
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2025,11,0,0,flat
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2025,12,0,0,flat
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,1,0,0,flat
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,2,0,0,flat
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,3,0,0,flat
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,4,0,0,flat
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,5,0,0,flat
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,6,0,0,flat
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,7,1,1,up
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,8,0,-1,down
+32,"CAMMERON MARCELLO MOORE","cammeron@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,9,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2025,10,0,,no_previous_month
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2025,11,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2025,12,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2026,1,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2026,2,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2026,3,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2026,4,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2026,5,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2026,6,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2026,7,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2026,8,0,0,flat
+48,"DEEPAK","admin@vjcoverseas.com","Administration","Hyderabad",2026,9,0,0,flat
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2025,10,0,,no_previous_month
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2025,11,0,0,flat
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2025,12,0,0,flat
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2026,1,0,0,flat
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2026,2,0,0,flat
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2026,3,0,0,flat
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2026,4,0,0,flat
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2026,5,1,1,up
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2026,6,4,3,up
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2026,7,1,-3,down
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2026,8,0,-1,down
+2,"Hyderabad Manager","manager.hyd@hrms.com","Branch Manager","Hyderabad",2026,9,0,0,flat
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2025,10,0,,no_previous_month
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2025,11,0,0,flat
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2025,12,0,0,flat
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,1,0,0,flat
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,2,0,0,flat
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,3,0,0,flat
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,4,0,0,flat
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,5,0,0,flat
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,6,0,0,flat
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,7,1,1,up
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,8,0,-1,down
+28,"JAGAN RAO","jagan.rao@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,9,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2025,10,0,,no_previous_month
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2025,11,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2025,12,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2026,1,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2026,2,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2026,3,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2026,4,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2026,5,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2026,6,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2026,7,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2026,8,0,0,flat
+49,"KIRAN VIKHARE","kiran@vjcoverseas.com","MIS","Hyderabad",2026,9,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2025,10,0,,no_previous_month
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2025,11,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2025,12,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2026,1,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2026,2,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2026,3,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2026,4,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2026,5,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2026,6,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2026,7,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2026,8,0,0,flat
+30,"MOHAMMAD MUSHAID KHAN","study@vjcoverseas.com","STUDY","Hyderabad",2026,9,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2025,10,0,,no_previous_month
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2025,11,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2025,12,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2026,1,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2026,2,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2026,3,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2026,4,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2026,5,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2026,6,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2026,7,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2026,8,0,0,flat
+31,"MOHAMMAD NAWAZ HUSSAIN","tl.study@vjcoverseas.com","STUDY","Hyderabad",2026,9,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2025,10,0,,no_previous_month
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2025,11,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2025,12,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,1,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,2,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,3,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,4,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,5,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,6,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,7,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,8,0,0,flat
+36,"MOHAMMAD ZAKIR PASHA","zakir@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,9,0,0,flat
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2025,10,0,,no_previous_month
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2025,11,0,0,flat
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2025,12,0,0,flat
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,1,0,0,flat
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,2,0,0,flat
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,3,0,0,flat
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,4,0,0,flat
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,5,0,0,flat
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,6,1,1,up
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,7,0,-1,down
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,8,0,0,flat
+33,"NAND KUMAR","kumar@vjcoverseas.com","IMMIGRATION & SALES","Hyderabad",2026,9,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2025,10,0,,no_previous_month
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2025,11,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2025,12,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,1,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,2,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,3,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,4,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,5,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,6,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,7,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,8,0,0,flat
+42,"PABAN KUMAR","paban@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,9,1,1,up
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2025,10,0,,no_previous_month
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2025,11,0,0,flat
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2025,12,0,0,flat
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2026,1,0,0,flat
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2026,2,0,0,flat
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2026,3,0,0,flat
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2026,4,0,0,flat
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2026,5,0,0,flat
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2026,6,0,0,flat
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2026,7,0,0,flat
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2026,8,0,0,flat
+34,"PRIYANKA VADDI","process.immigration@vjcoverseas.com","Process Team","Hyderabad",2026,9,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2025,10,0,,no_previous_month
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2025,11,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2025,12,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2026,1,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2026,2,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2026,3,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2026,4,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2026,5,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2026,6,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2026,7,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2026,8,0,0,flat
+40,"RAJYA LAKSHMI","study.usa@vjcoverseas.com","STUDY","Hyderabad",2026,9,1,1,up
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2025,10,0,,no_previous_month
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2025,11,0,0,flat
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2025,12,0,0,flat
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2026,1,0,0,flat
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2026,2,0,0,flat
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2026,3,0,0,flat
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2026,4,0,0,flat
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2026,5,0,0,flat
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2026,6,0,0,flat
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2026,7,0,0,flat
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2026,8,0,0,flat
+47,"RAM","ram@vjcoverseas.com","IT Department","Hyderabad",2026,9,0,0,flat
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2025,10,0,,no_previous_month
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2025,11,0,0,flat
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2025,12,0,0,flat
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2026,1,0,0,flat
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2026,2,0,0,flat
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2026,3,0,0,flat
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2026,4,0,0,flat
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2026,5,0,0,flat
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2026,6,0,0,flat
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2026,7,0,0,flat
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2026,8,1,1,up
+43,"RINKU GORAIN","banglore@vjcoverseas.com","FRONT DESK","Bangalore",2026,9,0,-1,down
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2025,10,0,,no_previous_month
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2025,11,0,0,flat
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2025,12,0,0,flat
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2026,1,0,0,flat
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2026,2,0,0,flat
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2026,3,0,0,flat
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2026,4,0,0,flat
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2026,5,0,0,flat
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2026,6,0,0,flat
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2026,7,0,0,flat
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2026,8,0,0,flat
+45,"SAI KUMAR","sai@vjcoverseas.com","Process Team","Hyderabad",2026,9,0,0,flat
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2025,10,0,,no_previous_month
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2025,11,0,0,flat
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2025,12,0,0,flat
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,1,0,0,flat
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,2,0,0,flat
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,3,0,0,flat
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,4,0,0,flat
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,5,0,0,flat
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,6,0,0,flat
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,7,1,1,up
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,8,0,-1,down
+39,"SANDEEP","sandeep@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,9,2,2,up
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2025,10,0,,no_previous_month
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2025,11,0,0,flat
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2025,12,0,0,flat
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2026,1,0,0,flat
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2026,2,0,0,flat
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2026,3,0,0,flat
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2026,4,0,0,flat
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2026,5,0,0,flat
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2026,6,0,0,flat
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2026,7,3,3,up
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2026,8,1,-2,down
+46,"SRIKANTH","srikanth@vjcoverseas.com","IT Department","Hyderabad",2026,9,1,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2025,10,0,,no_previous_month
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2025,11,0,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2025,12,0,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2026,1,0,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2026,2,0,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2026,3,0,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2026,4,0,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2026,5,0,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2026,6,0,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2026,7,0,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2026,8,0,0,flat
+35,"SUMAN","suman@vjcoverseas.com","TRAVEL","Hyderabad",2026,9,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2025,10,0,,no_previous_month
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2025,11,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2025,12,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,1,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,2,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,3,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,4,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,5,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,6,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,7,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,8,0,0,flat
+44,"SUSMITHA","susmitha@vjcoverseas.com","IMMIGRATION & SALES","Bangalore",2026,9,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2025,10,0,,no_previous_month
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2025,11,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2025,12,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2026,1,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2026,2,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2026,3,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2026,4,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2026,5,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2026,6,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2026,7,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2026,8,0,0,flat
+51,"tester","tester12@vjcoverseas.com","STUDY","Hyderabad",2026,9,0,0,flat
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2025,10,0,,no_previous_month
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2025,11,0,0,flat
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2025,12,0,0,flat
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2026,1,0,0,flat
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2026,2,0,0,flat
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2026,3,0,0,flat
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2026,4,0,0,flat
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2026,5,0,0,flat
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2026,6,0,0,flat
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2026,7,1,1,up
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2026,8,0,-1,down
+24,"TESTER_1","priyanka.vaddi@vjcoverseas.com","Process Team","Hyderabad",2026,9,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2025,10,0,,no_previous_month
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2025,11,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2025,12,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2026,1,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2026,2,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2026,3,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2026,4,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2026,5,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2026,6,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2026,7,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2026,8,0,0,flat
+29,"VIJAYA LAKSHMI","lakshmi.hyd@vjcoverseas.com","Process Team","Hyderabad",2026,9,0,0,flat
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2025,10,0,,no_previous_month
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2025,11,0,0,flat
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2025,12,0,0,flat
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,1,0,0,flat
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,2,0,0,flat
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,3,0,0,flat
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,4,0,0,flat
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,5,0,0,flat
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,6,0,0,flat
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,7,2,2,up
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,8,0,-2,down
+38,"VIKRANTH","vikranth@vjcoverseas.com","Digital Marketing Team","Hyderabad",2026,9,2,2,up
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2025,10,0,,no_previous_month
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2025,11,0,0,flat
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2025,12,0,0,flat
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2026,1,0,0,flat
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2026,2,0,0,flat
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2026,3,0,0,flat
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2026,4,0,0,flat
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2026,5,0,0,flat
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2026,6,1,1,up
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2026,7,2,1,up
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2026,8,0,-2,down
+41,"YAMINI","frontdesk@vjcoverseas.com","FRONT DESK","Hyderabad",2026,9,0,0,flat

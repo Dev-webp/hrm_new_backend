@@ -42,6 +42,7 @@ describe("late login detection", () => {
   it("on-time at 10:00 is not late", () => {
     const r = evaluateLateLogin({ office_in: "10:00:00" });
     assert.equal(r.is_late, false);
+    assert.equal(r.is_countable_late, false);
   });
 
   it("10:10 is on-time grace and not late", () => {
@@ -49,20 +50,100 @@ describe("late login detection", () => {
     assert.equal(r.is_late, false);
     assert.equal(r.is_on_time_grace, true);
     assert.equal(r.is_beyond_grace, false);
+    assert.equal(r.is_countable_late, false);
   });
 
-  it("10:20 is in the late login window", () => {
-    const r = evaluateLateLogin({ office_in: "10:20:00" });
+  it("10:14:59 is on-time grace and not countable late", () => {
+    const r = evaluateLateLogin({ office_in: "10:14:59" });
+    assert.equal(r.is_late, false);
+    assert.equal(r.is_on_time_grace, true);
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("10:15:00 is countable late", () => {
+    const r = evaluateLateLogin({ office_in: "10:15:00" });
     assert.equal(r.is_late, true);
     assert.equal(r.is_late_window, true);
+    assert.equal(r.is_countable_late, true);
     assert.equal(r.is_beyond_grace, false);
   });
 
-  it("10:31 is late and beyond the full-day login window", () => {
+  it("10:15:01 is countable late", () => {
+    const r = evaluateLateLogin({ office_in: "10:15:01" });
+    assert.equal(r.is_late, true);
+    assert.equal(r.is_late_window, true);
+    assert.equal(r.is_countable_late, true);
+    assert.equal(r.is_beyond_grace, false);
+  });
+
+  it("10:20 is in the late login window and countable", () => {
+    const r = evaluateLateLogin({ office_in: "10:20:00" });
+    assert.equal(r.is_late, true);
+    assert.equal(r.is_late_window, true);
+    assert.equal(r.is_countable_late, true);
+    assert.equal(r.is_beyond_grace, false);
+  });
+
+  it("10:29:00 is countable late", () => {
+    const r = evaluateLateLogin({ office_in: "10:29:00" });
+    assert.equal(r.is_late, true);
+    assert.equal(r.is_late_window, true);
+    assert.equal(r.is_countable_late, true);
+    assert.equal(r.is_beyond_grace, false);
+  });
+
+  it("10:29:59 is countable late", () => {
+    const r = evaluateLateLogin({ office_in: "10:29:59" });
+    assert.equal(r.is_late, true);
+    assert.equal(r.is_late_window, true);
+    assert.equal(r.is_countable_late, true);
+    assert.equal(r.is_beyond_grace, false);
+  });
+
+  it("10:30:00 is late but not countable", () => {
+    const r = evaluateLateLogin({ office_in: "10:30:00" });
+    assert.equal(r.is_late, true);
+    assert.equal(r.is_late_window, false);
+    assert.equal(r.is_beyond_grace, true);
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("10:30:01 is late but not countable", () => {
+    const r = evaluateLateLogin({ office_in: "10:30:01" });
+    assert.equal(r.is_late, true);
+    assert.equal(r.is_late_window, false);
+    assert.equal(r.is_beyond_grace, true);
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("10:31 is late and beyond the full-day login window but not countable", () => {
     const r = evaluateLateLogin({ office_in: "10:31:00" });
     assert.equal(r.is_late, true);
     assert.equal(r.is_late_window, false);
     assert.equal(r.is_beyond_grace, true);
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("11:00:00 is late but not countable", () => {
+    const r = evaluateLateLogin({ office_in: "11:00:00" });
+    assert.equal(r.is_late, true);
+    assert.equal(r.is_late_window, false);
+    assert.equal(r.is_beyond_grace, true);
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("11:59:59 is late but not countable", () => {
+    const r = evaluateLateLogin({ office_in: "11:59:59" });
+    assert.equal(r.is_late, true);
+    assert.equal(r.is_late_window, false);
+    assert.equal(r.is_beyond_grace, true);
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("12:00:00 is not late (afternoon half-day start)", () => {
+    const r = evaluateLateLogin({ office_in: "12:00:00" });
+    assert.equal(r.is_late, true); // 12:00:00 is at the boundary, still considered late for attendance
+    assert.equal(r.is_countable_late, false);
   });
 });
 
@@ -503,7 +584,7 @@ describe("proxy detection logic", () => {
 });
 
 describe("monthly late count", () => {
-  it("counts all late-window logins with no monthly cap", () => {
+  it("counts all countable late-window logins (10:15-10:29) with no monthly cap", () => {
     const logs = {};
     for (let d = 1; d <= 7; d += 1) {
       const ds = `2026-05-${String(d).padStart(2, "0")}`;
@@ -516,7 +597,7 @@ describe("monthly late count", () => {
     assert.deepEqual(stats.exceeded_dates, []);
   });
 
-  it("counts morning-track 10:15 or later logins as late, excluding afternoon track", () => {
+  it("counts morning-track 10:15-10:29 logins as countable late, excluding 10:30+", () => {
     const logs = {
       "2026-05-01": { office_in: "10:01:00" },
       "2026-05-02": { office_in: "10:20:00" },
@@ -527,9 +608,109 @@ describe("monthly late count", () => {
       "2026-05-07": { office_in: "10:29:00" },
     };
     const stats = buildMonthlyLateStats(logs, 31, 2026, 5);
-    assert.equal(stats.late_login_count, 4);
+    assert.equal(stats.late_login_count, 3); // Only 10:20, 10:15, 10:29 are countable
     assert.equal(stats.within_grace_late_count, 3);
-    assert.equal(stats.beyond_grace_late_count, 1);
+    assert.equal(stats.beyond_grace_late_count, 1); // 10:31 is beyond grace but not countable
+  });
+
+  it("10:30 login does not increase late_count", () => {
+    const logs = {
+      "2026-05-01": { office_in: "10:30:00" },
+    };
+    const stats = buildMonthlyLateStats(logs, 31, 2026, 5);
+    assert.equal(stats.late_login_count, 0);
+  });
+
+  it("11:00 login does not increase late_count", () => {
+    const logs = {
+      "2026-05-01": { office_in: "11:00:00" },
+    };
+    const stats = buildMonthlyLateStats(logs, 31, 2026, 5);
+    assert.equal(stats.late_login_count, 0);
+  });
+
+  it("boundary test: 10:14, 10:15, 10:29, 10:30, 11:00", () => {
+    const logs = {
+      "2026-05-01": { office_in: "10:14:00" },
+      "2026-05-02": { office_in: "10:15:00" },
+      "2026-05-03": { office_in: "10:29:00" },
+      "2026-05-04": { office_in: "10:30:00" },
+      "2026-05-05": { office_in: "11:00:00" },
+    };
+    const stats = buildMonthlyLateStats(logs, 31, 2026, 5);
+    assert.equal(stats.late_login_count, 2); // Only 10:15 and 10:29 are countable
+  });
+
+  it("is_late still true for 10:30+ for attendance classification", () => {
+    const r = evaluateLateLogin({ office_in: "10:30:00" });
+    assert.equal(r.is_late, true); // Still marked as late for attendance purposes
+    assert.equal(r.is_countable_late, false); // But not counted in monthly late_count
+  });
+
+  it("is_late still true for 11:00 for attendance classification", () => {
+    const r = evaluateLateLogin({ office_in: "11:00:00" });
+    assert.equal(r.is_late, true); // Still marked as late for attendance purposes
+    assert.equal(r.is_countable_late, false); // But not counted in monthly late_count
+  });
+
+  it("is_countable_late is false for 10:14", () => {
+    const r = evaluateLateLogin({ office_in: "10:14:00" });
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("is_countable_late is true for 10:15", () => {
+    const r = evaluateLateLogin({ office_in: "10:15:00" });
+    assert.equal(r.is_countable_late, true);
+  });
+
+  it("is_countable_late is true for 10:29", () => {
+    const r = evaluateLateLogin({ office_in: "10:29:00" });
+    assert.equal(r.is_countable_late, true);
+  });
+
+  it("is_countable_late is false for 10:30", () => {
+    const r = evaluateLateLogin({ office_in: "10:30:00" });
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("is_countable_late is false for 11:00", () => {
+    const r = evaluateLateLogin({ office_in: "11:00:00" });
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("is_countable_late is false for 10:14:59", () => {
+    const r = evaluateLateLogin({ office_in: "10:14:59" });
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("is_countable_late is true for 10:15:01", () => {
+    const r = evaluateLateLogin({ office_in: "10:15:01" });
+    assert.equal(r.is_countable_late, true);
+  });
+
+  it("is_countable_late is true for 10:20:00", () => {
+    const r = evaluateLateLogin({ office_in: "10:20:00" });
+    assert.equal(r.is_countable_late, true);
+  });
+
+  it("is_countable_late is true for 10:29:59", () => {
+    const r = evaluateLateLogin({ office_in: "10:29:59" });
+    assert.equal(r.is_countable_late, true);
+  });
+
+  it("is_countable_late is false for 10:30:01", () => {
+    const r = evaluateLateLogin({ office_in: "10:30:01" });
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("is_countable_late is false for 11:59:59", () => {
+    const r = evaluateLateLogin({ office_in: "11:59:59" });
+    assert.equal(r.is_countable_late, false);
+  });
+
+  it("is_countable_late is false for 12:00:00", () => {
+    const r = evaluateLateLogin({ office_in: "12:00:00" });
+    assert.equal(r.is_countable_late, false);
   });
 
   it("does not downgrade because of a monthly late-login cap", () => {

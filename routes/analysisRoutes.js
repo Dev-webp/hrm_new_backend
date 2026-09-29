@@ -10,6 +10,7 @@ import { formatTime12Hour } from "../utils/timeFormat.js";
 import { getComputedAttendanceStatus } from "../utils/computedAttendanceStatus.js";
 import { formatDateStr } from "../utils/attendancePolicy.js";
 import { calculateBreakMinutesFromRows } from "../utils/breakMinutes.js";
+import { getAttendanceWithPolicy } from "../utils/attendanceWithPolicy.js";
 
 const router = express.Router();
 
@@ -312,7 +313,7 @@ router.get(
 // ══════════════════════════════════════════════════════════════
 // GET /api/attendance-analysis/individual
 // Single employee full month data — attendance + breaks merged
-// Uses indexed queries → typically <30ms
+// NOW uses getAttendanceWithPolicy for sandwich policy consistency
 // ══════════════════════════════════════════════════════════════
 router.get(
   "/attendance-analysis/individual",
@@ -328,7 +329,7 @@ router.get(
       const cached = getCache(ck);
       if (cached) return res.json({ ...cached, _cached: true });
 
-      const { start, end, year, month: m } = monthRange(month);
+      const { start, end } = monthRange(month);
 
       // ── Security: MANAGER branch check ───────────────────────
       if (req.user.role === "MANAGER") {
@@ -339,146 +340,76 @@ router.get(
           return res.status(403).json({ message: "Cross-branch access denied" });
       }
 
-      // ── Fire all 3 queries in parallel ───────────────────────
-      const [attRows, breakRows, holidayRows] = await Promise.all([
-        pool.query(
-          `SELECT
-             TO_CHAR(date,'YYYY-MM-DD') AS date,
-             check_in_time, check_out_time, status,
-             late_minutes, production_hours,
-             total_break_minutes, half_day_slot,
-             leave_type, leave_status,
-             post_login_idle_minutes, misuse_of_time
-           FROM attendance_records
-           WHERE user_id = $1 AND date BETWEEN $2 AND $3
-           ORDER BY date ASC`,
-          [userId, start, end]
-        ),
-        pool.query(
-          `SELECT
-             TO_CHAR(date,'YYYY-MM-DD') AS date,
-             break_type, start_time, end_time, duration_minutes, break3_sessions
-           FROM employee_breaks
-           WHERE user_id = $1 AND date BETWEEN $2 AND $3
-           ORDER BY date ASC, break_type ASC`,
-          [userId, start, end]
-        ),
-        pool.query(
-          `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date
-           FROM company_holidays
-           WHERE EXTRACT(YEAR FROM date) = $1
-             AND EXTRACT(MONTH FROM date) = $2`,
-          [year, m]
-        ),
-      ]);
+      // ── Get attendance with sandwich policy ─────────────────
+      const { rows, summary } = await getAttendanceWithPolicy(Number(userId), start, end);
 
-      // ── Build lookup maps (O(n) not O(n²)) ───────────────────
-      const attMap = new Map(attRows.rows.map(r => [r.date, r]));
-      const holidaySet = new Set(holidayRows.rows.map(r => r.date));
+      // ── Fetch breaks separately (still needed for analysis details) ─
+      const breakRows = await pool.query(
+        `SELECT
+           TO_CHAR(date,'YYYY-MM-DD') AS date,
+           break_type, start_time, end_time, duration_minutes, break3_sessions
+         FROM employee_breaks
+         WHERE user_id = $1 AND date BETWEEN $2 AND $3
+         ORDER BY date ASC, break_type ASC`,
+        [userId, start, end]
+      );
 
-      // Group breaks by date
+      // ── Build break map ─────────────────────────────────────
       const breakMap = new Map();
       for (const b of breakRows.rows) {
         if (!breakMap.has(b.date)) breakMap.set(b.date, {});
         breakMap.get(b.date)[b.break_type] = b;
       }
 
-      // ── Build full month record array ─────────────────────────
-      const lastDay = new Date(year, m, 0).getDate();
-      const records = [];
-      const todayStr = formatDateStr(new Date());
+      // ── Merge sandwich data with existing analysis record format ─
+      const records = rows.map((row) => {
+        const dayBreaks = breakMap.get(row.date) || {};
+        const b1 = dayBreaks.break1 || {};
+        const lunch = dayBreaks.lunch || {};
+        const b2 = dayBreaks.break2 || {};
+        const b3 = dayBreaks.break3 || {};
+        const break3Sessions = Array.isArray(b3.break3_sessions) ? b3.break3_sessions : [];
 
-      for (let d = 1; d <= lastDay; d++) {
-        const dateStr = `${month}-${String(d).padStart(2, "0")}`;
-        const dow = new Date(dateStr).getDay();
-
-        // Sunday
-        if (dow === 0) {
-          records.push(buildEmptyRecord(dateStr, "sunday")); continue;
-        }
-        // Holiday
-        if (holidaySet.has(dateStr)) {
-          records.push(buildEmptyRecord(dateStr, "holiday")); continue;
-        }
-
-        const att = attMap.get(dateStr);
-        const dayBreaks = breakMap.get(dateStr) || {};
-
-        const rawCheckIn  = att?.check_in_time  ? att.check_in_time.slice(0,5)  : "--";
-        const rawCheckOut = att?.check_out_time ? att.check_out_time.slice(0,5) : "--";
+        const rawCheckIn = row.check_in_time ? row.check_in_time.slice(0, 5) : "--";
+        const rawCheckOut = row.check_out_time ? row.check_out_time.slice(0, 5) : "--";
         const checkIn = formatTime12Hour(rawCheckIn);
         const checkOut = formatTime12Hour(rawCheckOut);
 
-        const b1    = dayBreaks.break1 || {};
-        const lunch = dayBreaks.lunch  || {};
-        const b2    = dayBreaks.break2 || {};
-        const b3    = dayBreaks.break3 || {};
-        const break3Sessions = Array.isArray(b3.break3_sessions) ? b3.break3_sessions : [];
-
         const breakMins = {
-          b1:    b1.duration_minutes    || 0,
+          b1: b1.duration_minutes || 0,
           lunch: lunch.duration_minutes || 0,
-          b2:    b2.duration_minutes    || 0,
-          b3:    b3.duration_minutes    || 0,
+          b2: b2.duration_minutes || 0,
+          b3: b3.duration_minutes || 0,
           b3Count: break3Sessions.length,
           b3History: break3Sessions,
         };
         const totalBreak = calculateBreakMinutesFromRows(Object.values(dayBreaks));
 
-        let workHours = 0;
-        if (rawCheckIn !== "--" && rawCheckOut !== "--") {
-          const [ih, im] = rawCheckIn.split(":").map(Number);
-          const [oh, om] = rawCheckOut.split(":").map(Number);
-          workHours = Math.max(0, ((oh * 60 + om) - (ih * 60 + im)) / 60);
-        }
-
-        const computed = getComputedAttendanceStatus(
-          {
-            ...(att || {}),
-            date: dateStr,
-            break1_in: b1.start_time,
-            break1_out: b1.end_time,
-            lunch_in: lunch.start_time,
-            lunch_out: lunch.end_time,
-            break2_in: b2.start_time,
-            break2_out: b2.end_time,
-            break3_in: b3.start_time,
-            break3_out: b3.end_time,
-            break3_duration_minutes: b3.duration_minutes,
-            break3_sessions: b3.break3_sessions,
-            total_break_minutes: totalBreak,
-          },
-          {
-            dateStr,
-            holidaySet,
-            noRecordStatus: dateStr > todayStr ? "no_record" : "absent",
-          }
-        );
-
-        records.push({
-          date:      dateStr,
+        return {
+          date: row.date,
           checkIn,
           checkOut,
-          status: computed.computed_status,
-          computed_status: computed.computed_status,
-          display_status: computed.display_status,
-          policy_status: computed.policy_status,
-          policy_reason: computed.policy_reason,
-          lateMinutes: computed.late_minutes || 0,
-          workHours: computed.production_hours || workHours,
-          productionHours: computed.production_hours || workHours,
-          breaks: computed.total_break_minutes || totalBreak,
+          status: row.status,
+          computed_status: row.status,
+          display_status: row.status,
+          policy_status: row.status,
+          policy_reason: null,
+          lateMinutes: row.late_minutes || 0,
+          workHours: row.production_hours || 0,
+          productionHours: row.production_hours || 0,
+          breaks: row.total_break_minutes || totalBreak,
           breakMins,
           breakDetails: {
-            b1:    { in: fmtT(b1.start_time),    out: fmtT(b1.end_time)    },
-            lunch: { in: fmtT(lunch.start_time),  out: fmtT(lunch.end_time) },
-            b2:    { in: fmtT(b2.start_time),     out: fmtT(b2.end_time)    },
-            b3:    { in: fmtT(b3.start_time),     out: fmtT(b3.end_time)    },
+            b1: { in: fmtT(b1.start_time), out: fmtT(b1.end_time) },
+            lunch: { in: fmtT(lunch.start_time), out: fmtT(lunch.end_time) },
+            b2: { in: fmtT(b2.start_time), out: fmtT(b2.end_time) },
+            b3: { in: fmtT(b3.start_time), out: fmtT(b3.end_time) },
           },
-        });
-      }
+          sandwich: row.sandwich || [],
+        };
+      });
 
-      const result = { records: safeAnalysisRecords(records), month };
+      const result = { records: safeAnalysisRecords(records), month, summary };
       setCache(ck, result);
       res.json(result);
     } catch (err) {

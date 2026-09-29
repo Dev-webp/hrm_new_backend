@@ -104,6 +104,7 @@ export function evaluateLateLogin(log) {
     is_beyond_grace: false,
     is_on_time_grace: false,
     is_late_window: false,
+    is_countable_late: false,
   };
 
   const inSec = timeToSeconds(log?.office_in);
@@ -126,6 +127,7 @@ export function evaluateLateLogin(log) {
   if (inSec < T_HALF_DAY_LOGIN_START) {
     result.is_late_window = true;
     result.is_within_grace = true;
+    result.is_countable_late = true; // 10:15-10:29:59 is countable for monthly late count
   } else {
     result.is_beyond_grace = true;
   }
@@ -227,7 +229,7 @@ export function buildMonthlyLateStats(logsByDate, daysInMonth, year, month) {
     if (!log) continue;
 
     const lateInfo = evaluateLateLogin(log);
-    if (lateInfo.is_late) {
+    if (lateInfo.is_countable_late) {
       lateLoginCount += 1;
     }
     if (lateInfo.is_within_grace) withinGraceCount += 1;
@@ -561,7 +563,7 @@ export function calculateMonthlySummary(
     else if (day.bucket === "holiday") holidayDays += 1;
     else if (day.bucket === "absent") absentDays += 1;
 
-    if (log && evaluateLateLogin(log).is_late) {
+    if (log && evaluateLateLogin(log).is_countable_late) {
       lateCount += 1;
     }
 

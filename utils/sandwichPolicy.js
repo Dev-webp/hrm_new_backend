@@ -269,13 +269,20 @@ export function applySandwichPolicy(data, options = {}) {
       continue;
     }
     
-    // Check Monday for two-sided exception
+    // Check Monday for two-sided exception (Sat + Sun + Mon)
     const mondayStr = addDays(sundayStr, 1);
     const mondayAtt = attMap.get(mondayStr);
     const mondayHoliday = holidayMap.has(mondayStr);
     const mondayPreJoining = joiningDate && mondayStr < joiningDate;
     const mondayState = getDayState(mondayAtt, mondayHoliday, mondayPreJoining, todayStr, approvedLeaveDates, mondayStr);
-    
+
+    // Check Friday for Fri + Sat + Sun pattern
+    const fridayStr = addDays(dateStr, -1);
+    const fridayAtt = attMap.get(fridayStr);
+    const fridayHoliday = holidayMap.has(fridayStr);
+    const fridayPreJoining = joiningDate && fridayStr < joiningDate;
+    const fridayState = getDayState(fridayAtt, fridayHoliday, fridayPreJoining, todayStr, approvedLeaveDates, fridayStr);
+
     // Rule J/K/L: Two-sided exception (Sat non-working + Sun + Mon non-working)
     // Monday must be "off" state (non-working)
     if (mondayState === "off" && !mondayHoliday) {
@@ -285,12 +292,31 @@ export function applySandwichPolicy(data, options = {}) {
         applied: true,
         reason: "TWO_SIDED_NON_WORKING",
       });
-      
+
       // Rule L: Two-sided exception does NOT consume allowance
       sandwichResults.push({
         date: dateStr,
         applied: false,
         reason: "TWO_SIDED_EXCEPTION_NO_ALLOWANCE",
+      });
+      continue;
+    }
+
+    // Extended rule: Fri + Sat + Sun pattern (nearest working days on both sides are non-working)
+    // If Friday is "off" (non-working) and Saturday is "off" (non-working), penalize Sunday
+    if (fridayState === "off" && !fridayHoliday) {
+      // Fri + Sat + Sun pattern triggered
+      sandwichResults.push({
+        date: sundayStr,
+        applied: true,
+        reason: "FRI_SAT_SUN_NON_WORKING",
+      });
+
+      // This does not consume allowance
+      sandwichResults.push({
+        date: dateStr,
+        applied: false,
+        reason: "FRI_SAT_PATTERN_NO_ALLOWANCE",
       });
       continue;
     }

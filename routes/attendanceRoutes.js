@@ -29,6 +29,7 @@ import {
 import { adjustLeaveBalanceForAttendanceStatusChange } from "../utils/leavePolicy.js";
 import { applySandwichPolicy, getSandwichSummary } from "../utils/sandwichPolicy.js";
 import { toDateStr } from "../utils/dateHelper.js";
+import { getAttendanceWithPolicy } from "../utils/attendanceWithPolicy.js";
 
 // ── Policy engine (pure functions, no DB calls) ──────────────────
 import {
@@ -164,13 +165,18 @@ async function fetchHolidaySet(year) {
 }
 
 async function fetchHolidaySetForDateRange(startDate, endDate) {
-  const res = await pool.query(
-    `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date
-     FROM company_holidays
-     WHERE date BETWEEN $1::date AND $2::date`,
-    [startDate, endDate]
-  );
-  return new Set(res.rows.map((r) => r.date));
+  try {
+    const res = await pool.query(
+      `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date
+       FROM company_holidays
+       WHERE date BETWEEN $1::date AND $2::date`,
+      [startDate, endDate]
+    );
+    return new Set(res.rows.map((r) => r.date));
+  } catch (err) {
+    console.error("fetchHolidaySetForDateRange error:", err);
+    return new Set(); // Return empty set on error to prevent undefined
+  }
 }
 
 /**
@@ -1779,123 +1785,10 @@ router.get("/attendance/self/history", verifyToken, async (req, res) => {
     const rangeError = validateAttendanceRange(start, end, "Attendance history range");
     if (rangeError) return res.status(400).json({ message: rangeError });
     if (!start || !end) return res.status(400).json({ message: "start and end required" });
-    const result = await pool.query(
-      `SELECT TO_CHAR(ar.date,'YYYY-MM-DD') AS date,
-              ar.check_in_time, ar.check_out_time, ${normalizedAttendanceStatusSql("ar")} AS status,
-              ar.late_minutes, ar.production_hours, ar.total_break_minutes,
-              ar.half_day_slot, ar.leave_type, ar.leave_status,
-              ar.post_login_idle_minutes, ar.misuse_of_time
-       FROM attendance_records ar
-       WHERE ar.user_id=$1 AND ar.date BETWEEN $2 AND $3
-       ORDER BY ar.date ASC`,
-      [req.user.id, start, end]
-    );
-    const holidaySet = await fetchHolidaySetForDateRange(start, end);
-    const logsByDate = Object.fromEntries(result.rows.map((row) => [row.date, row]));
-    
-    // Get user's joining_date for sandwich policy
-    const userResult = await pool.query(
-      `SELECT joining_date FROM users WHERE id = $1`,
-      [req.user.id]
-    );
-    const joiningDate = userResult.rows[0]?.joining_date || null;
-    
-    // Get approved leave requests for this user in the date range
-    const leaveResult = await pool.query(
-      `SELECT id, from_date, to_date, leave_type, status, leave_duration_type
-       FROM leave_requests
-       WHERE user_id = $1
-         AND status = 'approved'
-         AND from_date <= $2
-         AND to_date >= $3
-       ORDER BY from_date`,
-      [req.user.id, end, start]
-    );
-    
-    // Apply sandwich policy for this user
-    const attMap = new Map();
-    for (const row of result.rows) {
-      attMap.set(row.date, row);
-    }
-    
-    // Build allDates from the full date range (not just dates with attendance records)
-    const allDates = [];
-    const startDate = new Date(start + "T00:00:00");
-    const endDate = new Date(end + "T00:00:00");
-    for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
-      const dateStr = d.toISOString().slice(0, 10);
-      allDates.push(dateStr);
-    }
-    
-    const holidayMap = new Map();
-    holidaySet.forEach((date) => {
-      holidayMap.set(date, { name: 'Holiday' });
-    });
-    
-    const { sandwichResults } = applySandwichPolicy({
-      attMap,
-      holidayMap,
-      halfDayLeaveMap: new Map(),
-      allDates,
-      leaves: leaveResult.rows,
-    }, {
-      todayStr: new Date().toISOString().slice(0, 10),
-      joiningDate,
-    });
-    
-    // Create a date -> sandwich result map
-    const sandwichMap = new Map();
-    for (const sr of sandwichResults) {
-      if (!sandwichMap.has(sr.date)) {
-        sandwichMap.set(sr.date, []);
-      }
-      sandwichMap.get(sr.date).push(sr);
-    }
-    
-    // Embed sandwich metadata in each row
-    const rowsWithSandwich = result.rows.map((row) => {
-      const rowWithStatus = withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate });
-      if (sandwichMap.has(row.date)) {
-        rowWithStatus.sandwich = sandwichMap.get(row.date);
-      }
-      return rowWithStatus;
-    });
-    
-    // Add rows for dates without attendance records but with sandwich results
-    // Only create synthetic rows for Sundays with applied=true
-    const dateSet = new Set(result.rows.map(r => r.date));
-    for (const date of allDates) {
-      if (!dateSet.has(date) && sandwichMap.has(date)) {
-        const sandwichResults = sandwichMap.get(date);
-        // Check if this is a Sunday with applied sandwich
-        const isSundayWithAppliedSandwich = sandwichResults.some(s => s.applied === true);
-        const dayOfWeek = new Date(date + "T00:00:00").getDay();
-        
-        if (dayOfWeek === 0 && isSundayWithAppliedSandwich) {
-          // This date has no attendance record but has an applied sandwich result
-          // Create a minimal row for it
-          const sandwichRow = {
-            date,
-            status: 'sunday', // Will be overridden by sandwich status in frontend
-            check_in_time: null,
-            check_out_time: null,
-            late_minutes: 0,
-            production_hours: 0,
-            total_break_minutes: 0,
-            half_day_slot: null,
-            leave_type: null,
-            leave_status: null,
-            sandwich: sandwichResults,
-          };
-          rowsWithSandwich.push(sandwichRow);
-        }
-      }
-    }
-    
-    // Sort by date
-    rowsWithSandwich.sort((a, b) => a.date.localeCompare(b.date));
-    
-    res.json(rowsWithSandwich);
+
+    const { rows, summary } = await getAttendanceWithPolicy(req.user.id, start, end);
+
+    res.json({ rows, summary });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -2494,7 +2387,7 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
     `;
 
     const result = await pool.query(query, params);
-    const holidaySet = await fetchHolidaySetForDateRange(start, end);
+    const holidaySet = await fetchHolidaySetForDateRange(start, end) || new Set();
     const summary = new Map();
     
     // Build attendance map for sandwich processing
@@ -2563,7 +2456,7 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
       // Apply sandwich policy for this user
       const sandwichData = {
         attMap: userAttMap,
-        holidayMap,
+        holidayMap: holidaySet,
         halfDayLeaveMap: new Map(),
         allDates,
       };
@@ -4090,159 +3983,9 @@ router.get(
         });
       }
 
-      const result = await pool.query(
-        `
-        SELECT
-          TO_CHAR(d.day, 'YYYY-MM-DD') AS date,
+      const { rows } = await getAttendanceWithPolicy(Number(userId), start, end);
 
-          -- ================================================
-          -- FINAL STATUS
-          -- DATE-LEVEL ATTENDANCE IS THE SOURCE OF TRUTH.
-          -- A leave request can be mixed paid/unpaid, so it must never
-          -- overwrite a persisted paid_leave/unpaid_leave day.
-          -- ================================================
-          CASE
-            WHEN ar.id IS NOT NULL
-            THEN ${normalizedAttendanceStatusSql("ar")}
-
-            WHEN lr.id IS NOT NULL
-              AND LOWER(COALESCE(lr.status, '')) = 'approved'
-              AND COALESCE(lr.paid_days, 0) > 0
-            THEN 'paid_leave'
-
-            WHEN lr.id IS NOT NULL
-              AND LOWER(COALESCE(lr.status, '')) = 'approved'
-              AND COALESCE(lr.unpaid_days, 0) > 0
-            THEN 'unpaid_leave'
-
-            ELSE 'no_record'
-          END AS status,
-
-          -- ================================================
-          -- ATTENDANCE DATA
-          -- ================================================
-          ar.check_in_time,
-          ar.check_out_time,
-          ar.late_minutes,
-          ar.production_hours,
-          ar.total_break_minutes,
-          ar.half_day_slot,
-          ar.leave_type AS attendance_leave_type,
-          ar.leave_status AS attendance_leave_status,
-          ar.is_paid_leave AS attendance_is_paid_leave,
-          ar.post_login_idle_minutes,
-          ar.misuse_of_time,
-
-          -- ================================================
-          -- LEAVE DATA
-          -- ================================================
-          lr.id AS leave_request_id,
-          lr.leave_type AS request_leave_type,
-          COALESCE(ar.leave_type, lr.leave_type) AS leave_type,
-          COALESCE(ar.leave_status, lr.status) AS leave_status,
-
-          COALESCE(lr.paid_days, 0) AS paid_days,
-          COALESCE(lr.unpaid_days, 0) AS unpaid_days,
-
-          -- ================================================
-          -- PAID LEAVE FLAG
-          -- ================================================
-          CASE
-            WHEN ar.id IS NOT NULL
-            THEN COALESCE(ar.is_paid_leave, false)
-
-            WHEN lr.id IS NOT NULL
-              AND LOWER(COALESCE(lr.status, '')) = 'approved'
-              AND COALESCE(lr.paid_days, 0) > 0
-            THEN true
-            ELSE COALESCE(ar.is_paid_leave, false)
-          END AS is_paid_leave,
-
-          -- ================================================
-          -- UNPAID LEAVE FLAG
-          -- ================================================
-          CASE
-            WHEN ar.id IS NOT NULL
-            THEN LOWER(COALESCE(ar.status, '')) = 'unpaid_leave'
-
-            WHEN lr.id IS NOT NULL
-              AND LOWER(COALESCE(lr.status, '')) = 'approved'
-              AND COALESCE(lr.unpaid_days, 0) > 0
-            THEN true
-            ELSE false
-          END AS is_unpaid_leave
-
-        FROM generate_series(
-          $2::date,
-          $3::date,
-          INTERVAL '1 day'
-        ) AS d(day)
-
-        LEFT JOIN attendance_records ar
-          ON ar.user_id = $1
-          AND ar.date = d.day::date
-
-        LEFT JOIN LATERAL (
-          SELECT *
-          FROM leave_requests lr
-          WHERE lr.user_id = $1
-            AND d.day::date BETWEEN lr.from_date::date AND lr.to_date::date
-            AND LOWER(COALESCE(lr.status, '')) = 'approved'
-          ORDER BY lr.id DESC
-          LIMIT 1
-        ) lr ON true
-
-        ORDER BY d.day ASC
-        `,
-        [userId, start, end]
-      );
-
-      const holidaySet =
-        await fetchHolidaySetForDateRange(start, end);
-
-      const logsByDate = Object.fromEntries(
-        result.rows.map((row) => [
-          row.date,
-          row,
-        ])
-      );
-
-      // ======================================================
-      // IMPORTANT:
-      // LEAVE MUST NOT GO THROUGH withDisplayAttendanceStatus
-      // ======================================================
-
-      const response = result.rows.map((row) => {
-        if (row.status === "paid_leave") {
-          return {
-            ...row,
-            status: "paid_leave",
-            is_paid_leave: true,
-            isPaidLeave: true,
-          };
-        }
-
-        if (row.status === "unpaid_leave") {
-          return {
-            ...row,
-            status: "unpaid_leave",
-            is_unpaid_leave: true,
-            isUnpaidLeave: true,
-          };
-        }
-
-        return withDisplayAttendanceStatus(
-          row,
-          row.date,
-          {
-            holidaySet,
-            logsByDate,
-          }
-        );
-      });
-
-      return res.json(response);
-
+      res.json(rows);
     } catch (err) {
       console.error(
         "GET /attendance/user/:userId ERROR:",
@@ -4256,6 +3999,69 @@ router.get(
   }
 );
 
+
+
+// GET /api/attendance/range/summary/user/:userId
+// For Manager and Admin views - per-user calendar data with sandwich policy
+router.get(
+  "/attendance/range/summary/user/:userId",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { start, end } = req.query;
+
+      // Guard against invalid userId
+      if (!userId || userId === "null" || userId === "undefined" || isNaN(Number(userId))) {
+        return res.status(400).json({
+          message: "Invalid userId parameter",
+        });
+      }
+
+      if (!start || !end) {
+        return res.status(400).json({
+          message: "start and end required",
+        });
+      }
+
+      // Authorization check: managers can only access users in their own branch
+      if (req.user.role === "MANAGER") {
+        const userResult = await pool.query(
+          `SELECT branch FROM users WHERE id = $1`,
+          [userId]
+        );
+
+        if (!userResult.rows.length) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        const userBranch = userResult.rows[0].branch;
+        if (userBranch !== req.user.branch) {
+          return res.status(403).json({
+            message: "You can only access users in your own branch",
+          });
+        }
+      }
+
+      const { rows, summary } = await getAttendanceWithPolicy(Number(userId), start, end);
+
+      res.json({
+        rows,
+        summary,
+      });
+    } catch (err) {
+      console.error(
+        "GET /attendance/range/summary/user/:userId ERROR:",
+        err
+      );
+
+      return res.status(500).json({
+        message: err.message,
+      });
+    }
+  }
+);
 
 
 // GET /api/attendance/late-trend
