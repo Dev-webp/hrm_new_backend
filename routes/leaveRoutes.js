@@ -44,6 +44,92 @@ function sameNumber(left, right) {
   return Math.abs(Number(left || 0) - Number(right || 0)) < 0.001;
 }
 
+/**
+ * Splits a leave date range into month segments
+ * Returns array of { date, daysInMonth } for each month spanned
+ */
+function splitLeaveByMonth(fromDate, toDate) {
+  const segments = [];
+  const current = new Date(fromDate);
+  const end = new Date(toDate);
+
+  while (current <= end) {
+    const year = current.getFullYear();
+    const month = current.getMonth();
+    
+    // Get last day of current month
+    const lastDayOfMonth = new Date(year, month + 1, 0);
+    
+    // The segment ends at either the last day of month or the leave end date
+    const segmentEnd = lastDayOfMonth < end ? lastDayOfMonth : end;
+    
+    // Calculate days in this segment
+    const daysInSegment = Math.floor((segmentEnd - current) / (1000 * 60 * 60 * 24)) + 1;
+    
+    segments.push({
+      date: new Date(current),
+      year,
+      month: month + 1, // Convert to 1-based month
+      days: daysInSegment
+    });
+    
+    // Move to first day of next month
+    current = new Date(year, month + 1, 1);
+  }
+  
+  return segments;
+}
+
+/**
+ * Deducts leave across multiple months if the leave spans multiple months
+ * Each day is either fully paid or fully unpaid (not split)
+ */
+async function deductLeaveAcrossMonths(userId, paidDays, unpaidDays, fromDate, toDate) {
+  const segments = splitLeaveByMonth(fromDate, toDate);
+  
+  if (segments.length === 1) {
+    // Single month - use existing function
+    return await deductApprovedLeaveSplit(userId, paidDays, unpaidDays, fromDate);
+  }
+  
+  // Multi-month - deduct month by month, using each month's balance
+  let remainingPaid = paidDays;
+  let remainingUnpaid = unpaidDays;
+  let totalPaidDeducted = 0;
+  let totalUnpaidDeducted = 0;
+  
+  for (const segment of segments) {
+    const segmentDate = new Date(segment.date);
+    
+    // Get this month's balance
+    const balance = await getProfessionalLeaveBalance(userId, segmentDate);
+    const availablePaid = Math.min(remainingPaid, Number(balance.paid_leave_balance || 0));
+    
+    // Calculate how many paid vs unpaid days for this segment
+    const segmentPaid = Math.min(availablePaid, segment.days);
+    const segmentUnpaid = Math.max(0, segment.days - segmentPaid);
+    
+    // Deduct from this month
+    await deductApprovedLeaveSplit(
+      userId,
+      segmentPaid,
+      segmentUnpaid,
+      segmentDate
+    );
+    
+    // Update remaining totals
+    remainingPaid -= segmentPaid;
+    remainingUnpaid -= segmentUnpaid;
+    totalPaidDeducted += segmentPaid;
+    totalUnpaidDeducted += segmentUnpaid;
+  }
+  
+  return {
+    paid_days: totalPaidDeducted,
+    unpaid_days: totalUnpaidDeducted,
+  };
+}
+
 async function buildApprovalPreview(leave, includeSundayPenalty = false) {
   const fromDate = new Date(leave.from_date);
   if (Number.isNaN(fromDate.getTime())) throw new Error("Invalid leave from_date");
@@ -930,11 +1016,12 @@ const changeLeaveStatus = async (req, res) => {
           return res.status(409).json({ message: "leave_category changed; refresh the approval preview" });
         }
 
-        deduction = await deductApprovedLeaveSplit(
+        deduction = await deductLeaveAcrossMonths(
           leave.user_id,
           approvedPreview.paid_days,
           approvedPreview.unpaid_days,
-          fromDateObj
+          fromDateObj,
+          new Date(leave.to_date)
         );
 
         updateFields += `

@@ -86,10 +86,8 @@ export async function getLeaveBalance(employeeId, year, month, leaveCategory = n
      COALESCE(SUM(unpaid_leave_used), 0) AS unpaid_used
    FROM leave_balance
    WHERE user_id = $1
-     AND (
-       year < $2
-       OR (year = $2 AND month <= $3)
-     )`,
+     AND year = $2
+     AND month = $3`,
   [employeeId, y, m]
 );
 

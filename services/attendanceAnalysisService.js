@@ -444,4 +444,9 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
     records: safeRecords,
     approvedLeaves: leaveRes.rows,
   };
+
+
+
+  
 }
+

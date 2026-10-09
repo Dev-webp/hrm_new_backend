@@ -10,8 +10,9 @@ import helmet from "helmet";
 import { verifyToken } from "./middleware/auth.js";
 import { pool } from "./middleware/db.js";
 import { desktopOnly } from "./middleware/desktopOnly.js";
+import integrationRoutes from "./routes/integrationRoutes.js";
 
-
+import invoiceSsoRoutes from "./routes/invoiceSsoRoutes.js";
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -116,8 +117,18 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
   message: { message: "Too many requests, please slow down" },
 });
+
+
+
 app.use("/api/", apiLimiter);
+
+// Unified Portal → HRMS server-to-server integration
+// Uses its own integration authentication.
+app.use("/api/integration", integrationRoutes);
+
+// Existing HRMS browser APIs
 app.use("/api", desktopOnly);
+
 app.use("/api", authRoutes);
 app.use("/api", employeeRoutes);
 app.use("/api", departmentRoutes);
@@ -137,6 +148,8 @@ app.use("/api", profileRoutes);
 app.use("/api/activity-logs", activityRoutes);
 app.use("/api/offer-letters", offerLetterRoutes);
 app.use("/api/letters", letterRoutes);
+app.use("/api", invoiceSsoRoutes);
+
 
 app.use((req, res) => {
   res.status(404).json({ message: `Route not found: ${req.method} ${req.originalUrl}` });

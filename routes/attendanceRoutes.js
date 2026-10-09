@@ -799,6 +799,8 @@ export {
   mapPolicyBucketToDisplayStatus,
   mapPolicyBucketToStatus,
   recalcAttendanceForUserDate,
+  classifyAttendanceForResponse,
+  fetchHolidaySet,
 };
 
 async function recalcAttendanceForUserMonth(userId, year, month, options = {}) {

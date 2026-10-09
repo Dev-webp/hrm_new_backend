@@ -59,10 +59,10 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    const userRes = await pool.query(
-      `SELECT id, full_name, email, password, role, department, branch, designation, employee_code, login_access_type
-       FROM users
-       WHERE email = $1`,
+ const userRes = await pool.query(
+ `SELECT id, full_name, email, password, role, department, branch, designation, employee_code, login_access_type, invoice_access
+   FROM users
+   WHERE email = $1`,
       [normalizedEmail]
     );
 
@@ -223,18 +223,19 @@ emitNotification({
 notifyInvoiceOnlineStatus(user.email, true);
 
 res.json({
-      token,
-      user: {
-        id: user.id,
-        full_name: user.full_name,
-        email: user.email,
-        role: user.role,
-        department: user.department,
-        designation: user.designation,
-        branch: user.branch,
-        employee_code: user.employee_code
-      }
-    });
+  token,
+  user: {
+    id: user.id,
+    full_name: user.full_name,
+    email: user.email,
+    role: user.role,
+    department: user.department,
+    designation: user.designation,
+    branch: user.branch,
+    employee_code: user.employee_code,
+    invoice_access: user.invoice_access === true   // add this line
+  }
+});
 
   } catch (error) {
     console.error(error);
@@ -277,5 +278,74 @@ res.json({
     });
   }
 });
+
+
+// ───────────────── HRMS → INVOICE SSO ─────────────────
+router.post("/invoice-sso", verifyToken, async (req, res) => {
+  try {
+    // Get the currently logged-in HRMS user
+    const userResult = await pool.query(
+      `
+      SELECT
+        id,
+        full_name,
+        email,
+        role,
+        department,
+        branch,
+        designation,
+        employee_code,
+        invoice_access
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [req.user.id]
+    );
+
+    const user = userResult.rows[0];
+
+    if (!user) {
+      return res.status(401).json({
+        message: "HRMS user not found",
+      });
+    }
+
+    // Employee must have Invoice access enabled in HRMS
+    if (user.invoice_access !== true) {
+      return res.status(403).json({
+        message: "Invoice / CRM access is not enabled for your account",
+      });
+    }
+
+    // Create a short-lived token ONLY for HRMS → Invoice SSO
+const ssoToken = jwt.sign(
+  {
+    email: user.email,
+    employee_code: user.employee_code,
+    purpose: "invoice_sso",
+    hrms_user_id: user.id,
+  },
+  process.env.HRMS_INVOICE_SSO_SECRET,
+  {
+    expiresIn: "60s",
+  }
+);
+
+    return res.json({
+      success: true,
+      ssoToken,
+      email: user.email,
+    });
+  } catch (error) {
+    console.error("[HRMS_INVOICE_SSO_ERROR]", error);
+
+    return res.status(500).json({
+      message: "Unable to create Invoice SSO session",
+    });
+  }
+});
+
+
 
 export default router;

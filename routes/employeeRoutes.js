@@ -8,6 +8,7 @@ import {
   isBranchRestrictedOperationalRole,
   normalizeBranchFilter,
 } from "../middleware/auth.js";
+import { syncInvoiceUser } from "../utils/invoiceSync.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
 import {
   assertAssignableDepartment,
@@ -75,7 +76,7 @@ router.get(
       const branch = normalizeBranchFilter(req.query.branch);
       let query = `
        SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
-       u.login_access_type,
+       u.login_access_type, u.invoice_access,
                u.employee_code, u.salary, u.joining_date, u.status, u.profile_initials,
                designation, bank_name, bank_account, bank_ifsc,
                aadhar_number, d.code AS department_code,
@@ -139,7 +140,7 @@ router.get(
       const { id } = req.params;
       const result = await pool.query(
         `SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
-       u.login_access_type, u.employee_code,
+       u.login_access_type, u.employee_code, u.invoice_access,
                 u.salary, u.joining_date, u.status, u.profile_initials,
                 u.designation, u.bank_name, u.bank_account, u.bank_ifsc,
                 aadhar_number,
@@ -181,7 +182,7 @@ router.post(
     try {
       let { full_name, email, role, department, branch, salary, password,
             designation, bank_name, bank_account, bank_ifsc, employee_code, department_code,
-            aadhar_number } = req.body;
+            aadhar_number, invoice_access, invoice_permissions } = req.body;
 
       if (req.user.role === "MANAGER") {
         branch = req.user.branch;
@@ -226,14 +227,28 @@ router.post(
          (full_name, email, password, role, department, branch, employee_code,
           salary, joining_date, status, profile_initials,
           designation, bank_name, bank_account, bank_ifsc,
-          aadhar_number, visible_password)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+          aadhar_number, visible_password, invoice_access)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
          RETURNING id`,
         [full_name, email, hashedPassword, role.toUpperCase(), department, branch, finalCode,
          salary, joining_date, 'active', profile_initials,
          designation || null, bank_name || null, bank_account || null, bank_ifsc || null,
-         aadhar_number || null, plainPassword]
+         aadhar_number || null, plainPassword, invoice_access === true]
       );
+
+      // Provision/update the matching Invoice/CRM account if access was granted.
+      // Non-blocking — the HRMS employee record above is already committed
+      // regardless of whether this succeeds.
+      if (invoice_access === true) {
+        syncInvoiceUser({
+          name: full_name,
+          email,
+          department,
+          location: branch,
+          employee_id: finalCode,
+          permissions: invoice_permissions || {},
+        });
+      }
 
       res.status(201).json({
         id: result.rows[0].id,
@@ -264,7 +279,8 @@ router.put(
     try {
       const { id } = req.params;
       let { full_name, email, role, department, branch, salary, password,
-            designation, bank_name, bank_account, bank_ifsc, aadhar_number, department_code } = req.body;
+            designation, bank_name, bank_account, bank_ifsc, aadhar_number, department_code,
+            invoice_access, invoice_permissions } = req.body;
 
       const empCheck = await pool.query("SELECT branch, role FROM users WHERE id = $1", [id]);
       if (empCheck.rows.length === 0) return res.status(404).json({ message: "Employee not found" });
@@ -299,12 +315,13 @@ router.put(
         SET full_name = $1, email = $2, role = $3, department = $4, branch = $5,
             salary = $6, profile_initials = $7,
             designation = $8, bank_name = $9, bank_account = $10, bank_ifsc = $11,
-            aadhar_number = $12
+            aadhar_number = $12, invoice_access = $13
       `;
       let params = [full_name, email, role.toUpperCase(), department, branch, salary,
                     getInitials(full_name), designation || null, bank_name || null,
-                    bank_account || null, bank_ifsc || null, aadhar_number || null];
-      let paramIndex = 13;
+                    bank_account || null, bank_ifsc || null, aadhar_number || null,
+                    invoice_access === true];
+      let paramIndex = 14;
 
       // If password is provided, update both hashed and visible password
       if (password && password.trim() !== "") {
@@ -319,6 +336,18 @@ router.put(
 
       const result = await pool.query(updateQuery, params);
       if (result.rows.length === 0) return res.status(404).json({ message: "Employee not found" });
+
+      if (invoice_access === true) {
+        syncInvoiceUser({
+          name: full_name,
+          email,
+          department,
+          location: branch,
+          employee_id: null,
+          permissions: invoice_permissions || {},
+        });
+      }
+
       res.json({ message: "Employee updated successfully" });
     } catch (error) {
       console.error(error);
@@ -765,4 +794,3 @@ router.delete(
 );
 
 export default router;
-
