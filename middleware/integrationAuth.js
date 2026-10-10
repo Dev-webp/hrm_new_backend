@@ -14,39 +14,6 @@ export function verifyUnifiedIntegration(req, res, next) {
         message: "Integration authentication required",
       });
     }
-    console.log(
-  "[INTEGRATION AUTH DEBUG]",
-  {
-    headers: Object.keys(req.headers),
-    integrationKeyPresent:
-      !!req.headers["x-unified-integration-key"],
-  }
-);
-console.log("[INTEGRATION AUTH CHECK]", {
-  headerPresent: !!req.headers["x-unified-integration-key"],
-  expectedSecretConfigured:
-    !!process.env.UNIFIED_INTEGRATION_SECRET,
-  receivedLength:
-    req.headers["x-unified-integration-key"]?.length || 0,
-  expectedLength:
-    process.env.UNIFIED_INTEGRATION_SECRET?.length || 0,
-});
-console.log("[INTEGRATION AUTH COMPARE]", {
-  same:
-    providedKey === expectedKey,
-
-  receivedHash:
-    crypto
-      .createHash("sha256")
-      .update(providedKey)
-      .digest("hex"),
-
-  expectedHash:
-    crypto
-      .createHash("sha256")
-      .update(expectedKey)
-      .digest("hex"),
-});
 
     if (!expectedKey) {
       console.error(
@@ -86,15 +53,6 @@ console.log("[INTEGRATION AUTH COMPARE]", {
         message: "Invalid integration credentials",
       });
     }
-    console.log(
-  "[INTEGRATION AUTH] SUCCESS - CALLING NEXT()",
-  {
-    method: req.method,
-    path: req.originalUrl,
-  }
-);
-
-
 
     next();
   } catch (error) {
