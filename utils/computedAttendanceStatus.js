@@ -228,39 +228,78 @@ export function getComputedAttendanceStatus(record = {}, context = {}) {
     record?.isUnpaidLeave === true ||
     Number(record?.unpaid_days ?? record?.unpaidDays ?? 0) > 0;
 
-  if (isPaidLeave) {
-    return {
-      computed_status: "paid_leave",
-      display_status: "Paid Leave",
-      policy_status: "paid_leave",
-      policy_bucket: "paid_leave",
-      policy_reason: record?.policy_reason || record?.reason || "Paid leave",
-      policy_flags: ["paid_leave"],
-      late_minutes: 0,
-      production_hours: 0,
-      total_break_minutes: Number(record?.total_break_minutes || 0),
-      attendance_track: null,
-      required_checkout_time: null,
-    };
-  }
-
-  if (isUnpaidLeave) {
-    return {
-      computed_status: "unpaid_leave",
-      display_status: "Unpaid Leave",
-      policy_status: "unpaid_leave",
-      policy_bucket: "unpaid_leave",
-      policy_reason: record?.policy_reason || record?.reason || "Unpaid leave",
-      policy_flags: ["unpaid_leave"],
-      late_minutes: 0,
-      production_hours: 0,
-      total_break_minutes: Number(record?.total_break_minutes || 0),
-      attendance_track: null,
-      required_checkout_time: null,
-    };
-  }
-
   const hasPunch = Boolean(log?.office_in || log?.office_out);
+  const leaveDurationType = String(
+    record?.leave_duration_type || record?.leaveDurationType || ""
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  const isHalfDayLeave =
+    leaveDurationType === "half_day" ||
+    Boolean(record?.half_day_session || record?.halfDaySession) ||
+    Boolean(log?.half_day_slot && log.half_day_slot !== "INVALID");
+
+  // IMPORTANT: Actual attendance takes precedence over leave request
+  // If employee checked in/out, evaluate based on work hours, not leave request
+  // Only use leave status if there is NO actual attendance
+  if (!hasPunch) {
+    // Payroll callers keep their legacy leave accounting unless this is set.
+    if (isHalfDayLeave && context.halfDayLeaveAsNoRecord === true) {
+      return {
+        computed_status: "no_record",
+        display_status: "No Record",
+        policy_status: "no_record",
+        policy_bucket: "no_record",
+        policy_reason: "Half-day leave does not determine attendance status",
+        policy_flags: ["half_day_leave_no_attendance"],
+        late_minutes: 0,
+        production_hours: 0,
+        total_break_minutes: Number(record?.total_break_minutes || 0),
+        attendance_track: null,
+        required_checkout_time: null,
+      };
+    }
+
+    // For full-day leave only - use leave request status
+    if (isPaidLeave) {
+      return {
+        computed_status: "paid_leave",
+        display_status: "Paid Leave",
+        policy_status: "paid_leave",
+        policy_bucket: "paid_leave",
+        policy_reason: record?.policy_reason || record?.reason || "Paid leave",
+        policy_flags: ["paid_leave"],
+        late_minutes: 0,
+        production_hours: 0,
+        total_break_minutes: Number(record?.total_break_minutes || 0),
+        attendance_track: null,
+        required_checkout_time: null,
+      };
+    }
+
+    if (isUnpaidLeave) {
+      return {
+        computed_status: "unpaid_leave",
+        display_status: "Unpaid Leave",
+        policy_reason: record?.policy_reason || record?.reason || "Unpaid leave",
+        policy_status: "unpaid_leave",
+        policy_bucket: "unpaid_leave",
+        policy_flags: ["unpaid_leave"],
+        late_minutes: 0,
+        production_hours: 0,
+        total_break_minutes: Number(record?.total_break_minutes || 0),
+        attendance_track: null,
+        required_checkout_time: null,
+      };
+    }
+  }
+
+  // Has actual attendance - proceed to live status and policy evaluation
+  // Add flag to indicate attendance overrides leave request
+  if (hasPunch && (isPaidLeave || isUnpaidLeave)) {
+    // Will be added to policy_flags later in classifyDayPolicy
+  }
 
   const liveStatus = getLiveAttendanceStatus(record, { ...context, dateStr, todayStr });
   if (liveStatus) return liveStatus;

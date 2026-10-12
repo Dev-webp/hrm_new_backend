@@ -225,8 +225,13 @@ async function fetchLogsByDate(userId, startDate, endDate) {
        a.total_break_minutes,
        a.extra_break_ins,
        a.extra_break_outs,
+       a.half_day_slot,
+       a.leave_request_id,
        a.leave_type,
        a.leave_status,
+       lr.leave_duration_type,
+       lr.half_day_session,
+       lr.status                      AS leave_request_status,
        a.paid_leave_reason,
        a.post_login_idle_minutes,
        a.misuse_of_time
@@ -247,8 +252,10 @@ async function fetchLogsByDate(userId, startDate, endDate) {
         ON b3s.user_id = a.user_id
        AND b3s.date = a.date
        AND b3s.break_type = 'break3'
-      WHERE a.user_id = $1
-        AND a.date BETWEEN $2::date AND $3::date`,
+      LEFT JOIN leave_requests lr
+        ON lr.id = a.leave_request_id
+       WHERE a.user_id = $1
+         AND a.date BETWEEN $2::date AND $3::date`,
     [userId, startDate, endDate]
   );
 
@@ -276,7 +283,14 @@ function daysInMonth(year, month) {
 }
 
 function normalizedAttendanceStatusSql(alias = "a") {
-  return `COALESCE(${alias}.status, 'absent')`;
+  // IMPORTANT: When there is actual attendance, always return NULL
+  // so the computed status (from attendance policy) determines the final status
+  // This ensures old database statuses (like paid_leave) don't override actual attendance
+  return `CASE
+    WHEN ${alias}.check_in_time IS NOT NULL OR ${alias}.check_out_time IS NOT NULL
+    THEN NULL
+    ELSE COALESCE(${alias}.status, 'absent')
+  END`;
 }
 
 const policyBucketStatusMap = {
@@ -445,7 +459,13 @@ async function classifyAttendanceForResponse(user, dateStr, att, holidaySet) {
   if (inProgress) {
     const computed = getComputedAttendanceStatus(
       { ...(att || {}), ...log, date: dateStr, check_out_time: null },
-      { dateStr, holidaySet, monthlyLateStats, logsByDate: logsByDateExtended }
+      {
+        dateStr,
+        holidaySet,
+        monthlyLateStats,
+        logsByDate: logsByDateExtended,
+        halfDayLeaveAsNoRecord: true,
+      }
     );
     return {
       ...user,
@@ -471,7 +491,13 @@ async function classifyAttendanceForResponse(user, dateStr, att, holidaySet) {
   if (isAttendanceMissingCheckout(dateStr, log)) {
     const computed = getComputedAttendanceStatus(
       { ...(att || {}), ...log, date: dateStr, check_out_time: null },
-      { dateStr, holidaySet, monthlyLateStats, logsByDate: logsByDateExtended }
+      {
+        dateStr,
+        holidaySet,
+        monthlyLateStats,
+        logsByDate: logsByDateExtended,
+        halfDayLeaveAsNoRecord: true,
+      }
     );
     return {
       ...user,
@@ -660,6 +686,19 @@ async function recalcAttendanceForUserDate(userId, dateStr, options = {}) {
     log.total_break_minutes = latestBreakMinutes;
     logsByDateExtended[dateStr] = log;
     if (dateStr >= monthStart && dateStr <= monthEnd) logsByDate[dateStr] = log;
+  }
+
+  if (
+    String(log?.leave_request_status || "").toLowerCase() === "approved" &&
+    (
+      String(log?.leave_duration_type || "").toLowerCase() === "half_day" ||
+      Boolean(log?.half_day_session) ||
+      Boolean(log?.half_day_slot && log.half_day_slot !== "INVALID")
+    ) &&
+    !log?.office_in &&
+    !log?.office_out
+  ) {
+    return;
   }
 
   if (log?.office_in && !log?.office_out) {
@@ -880,7 +919,11 @@ router.get("/my-attendance", verifyToken, async (req, res) => {
     // Normalize to array sorted by date
     const rows = Object.values(logs)
       .sort((a, b) => a.date.localeCompare(b.date))
-      .map((row) => withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate: logs }));
+      .map((row) => withDisplayAttendanceStatus(row, row.date, {
+        holidaySet,
+        logsByDate: logs,
+        halfDayLeaveAsNoRecord: true,
+      }));
 
     res.json(rows);
   } catch (err) {
@@ -1739,15 +1782,22 @@ router.get("/attendance/self/history", verifyToken, async (req, res) => {
               ar.check_in_time, ar.check_out_time, ${normalizedAttendanceStatusSql("ar")} AS status,
               ar.late_minutes, ar.production_hours, ar.total_break_minutes,
               ar.half_day_slot, ar.leave_type, ar.leave_status,
+              lr.leave_duration_type, lr.half_day_session,
+              lr.status AS leave_request_status,
               ar.post_login_idle_minutes, ar.misuse_of_time
        FROM attendance_records ar
+       LEFT JOIN leave_requests lr ON lr.id = ar.leave_request_id
        WHERE ar.user_id=$1 AND ar.date BETWEEN $2 AND $3
        ORDER BY ar.date ASC`,
       [req.user.id, start, end]
     );
     const holidaySet = await fetchHolidaySetForDateRange(start, end);
     const logsByDate = Object.fromEntries(result.rows.map((row) => [row.date, row]));
-    res.json(result.rows.map((row) => withDisplayAttendanceStatus(row, row.date, { holidaySet, logsByDate })));
+    res.json(result.rows.map((row) => withDisplayAttendanceStatus(row, row.date, {
+      holidaySet,
+      logsByDate,
+      halfDayLeaveAsNoRecord: true,
+    })));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -1860,6 +1910,22 @@ router.get("/attendance/range", verifyToken, async (req, res) => {
         -- =============================================
 
         CASE
+
+          WHEN lr.id IS NOT NULL
+            AND LOWER(COALESCE(lr.status, '')) = 'approved'
+            AND (
+              lr.leave_duration_type = 'half_day'
+              OR (lr.leave_duration_type IS NULL AND lr.half_day_session IS NOT NULL)
+            )
+            AND a.check_in_time IS NULL
+            AND a.check_out_time IS NULL
+
+          THEN 'no_record'
+
+          WHEN a.check_in_time IS NOT NULL
+            OR a.check_out_time IS NOT NULL
+
+          THEN a.status
 
           WHEN lr.id IS NOT NULL
             AND LOWER(COALESCE(lr.status, '')) = 'approved'
@@ -2175,65 +2241,96 @@ const response = result.rows.map((row) => {
       Number(row.unpaid_days || 0) > 0
     );
 
+  const isHalfDayLeave =
+    String(row.leave_duration_type || "").toLowerCase() === "half_day" ||
+    Boolean(row.half_day_session) ||
+    Boolean(row.half_day_slot && row.half_day_slot !== "INVALID");
+
   // ==============================================
   // IMPORTANT:
-  // APPROVED LEAVE MUST NOT BE OVERRIDDEN
-  // BY withDisplayAttendanceStatus()
+  // ACTUAL ATTENDANCE TAKES PRECEDENCE OVER LEAVE REQUEST
+  // If employee has check-in/check-out, use policy engine
+  // Only use leave status if NO actual attendance exists
+  // FOR HALF-DAY LEAVE: Always let policy engine decide (no forced status)
   // ==============================================
 
-  if (isPaidLeave) {
-    return {
-      ...row,
+  const hasActualAttendance = row.check_in_time || row.check_out_time;
 
-      date: dateStr,
+  if (!hasActualAttendance) {
+    // No actual attendance
+    if (isHalfDayLeave) {
+      // Half-day leave with no attendance - return no_record
+      return {
+        ...row,
+        date: dateStr,
+        status: "no_record",
+        leave_type: row.leave_type,
+        leave_status: row.leave_status,
+        is_paid_leave: row.is_paid_leave,
+        half_day_slot: row.half_day_slot,
+      };
+    }
 
-      status: "paid_leave",
+    if (isUnpaidLeave) {
+      return {
+        ...row,
 
-      raw_status: row.attendance_status || row.status,
+        date: dateStr,
 
-      leave_type: "paid_leave",
-      leaveType: "paid_leave",
+        status: "unpaid_leave",
 
-      leave_status: "approved",
-      leaveStatus: "approved",
+        raw_status: row.attendance_status || row.status,
 
-      is_paid_leave: true,
-      isPaidLeave: true,
+        leave_type: "unpaid_leave",
+        leaveType: "unpaid_leave",
 
-      paid_days: Number(row.paid_days || 1),
-      paidDays: Number(row.paid_days || 1),
+        leave_status: "approved",
+        leaveStatus: "approved",
 
-      unpaid_days: Number(row.unpaid_days || 0),
-      unpaidDays: Number(row.unpaid_days || 0),
-    };
+        is_paid_leave: false,
+        isPaidLeave: false,
+
+        paid_days: Number(row.paid_days || 0),
+        paidDays: Number(row.paid_days || 0),
+
+        unpaid_days: Number(row.unpaid_days || 1),
+        unpaidDays: Number(row.unpaid_days || 1),
+      };
+    }
+
+    if (isPaidLeave) {
+      return {
+        ...row,
+
+        date: dateStr,
+
+        status: "paid_leave",
+
+        raw_status: row.attendance_status || row.status,
+
+        leave_type: "paid_leave",
+        leaveType: "paid_leave",
+
+        leave_status: "approved",
+        leaveStatus: "approved",
+
+        is_paid_leave: true,
+        isPaidLeave: true,
+
+        paid_days: Number(row.paid_days || 1),
+        paidDays: Number(row.paid_days || 1),
+
+        unpaid_days: Number(row.unpaid_days || 0),
+        unpaidDays: Number(row.unpaid_days || 0),
+      };
+    }
   }
 
-  if (isUnpaidLeave) {
-    return {
-      ...row,
+  // Has actual attendance OR is half-day leave - proceed to normal policy calculation
+  // Leave metadata is preserved but status is determined by work hours
 
-      date: dateStr,
-
-      status: "unpaid_leave",
-
-      raw_status: row.attendance_status || row.status,
-
-      leave_type: "unpaid_leave",
-      leaveType: "unpaid_leave",
-
-      leave_status: "approved",
-      leaveStatus: "approved",
-
-      is_paid_leave: false,
-      isPaidLeave: false,
-
-      paid_days: Number(row.paid_days || 0),
-      paidDays: Number(row.paid_days || 0),
-
-      unpaid_days: Number(row.unpaid_days || 1),
-      unpaidDays: Number(row.unpaid_days || 1),
-    };
-  }
+  // Has actual attendance - proceed to normal policy calculation
+  // Leave metadata is preserved but status is determined by work hours
 
   // ==============================================
   // NORMAL ATTENDANCE CALCULATION
@@ -2260,6 +2357,7 @@ const response = result.rows.map((row) => {
     {
       holidaySet,
       logsByDate,
+      halfDayLeaveAsNoRecord: true,
     }
   );
 });
@@ -2320,6 +2418,9 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
         a.production_hours,
         a.total_break_minutes,
         a.half_day_slot,
+        l.leave_duration_type,
+        l.half_day_session,
+        l.status AS leave_request_status,
         COALESCE(a.leave_type, l.leave_type) AS leave_type,
         COALESCE(a.leave_status, CASE WHEN l.id IS NOT NULL THEN 'approved' END) AS leave_status,
         a.post_login_idle_minutes,
@@ -2369,6 +2470,7 @@ router.get("/attendance/range/summary", verifyToken, async (req, res) => {
         dateStr: row.date,
         holidaySet,
         noRecordStatus: "absent",
+        halfDayLeaveAsNoRecord: true,
       });
 
       if (computed.computed_status === "full_day") item.present += 1;
@@ -2410,8 +2512,11 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
              a.status, a.late_minutes, a.check_in_time, a.check_out_time,
              a.production_hours, a.total_break_minutes,
              a.half_day_slot, a.leave_type, a.leave_status,
+             l.leave_duration_type, l.half_day_session,
+             l.status AS leave_request_status,
              a.post_login_idle_minutes, a.misuse_of_time
       FROM attendance_records a JOIN users u ON a.user_id=u.id
+      LEFT JOIN leave_requests l ON l.id = a.leave_request_id
       WHERE a.date BETWEEN $1 AND $2 AND u.role!='SUPER_ADMIN'`;
     const params = [start, end];
     let idx = 3;
@@ -2426,7 +2531,9 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
     // leave with no punch row silently disappeared from the monthly grid.
     const leaveParams = [start, end];
     let leaveQuery = `
-      SELECT l.user_id, l.leave_type, l.from_date, l.to_date
+      SELECT l.user_id, l.leave_type, l.from_date, l.to_date,
+             l.leave_duration_type, l.half_day_session,
+             l.paid_days, l.unpaid_days
       FROM leave_requests l
       JOIN users u ON l.user_id = u.id
       WHERE LOWER(l.status) = 'approved'
@@ -2455,7 +2562,7 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
         const day = String(cur.getDate()).padStart(2, "0");
         const dateStr = `${year}-${month}-${day}`;
         if (dateStr >= start && dateStr <= end) {
-          leaveByUserDate.set(`${lv.user_id}_${dateStr}`, lv.leave_type);
+          leaveByUserDate.set(`${lv.user_id}_${dateStr}`, lv);
         }
         cur.setDate(cur.getDate() + 1);
       }
@@ -2465,16 +2572,30 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
     const seenUserDate = new Set();
 
     for (const row of result.rows) {
-      const leaveType = leaveByUserDate.get(`${row.user_id}_${row.date}`);
-      const merged = leaveType
-        ? { ...row, leave_type: row.leave_type || leaveType, leave_status: row.leave_status || "approved" }
+      const leave = leaveByUserDate.get(`${row.user_id}_${row.date}`);
+      const merged = leave
+        ? {
+            ...row,
+            leave_type: row.leave_type || leave.leave_type,
+            leave_status: row.leave_status || "approved",
+            leave_request_status: row.leave_request_status || "approved",
+            leave_duration_type: row.leave_duration_type || leave.leave_duration_type,
+            half_day_session: row.half_day_session || leave.half_day_session,
+            paid_days: row.paid_days ?? leave.paid_days,
+            unpaid_days: row.unpaid_days ?? leave.unpaid_days,
+          }
         : row;
 
       if (!grouped[row.user_id]) grouped[row.user_id] = [];
       grouped[row.user_id].push(
         // FIX: withDisplayAttendanceStatus was undefined in the provided
         // files; use the shared, verified engine instead.
-        withComputedAttendanceStatus(merged, { dateStr: row.date, holidaySet, logsByDate })
+        withComputedAttendanceStatus(merged, {
+          dateStr: row.date,
+          holidaySet,
+          logsByDate,
+          halfDayLeaveAsNoRecord: true,
+        })
       );
       seenUserDate.add(`${row.user_id}_${row.date}`);
     }
@@ -2494,10 +2615,20 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
             date: dateStr,
             leave_type: lv.leave_type,
             leave_status: "approved",
+            leave_request_status: "approved",
+            leave_duration_type: lv.leave_duration_type,
+            half_day_session: lv.half_day_session,
+            paid_days: lv.paid_days,
+            unpaid_days: lv.unpaid_days,
           };
           if (!grouped[lv.user_id]) grouped[lv.user_id] = [];
           grouped[lv.user_id].push(
-            withComputedAttendanceStatus(synthetic, { dateStr, holidaySet, logsByDate })
+            withComputedAttendanceStatus(synthetic, {
+              dateStr,
+              holidaySet,
+              logsByDate,
+              halfDayLeaveAsNoRecord: true,
+            })
           );
           seenUserDate.add(`${lv.user_id}_${dateStr}`);
         }
@@ -3462,25 +3593,33 @@ router.get(
           -- ==================================================
           -- FINAL STATUS
           -- ==================================================
+          -- IMPORTANT: Half-day leave must NOT force status.
+          -- Status must be determined by actual attendance only.
+          -- ==================================================
 
           CASE
 
-            -- HALF-DAY LEAVE (priority over paid/unpaid)
+            -- HALF-DAY LEAVE (must come BEFORE full-day leave checks)
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
-              AND (lr.leave_duration_type = 'half_day' OR lr.paid_days = 0.5 OR lr.unpaid_days = 0.5)
-            THEN 'half_day'
+              AND (
+                lr.leave_duration_type = 'half_day'
+                OR (lr.leave_duration_type IS NULL AND lr.half_day_session IS NOT NULL)
+              )
+            THEN 'no_record'
 
-            -- PAID LEAVE
+            -- PAID LEAVE (full-day only, only when NO actual attendance)
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
               AND COALESCE(lr.paid_days, 0) > 0
+              AND (ar.check_in_time IS NULL AND ar.check_out_time IS NULL)
             THEN 'paid_leave'
 
-            -- UNPAID LEAVE
+            -- UNPAID LEAVE (full-day only, only when NO actual attendance)
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
               AND COALESCE(lr.unpaid_days, 0) > 0
+              AND (ar.check_in_time IS NULL AND ar.check_out_time IS NULL)
             THEN 'unpaid_leave'
 
             -- NORMAL ATTENDANCE
@@ -3513,8 +3652,12 @@ router.get(
           -- ================================================
           CASE
             WHEN ar.half_day_slot IS NOT NULL THEN ar.half_day_slot
-            WHEN lr.leave_duration_type = 'half_day' AND lr.half_day_session = 'morning' THEN 'SLOT_A'
-            WHEN lr.leave_duration_type = 'half_day' AND lr.half_day_session = 'afternoon' THEN 'SLOT_B'
+            WHEN lr.half_day_session = 'morning'
+              AND (lr.leave_duration_type = 'half_day' OR lr.leave_duration_type IS NULL)
+            THEN 'SLOT_A'
+            WHEN lr.half_day_session = 'afternoon'
+              AND (lr.leave_duration_type = 'half_day' OR lr.leave_duration_type IS NULL)
+            THEN 'SLOT_B'
             ELSE NULL
           END AS half_day_slot,
 
@@ -3724,7 +3867,13 @@ router.get(
           };
         }
 
-        if (row.status === "half_day") {
+        // ======================================================
+        // HALF-DAY STATUS
+        // IMPORTANT: Only set half_day if there is actual attendance
+        // half_day_slot alone should not force status
+        // ======================================================
+
+        if (row.status === "half_day" && (row.check_in_time || row.check_out_time)) {
           return {
             ...row,
             status: "half_day",
@@ -3743,6 +3892,7 @@ router.get(
           {
             holidaySet,
             logsByDate,
+            halfDayLeaveAsNoRecord: true,
           }
         );
       });
@@ -3822,39 +3972,66 @@ router.get(
           -- DATE-LEVEL ATTENDANCE IS THE SOURCE OF TRUTH.
           -- A leave request can be mixed paid/unpaid, so it must never
           -- overwrite a persisted paid_leave/unpaid_leave day.
-          -- Half-day status has priority over leave type computation.
+          -- IMPORTANT: Half-day status MUST come from actual attendance,
+          -- NOT from half_day_slot alone. half_day_slot is only for
+          -- tracking leave request metadata and should not force status.
           -- ================================================
           CASE
+            WHEN ar.id IS NOT NULL
+              AND ar.check_in_time IS NULL
+              AND ar.check_out_time IS NULL
+              AND (
+                lr.leave_duration_type = 'half_day'
+                OR (lr.leave_duration_type IS NULL AND lr.half_day_session IS NOT NULL)
+                OR (ar.half_day_slot IS NOT NULL AND ar.half_day_slot <> 'INVALID')
+              )
+            THEN 'no_record'
+
             WHEN ar.id IS NOT NULL THEN
               CASE
-                -- Priority 1: Half-day status
-                WHEN ar.status = 'half_day' OR ar.half_day_slot IS NOT NULL
+                -- IMPORTANT: If there is actual attendance, don't use leave status
+                -- Let the computed status determine the final status based on work hours
+                WHEN ar.check_in_time IS NOT NULL OR ar.check_out_time IS NOT NULL
+                THEN COALESCE(ar.status, 'absent')
+
+                -- Priority 1: Half-day status from actual attendance only
+                -- Only use half_day if there is actual attendance (check-in or check-out)
+                WHEN ar.status = 'half_day'
+                  AND (ar.check_in_time IS NOT NULL OR ar.check_out_time IS NOT NULL)
                 THEN 'half_day'
-                
-                -- Priority 2: Use is_paid_leave flag for paid/unpaid leave
+
+                -- Priority 2: Use is_paid_leave flag for paid/unpaid leave (only when NO attendance)
                 WHEN ar.is_paid_leave = true
                 THEN 'paid_leave'
-                
+
                 WHEN ar.is_paid_leave = false AND (ar.leave_type = 'unpaid_leave' OR ar.leave_type = 'unpaid')
                 THEN 'unpaid_leave'
-                
+
                 -- Priority 3: Fall back to raw status
                 ELSE COALESCE(ar.status, 'absent')
               END
 
+            -- HALF-DAY LEAVE (must come BEFORE full-day leave checks)
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
-              AND (lr.leave_duration_type = 'half_day' OR lr.paid_days = 0.5 OR lr.unpaid_days = 0.5)
-            THEN 'half_day'
+              AND (
+                lr.leave_duration_type = 'half_day'
+                OR (lr.leave_duration_type IS NULL AND lr.half_day_session IS NOT NULL)
+              )
+            THEN 'no_record'
 
+            -- PAID LEAVE (full-day only)
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
               AND COALESCE(lr.paid_days, 0) > 0
+              AND (ar.check_in_time IS NULL AND ar.check_out_time IS NULL)
             THEN 'paid_leave'
 
+            -- UNPAID LEAVE (full-day only)
             WHEN lr.id IS NOT NULL
               AND LOWER(COALESCE(lr.status, '')) = 'approved'
               AND COALESCE(lr.unpaid_days, 0) > 0
+              AND (ar.check_in_time IS NULL AND ar.check_out_time IS NULL)
             THEN 'unpaid_leave'
 
             ELSE 'no_record'
@@ -3873,8 +4050,12 @@ router.get(
           -- ================================================
           CASE
             WHEN ar.half_day_slot IS NOT NULL THEN ar.half_day_slot
-            WHEN lr.leave_duration_type = 'half_day' AND lr.half_day_session = 'morning' THEN 'SLOT_A'
-            WHEN lr.leave_duration_type = 'half_day' AND lr.half_day_session = 'afternoon' THEN 'SLOT_B'
+            WHEN lr.half_day_session = 'morning'
+              AND (lr.leave_duration_type = 'half_day' OR lr.leave_duration_type IS NULL)
+            THEN 'SLOT_A'
+            WHEN lr.half_day_session = 'afternoon'
+              AND (lr.leave_duration_type = 'half_day' OR lr.leave_duration_type IS NULL)
+            THEN 'SLOT_B'
             ELSE NULL
           END AS half_day_slot,
 
@@ -3967,7 +4148,9 @@ router.get(
       // ======================================================
 
       const response = result.rows.map((row) => {
-        if (row.status === "paid_leave") {
+        const hasActualAttendance = Boolean(row.check_in_time || row.check_out_time);
+
+        if (!hasActualAttendance && row.status === "paid_leave") {
           return {
             ...row,
             status: "paid_leave",
@@ -3976,21 +4159,12 @@ router.get(
           };
         }
 
-        if (row.status === "unpaid_leave") {
+        if (!hasActualAttendance && row.status === "unpaid_leave") {
           return {
             ...row,
             status: "unpaid_leave",
             is_unpaid_leave: true,
             isUnpaidLeave: true,
-          };
-        }
-
-        if (row.status === "half_day") {
-          return {
-            ...row,
-            status: "half_day",
-            is_half_day: true,
-            isHalfDay: true,
           };
         }
 
@@ -4000,6 +4174,7 @@ router.get(
           {
             holidaySet,
             logsByDate,
+            halfDayLeaveAsNoRecord: true,
           }
         );
       });
@@ -4076,9 +4251,12 @@ router.get("/attendance/paged", verifyToken, async (req, res) => {
                 a.check_in_time, a.check_out_time, ${normalizedAttendanceStatusSql("a")} AS status, a.late_minutes,
                 a.production_hours, a.total_break_minutes,
                 a.half_day_slot, a.leave_type, a.leave_status,
+                lr.leave_duration_type, lr.half_day_session,
+                lr.status AS leave_request_status,
                 a.post_login_idle_minutes, a.misuse_of_time
          FROM users u
          LEFT JOIN attendance_records a ON a.user_id=u.id AND a.date=$${idx}
+         LEFT JOIN leave_requests lr ON lr.id = a.leave_request_id
          WHERE ${baseWhere}
          ORDER BY u.full_name ASC LIMIT $${idx+1} OFFSET $${idx+2}`,
         [...params, date, pageSize, offset]
@@ -4098,7 +4276,7 @@ router.get("/attendance/paged", verifyToken, async (req, res) => {
             total_break_minutes: r.total_break_minutes || 0,
           },
           date,
-          { holidaySet }
+          { holidaySet, halfDayLeaveAsNoRecord: true }
         )
       ),
       total: Number(countRes.rows[0].total),

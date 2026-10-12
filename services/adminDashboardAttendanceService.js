@@ -1,4 +1,5 @@
 import { pool } from "../middleware/db.js";
+import { getComputedAttendanceStatus } from "../utils/computedAttendanceStatus.js";
 
 const LEAVE_STATUSES = new Set(["paid_leave", "unpaid_leave"]);
 
@@ -120,10 +121,34 @@ return effectiveSummaryDate;
 
 const hasCheckIn = Boolean(record?.check_in_time);
 const hasCheckOut = Boolean(record?.check_out_time);
+const hasAttendance = hasCheckIn || hasCheckOut;
+const hasHalfDayMetadata =
+  normalizeStatus(record?.leave_duration_type) === "half_day" ||
+  Boolean(record?.half_day_session) ||
+  Boolean(record?.half_day_slot && record.half_day_slot !== "INVALID");
+const hasLeaveMetadata = Boolean(
+  record?.leave_request_id ||
+  record?.leave_request_status ||
+  record?.leave_status ||
+  record?.leave_type ||
+  record?.is_paid_leave === true
+);
 
 let attendanceStatus;
 
-if (
+if (hasHalfDayMetadata && !hasAttendance) {
+attendanceStatus = "no_record";
+} else if (hasAttendance && hasLeaveMetadata) {
+const computed = getComputedAttendanceStatus(record, {
+  dateStr: date,
+  todayStr: today,
+  halfDayLeaveAsNoRecord: true,
+});
+attendanceStatus =
+  computed.computed_status === "in_progress"
+    ? "working"
+    : computed.computed_status;
+} else if (
 rawStatus === "paid_leave" ||
 leaveType === "paid_leave" ||
 record?.is_paid_leave === true
@@ -427,20 +452,25 @@ pool.query(
 pool.query(
   `
   SELECT
-    user_id,
-    TO_CHAR(date, 'YYYY-MM-DD') AS date,
-    status,
-    check_in_time,
-    check_out_time,
-    late_minutes,
-    production_hours,
-    total_break_minutes,
-    half_day_slot,
-    leave_type,
-    leave_status,
-    is_paid_leave,
-    leave_request_id
+    a.user_id,
+    TO_CHAR(a.date, 'YYYY-MM-DD') AS date,
+    a.status,
+    a.check_in_time,
+    a.check_out_time,
+    a.late_minutes,
+    a.production_hours,
+    a.total_break_minutes,
+    a.half_day_slot,
+    a.leave_type,
+    a.leave_status,
+    a.is_paid_leave,
+    a.leave_request_id,
+    lr.leave_duration_type,
+    lr.half_day_session,
+    lr.status AS leave_request_status
   FROM attendance_records a
+  LEFT JOIN leave_requests lr
+    ON lr.id = a.leave_request_id
   JOIN users u
     ON u.id = a.user_id
   WHERE
@@ -574,6 +604,15 @@ const dailySummary = [];
 
    half_day_slot:
      raw?.half_day_slot || null,
+
+   leave_duration_type:
+     raw?.leave_duration_type || null,
+
+   half_day_session:
+     raw?.half_day_session || null,
+
+   leave_request_status:
+     raw?.leave_request_status || null,
 
    leave_type:
      raw?.leave_type || null,

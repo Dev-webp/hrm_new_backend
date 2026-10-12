@@ -50,17 +50,16 @@ function sameNumber(left, right) {
  */
 function splitLeaveByMonth(fromDate, toDate) {
   const segments = [];
-  const current = new Date(fromDate);
+  let current = new Date(fromDate);
   const end = new Date(toDate);
 
   while (current <= end) {
     const year = current.getFullYear();
     const month = current.getMonth();
-    
     // Get last day of current month
     const lastDayOfMonth = new Date(year, month + 1, 0);
     
-    // The segment ends at either the last day of month or the leave end date
+   // The segment ends at either the last day of month or the leave end date
     const segmentEnd = lastDayOfMonth < end ? lastDayOfMonth : end;
     
     // Calculate days in this segment
@@ -434,7 +433,8 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
       // FINAL ATTENDANCE STATUS
       //
       // IMPORTANT:
-      // If leave request is half-day -> status = half_day
+      // If leave request is half-day -> NO status (null)
+      //   Status will be determined by actual attendance when employee checks in
       // If leave request is full-day:
       //   - If paid -> paid_leave
       //   - If unpaid -> unpaid_leave
@@ -445,11 +445,12 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
       let finalHalfDaySlot = halfDaySlot;
 
       if (durationType === "half_day" || halfDaySlot) {
-        // Half-day leave request - use half_day status
-        finalStatus = "half_day";
+        // Half-day leave request - DO NOT set status
+        // Status will be determined by actual attendance when employee checks in
+        finalStatus = null;
         finalLeaveType = allocation.leaveType; // Still track paid/unpaid for payroll
         finalHalfDaySlot = halfDaySlot || "INVALID";
-        console.log("HALF-DAY LEAVE REQUEST:", { dateStr, session: leave.half_day_session, slot: finalHalfDaySlot });
+        console.log("HALF-DAY LEAVE REQUEST - NO STATUS SET:", { dateStr, session: leave.half_day_session, slot: finalHalfDaySlot });
       } else {
         // Full-day leave request - use paid_leave or unpaid_leave status
         finalStatus = allocation.status;
@@ -472,69 +473,130 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
 
       // ========================================================
       // INSERT / UPDATE ATTENDANCE RECORD
+      //
+      // IMPORTANT:
+      // For half-day leave: status = null (No Record)
+      // For full-day leave: status = paid_leave/unpaid_leave
+      // If employee already has check-in/check-out, preserve actual attendance
       // ========================================================
 
-      await pool.query(
+      // Check if employee already has attendance punches
+      const existingAttendance = await pool.query(
         `
-        INSERT INTO attendance_records (
-          user_id,
-          date,
-          status,
-          leave_type,
-          leave_status,
-          is_paid_leave,
-          leave_request_id,
-          half_day_slot,
-          branch,
-          department
-        )
-        VALUES (
-          $1,
-          $2::date,
-          $3,
-          $4,
-          'approved',
-          $5,
-          $6,
-          $7,
-          $8,
-          $9
-        )
-
-        ON CONFLICT (user_id, date)
-
-        DO UPDATE SET
-
-          status = EXCLUDED.status,
-
-          leave_type = EXCLUDED.leave_type,
-
-          leave_status = EXCLUDED.leave_status,
-
-          is_paid_leave = EXCLUDED.is_paid_leave,
-
-          leave_request_id = EXCLUDED.leave_request_id,
-
-          half_day_slot = EXCLUDED.half_day_slot,
-
-          branch = EXCLUDED.branch,
-
-          department = EXCLUDED.department,
-
-          updated_at = CURRENT_TIMESTAMP
+        SELECT check_in_time, check_out_time
+        FROM attendance_records
+        WHERE user_id = $1 AND date = $2::date
         `,
-        [
-          leave.user_id,
-          dateStr,
-          finalStatus,
-          finalLeaveType,
-          isPaid,
-          leave.id,
-          finalHalfDaySlot,
-          user.branch || leave.branch || null,
-          user.department || leave.department || null,
-        ]
+        [leave.user_id, dateStr]
       );
+
+      const hasExistingPunches = existingAttendance.rows[0]?.check_in_time ||
+                                   existingAttendance.rows[0]?.check_out_time;
+
+      if (hasExistingPunches) {
+        // Employee already checked in/out - preserve punches and recalculate status
+        // Don't overwrite with leave status - let policy engine decide based on work hours
+        console.log("EMPLOYEE HAS EXISTING PUNCHES - PRESERVING ATTENDANCE:", dateStr);
+
+        await pool.query(
+          `
+          UPDATE attendance_records
+          SET
+            leave_type = $1,
+            leave_status = 'approved',
+            is_paid_leave = $2,
+            leave_request_id = $3,
+            half_day_slot = $4,
+            branch = $5,
+            department = $6,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE user_id = $7 AND date = $8::date
+          `,
+          [
+            finalLeaveType,
+            isPaid,
+            leave.id,
+            finalHalfDaySlot,
+            user.branch || leave.branch || null,
+            user.department || leave.department || null,
+            leave.user_id,
+            dateStr,
+          ]
+        );
+
+        // Recalculate status using policy engine (actual attendance takes precedence)
+        await recalcAttendanceForUserDate(leave.user_id, dateStr, {
+          source: "leave_approval_with_existing_attendance",
+          logResult: true,
+        });
+      } else {
+        // No existing punches
+        // For half-day leave: status = null (No Record)
+        // For full-day leave: status = paid_leave/unpaid_leave
+        console.log("NO EXISTING PUNCHES - USING LEAVE STATUS:", dateStr);
+
+        await pool.query(
+          `
+          INSERT INTO attendance_records (
+            user_id,
+            date,
+            status,
+            leave_type,
+            leave_status,
+            is_paid_leave,
+            leave_request_id,
+            half_day_slot,
+            branch,
+            department
+          )
+          VALUES (
+            $1,
+            $2::date,
+            $3,
+            $4,
+            'approved',
+            $5,
+            $6,
+            $7,
+            $8,
+            $9
+          )
+
+          ON CONFLICT (user_id, date)
+
+          DO UPDATE SET
+
+            status = EXCLUDED.status,
+
+            leave_type = EXCLUDED.leave_type,
+
+            leave_status = EXCLUDED.leave_status,
+
+            is_paid_leave = EXCLUDED.is_paid_leave,
+
+            leave_request_id = EXCLUDED.leave_request_id,
+
+            half_day_slot = EXCLUDED.half_day_slot,
+
+            branch = EXCLUDED.branch,
+
+            department = EXCLUDED.department,
+
+            updated_at = CURRENT_TIMESTAMP
+          `,
+          [
+            leave.user_id,
+            dateStr,
+            finalStatus,
+            finalLeaveType,
+            isPaid,
+            leave.id,
+            finalHalfDaySlot,
+            user.branch || leave.branch || null,
+            user.department || leave.department || null,
+          ]
+        );
+      }
 
       console.log(
         "✅ ATTENDANCE CREATED/UPDATED:",
@@ -678,15 +740,23 @@ router.get(
   authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
-      const { userId, month } = req.query;
+      const { userId, month, context } = req.query;
 
       if (!userId || !month || !/^\d{4}-\d{2}$/.test(month)) {
         return res.status(400).json({ message: "userId and month=YYYY-MM are required" });
       }
 
       const [year, monthNumber] = month.split("-").map(Number);
-      const monthStart = `${month}-01`;
-      const monthEnd = `${month}-${String(new Date(year, monthNumber, 0).getDate()).padStart(2, "0")}`;
+      let monthStart = `${month}-01`;
+      let monthEnd = `${month}-${String(new Date(year, monthNumber, 0).getDate()).padStart(2, "0")}`;
+      if (context === "1") {
+        const first = new Date(year, monthNumber - 1, 1);
+        const last = new Date(year, monthNumber, 0);
+        first.setDate(first.getDate() - 2);
+        last.setDate(last.getDate() + 1);
+        monthStart = `${first.getFullYear()}-${String(first.getMonth() + 1).padStart(2, "0")}-${String(first.getDate()).padStart(2, "0")}`;
+        monthEnd = `${last.getFullYear()}-${String(last.getMonth() + 1).padStart(2, "0")}-${String(last.getDate()).padStart(2, "0")}`;
+      }
 
       const targetUser = await pool.query(
         "SELECT id, branch FROM users WHERE id = $1 AND role != 'SUPER_ADMIN'",
@@ -838,7 +908,7 @@ router.get(
 router.get(
   "/leave/pending-count",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     try {
       const params = [];

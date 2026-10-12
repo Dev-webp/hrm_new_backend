@@ -46,6 +46,9 @@ function expandLeaveDates(leaves, start, end) {
         map.set(ds, {
           leaveType: lv.leave_type,
           isPaidLeave: lv.is_paid_leave === true || lv.leave_type === "Paid",
+          leaveDurationType: lv.leave_duration_type,
+          halfDaySession: lv.half_day_session,
+          leaveRequestStatus: lv.status,
           reason: lv.reason,
         });
       }
@@ -209,9 +212,12 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
       Number(att?.total_break_minutes) ||
       0;
 
+    const leaveInfo = leaveDateMap.get(dateStr);
     let computed = getComputedAttendanceStatus(
       {
         ...(att || {}),
+        leave_duration_type: att?.leave_duration_type || leaveInfo?.leaveDurationType,
+        leave_request_status: att?.leave_request_status || leaveInfo?.leaveRequestStatus,
         date: dateStr,
         break1_in: b1.start_time,
         break1_out: b1.end_time,
@@ -229,6 +235,7 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
         dateStr,
         holidaySet,
         noRecordStatus: dateStr > todayStr ? "no_record" : "absent",
+        halfDayLeaveAsNoRecord: true,
       }
     );
     let status = computed.computed_status;
@@ -241,23 +248,38 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
         : att?.is_paid_leave === true;
     let leaveType = att?.leave_type || null;
 
-    const leaveInfo = leaveDateMap.get(dateStr);
     // Attendance records are the date-level source of truth.  Only use the
     // approved request as a legacy fallback when no record exists yet.
     if (leaveInfo && !att) {
-      status = "leave";
-      isPaidLeave = leaveInfo.isPaidLeave;
-      leaveType = leaveInfo.leaveType;
-      computed = {
-        ...computed,
-        computed_status: "leave",
-        display_status: "Leave",
-        policy_status: "leave",
-        policy_reason: "Approved leave",
-      };
+      if (leaveInfo.leaveDurationType === "half_day") {
+        status = "no_record";
+        isPaidLeave = false;
+        computed = {
+          ...computed,
+          computed_status: "no_record",
+          display_status: "No Record",
+          policy_status: "no_record",
+          policy_reason: "Half-day leave does not determine attendance status",
+        };
+      } else {
+        status = "leave";
+        isPaidLeave = leaveInfo.isPaidLeave;
+        leaveType = leaveInfo.leaveType;
+        computed = {
+          ...computed,
+          computed_status: "leave",
+          display_status: "Leave",
+          policy_status: "leave",
+          policy_reason: "Approved leave",
+        };
+      }
     } else if (att?.leave_request_id || leaveInfo) {
       leaveType = leaveType || leaveInfo?.leaveType || null;
-      if (status !== "paid_leave" && status !== "unpaid_leave") {
+      if (
+        leaveInfo?.leaveDurationType !== "half_day" &&
+        status !== "paid_leave" &&
+        status !== "unpaid_leave"
+      ) {
         isPaidLeave = isPaidLeave || leaveInfo?.isPaidLeave || false;
       }
     }
@@ -449,4 +471,3 @@ export async function getEmployeeMonthlyAnalysis(userId, month, branchFilter = n
 
   
 }
-

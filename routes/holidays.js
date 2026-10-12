@@ -19,17 +19,33 @@ function normalizeDate(dateValue) {
 router.get("/holidays", verifyToken, async (req, res) => {
     try {
         const { year, month } = req.query;
+        let branch = req.query.branch;
+        if (!["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(req.user.role)) {
+            const userResult = await pool.query(
+                "SELECT branch FROM users WHERE id = $1",
+                [req.user.id]
+            );
+            branch = userResult.rows[0]?.branch;
+        }
         let query = `SELECT id, name, type, branch, created_by, created_at,
                      TO_CHAR(date, 'YYYY-MM-DD') AS date
                      FROM company_holidays`;
         let params = [];
+        const conditions = [];
         if (year && month) {
-            query += ` WHERE EXTRACT(YEAR FROM date) = $1 AND EXTRACT(MONTH FROM date) = $2`;
-            params = [year, month];
+            conditions.push(`EXTRACT(YEAR FROM date) = $${params.length + 1}`);
+            params.push(year);
+            conditions.push(`EXTRACT(MONTH FROM date) = $${params.length + 1}`);
+            params.push(month);
         } else if (year) {
-            query += ` WHERE EXTRACT(YEAR FROM date) = $1`;
-            params = [year];
+            conditions.push(`EXTRACT(YEAR FROM date) = $${params.length + 1}`);
+            params.push(year);
         }
+        if (branch) {
+            conditions.push(`(branch = 'all' OR branch = $${params.length + 1})`);
+            params.push(branch);
+        }
+        if (conditions.length) query += ` WHERE ${conditions.join(" AND ")}`;
         query += ` ORDER BY date ASC`;
         const result = await pool.query(query, params);
 

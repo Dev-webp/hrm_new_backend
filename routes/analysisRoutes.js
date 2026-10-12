@@ -60,6 +60,12 @@ function monthRange(yearMonth) {
   return { start, end, year: y, month: m };
 }
 
+function shiftDate(dateStr, days) {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const date = new Date(year, month - 1, day + days);
+  return formatDateStr(date);
+}
+
 function normalizedAttendanceStatusSql(alias = "a") {
   return `COALESCE(${alias}.status, 'absent')`;
 }
@@ -161,14 +167,16 @@ router.get(
         ),
         pool.query(
           `SELECT
-             user_id,
-             TO_CHAR(date,'YYYY-MM-DD') AS date,
-             status, check_in_time, check_out_time,
-             late_minutes, production_hours, total_break_minutes,
-             half_day_slot, leave_type, leave_status,
-             post_login_idle_minutes, misuse_of_time
-           FROM attendance_records
-           WHERE date BETWEEN $1::date AND $2::date`,
+             a.user_id,
+             TO_CHAR(a.date,'YYYY-MM-DD') AS date,
+             a.status, a.check_in_time, a.check_out_time,
+             a.late_minutes, a.production_hours, a.total_break_minutes,
+             a.half_day_slot, a.leave_type, a.leave_status,
+             lr.leave_duration_type, lr.status AS leave_request_status,
+             a.post_login_idle_minutes, a.misuse_of_time
+           FROM attendance_records a
+           LEFT JOIN leave_requests lr ON lr.id = a.leave_request_id
+           WHERE a.date BETWEEN $1::date AND $2::date`,
           [start, end]
         ),
         pool.query(
@@ -235,6 +243,7 @@ router.get(
             dateStr,
             holidaySet,
             noRecordStatus: "absent",
+            halfDayLeaveAsNoRecord: true,
           });
 
           if (computed.computed_status === "full_day") summary.full_days += 1;
@@ -329,6 +338,8 @@ router.get(
       if (cached) return res.json({ ...cached, _cached: true });
 
       const { start, end, year, month: m } = monthRange(month);
+      const contextStart = shiftDate(start, -2);
+      const contextEnd = shiftDate(end, 1);
 
       // ── Security: MANAGER branch check ───────────────────────
       if (req.user.role === "MANAGER") {
@@ -339,20 +350,22 @@ router.get(
           return res.status(403).json({ message: "Cross-branch access denied" });
       }
 
-      // ── Fire all 3 queries in parallel ───────────────────────
-      const [attRows, breakRows, holidayRows] = await Promise.all([
+      // ── Fetch attendance context plus the displayed month data ──
+      const [attRows, breakRows, holidayRows, userRows] = await Promise.all([
         pool.query(
           `SELECT
-             TO_CHAR(date,'YYYY-MM-DD') AS date,
-             check_in_time, check_out_time, status,
-             late_minutes, production_hours,
-             total_break_minutes, half_day_slot,
-             is_paid_leave, leave_type, leave_status,
-             post_login_idle_minutes, misuse_of_time
-           FROM attendance_records
-           WHERE user_id = $1 AND date BETWEEN $2 AND $3
-           ORDER BY date ASC`,
-          [userId, start, end]
+             TO_CHAR(a.date,'YYYY-MM-DD') AS date,
+             a.check_in_time, a.check_out_time, a.status,
+             a.late_minutes, a.production_hours,
+             a.total_break_minutes, a.half_day_slot,
+             a.is_paid_leave, a.leave_type, a.leave_status,
+             lr.leave_duration_type, lr.status AS leave_request_status,
+             a.post_login_idle_minutes, a.misuse_of_time
+           FROM attendance_records a
+           LEFT JOIN leave_requests lr ON lr.id = a.leave_request_id
+           WHERE a.user_id = $1 AND a.date BETWEEN $2 AND $3
+           ORDER BY a.date ASC`,
+          [userId, contextStart, contextEnd]
         ),
         pool.query(
           `SELECT
@@ -364,11 +377,17 @@ router.get(
           [userId, start, end]
         ),
         pool.query(
-          `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date
+          `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date, type, name
            FROM company_holidays
-           WHERE EXTRACT(YEAR FROM date) = $1
-             AND EXTRACT(MONTH FROM date) = $2`,
-          [year, m]
+           WHERE date BETWEEN $1 AND $2
+             AND (branch = 'all' OR branch = (SELECT branch FROM users WHERE id = $3))
+           ORDER BY date`,
+          [contextStart, contextEnd, userId]
+        ),
+        pool.query(
+          `SELECT TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date
+           FROM users WHERE id = $1`,
+          [userId]
         ),
       ]);
 
@@ -452,6 +471,7 @@ router.get(
             dateStr,
             holidaySet,
             noRecordStatus: dateStr > todayStr ? "no_record" : "absent",
+            halfDayLeaveAsNoRecord: true,
           }
         );
 
@@ -477,13 +497,21 @@ router.get(
           },
           // Add raw attendance fields for frontend status determination
           half_day_slot: att?.half_day_slot || null,
+          leave_duration_type: att?.leave_duration_type || null,
+          leave_request_status: att?.leave_request_status || att?.leave_status || null,
           is_paid_leave: att?.is_paid_leave || null,
           leave_type: att?.leave_type || null,
           leave_request_id: att?.leave_request_id || null,
         });
       }
 
-      const result = { records: safeAnalysisRecords(records), month };
+      const result = {
+        records: safeAnalysisRecords(records),
+        contextRecords: attRows.rows,
+        holidays: holidayRows.rows,
+        joiningDate: userRows.rows[0]?.joining_date || null,
+        month,
+      };
       setCache(ck, result);
       res.json(result);
     } catch (err) {
@@ -535,13 +563,15 @@ router.get(
             empParams
           ),
           pool.query(
-            `SELECT user_id, TO_CHAR(date,'YYYY-MM-DD') AS date,
-                    status, check_in_time, check_out_time,
-                    late_minutes, production_hours, total_break_minutes,
-                    half_day_slot, leave_type, leave_status,
-                    post_login_idle_minutes, misuse_of_time
-             FROM attendance_records
-             WHERE date BETWEEN $1::date AND $2::date`,
+            `SELECT a.user_id, TO_CHAR(a.date,'YYYY-MM-DD') AS date,
+                    a.status, a.check_in_time, a.check_out_time,
+                    a.late_minutes, a.production_hours, a.total_break_minutes,
+                    a.half_day_slot, a.leave_type, a.leave_status,
+                    lr.leave_duration_type, lr.status AS leave_request_status,
+                    a.post_login_idle_minutes, a.misuse_of_time
+             FROM attendance_records a
+             LEFT JOIN leave_requests lr ON lr.id = a.leave_request_id
+             WHERE a.date BETWEEN $1::date AND $2::date`,
             [start, end]
           ),
           pool.query(
@@ -592,6 +622,7 @@ router.get(
               dateStr,
               holidaySet,
               noRecordStatus: "absent",
+              halfDayLeaveAsNoRecord: true,
             });
             if (["full_day", "working", "in_progress"].includes(computed.computed_status)) {
               trend.present += 1;
@@ -671,5 +702,3 @@ function fmtT(t) {
 // ── Cache invalidation export (call from checkin/checkout routes) ─
 export { invalidateCache };
 export default router;
-
-

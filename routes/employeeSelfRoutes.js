@@ -273,21 +273,20 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
       }
 
       // If record exists but no check_in_time (e.g., half-day leave), allow check-in by updating
+      // IMPORTANT: Don't hardcode status - let the policy engine calculate it
       const lateMinutes = calculateLateMinutes(currentTime);
 
       result = await pool.query(
         `
         UPDATE attendance_records
         SET check_in_time = $1,
-            status = $2,
-            late_minutes = $3,
+            late_minutes = $2,
             updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $4 AND date = $5
+        WHERE user_id = $3 AND date = $4
         RETURNING *
         `,
         [
           currentTime,
-          'present',
           lateMinutes,
           userId,
           date
@@ -295,8 +294,8 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
       );
     } else {
       // No existing record, create new one
+      // IMPORTANT: Don't hardcode status - let the policy engine calculate it
       const lateMinutes = calculateLateMinutes(currentTime);
-      const status = 'present';
 
       result = await pool.query(
         `
@@ -306,7 +305,6 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
           date,
           check_in_time,
           check_out_time,
-          status,
           late_minutes,
           production_hours,
           total_break_minutes,
@@ -314,20 +312,26 @@ router.post("/employee/check-in", verifyToken, async (req, res) => {
           department
         )
         VALUES
-        ($1,$2,$3,NULL,$4,$5,0,0,$6,$7)
+        ($1,$2,$3,NULL,$4,0,0,$5,$6)
         RETURNING *
         `,
         [
           userId,
           date,
           currentTime,
-          status,
           lateMinutes,
           user.branch,
           user.department
         ]
       );
     }
+
+    // IMPORTANT: Recalculate status using the attendance policy engine
+    // This ensures actual attendance takes precedence over leave requests
+    await recalcAttendanceForUserDate(userId, date, {
+      source: "employee_checkin",
+      logResult: true,
+    });
     // 🔄 SYNC — mark this employee online for invoice round-robin
     fetch("https://invoice.vjcoverseas.com/api/departments/staff/online", {
       method: "POST",

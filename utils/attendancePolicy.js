@@ -209,7 +209,13 @@ export function calculateHalfDayEffectiveMinutes(log, slot) {
   const workEnd = Math.min(outSec, slotEnd);
   if (workEnd <= workStart) return 0;
 
-  return Math.max(0, Math.floor((workEnd - workStart) / 60));
+  // Calculate gross work minutes in the slot
+  const grossWorkMinutes = Math.floor((workEnd - workStart) / 60);
+
+  // Subtract break minutes to get net work minutes (for half-day only)
+  const breakMinutes = calculateBreakMinutes(log);
+
+  return Math.max(0, grossWorkMinutes - breakMinutes);
 }
 
 export function qualifiesHalfDayBySlot(log) {
@@ -384,40 +390,54 @@ export function classifyDayPolicy({
     });
   }
 
-  if (leaveStatus === "approved" && ["SLOT_A", "SLOT_B"].includes(log?.half_day_slot)) {
-    flags.push(isPaidLeave ? "paid_half_day_leave" : "unpaid_half_day_leave");
-    return result(
-      "half_day",
-      `Approved ${isPaidLeave ? "paid" : "unpaid"} half-day leave (${log.half_day_slot})`,
-      netHours,
-      flags,
-      { total_break_minutes: totalBreakMinutes, gross_hours: Number(grossHours.toFixed(2)), half_day_slot: log.half_day_slot }
-    );
-  }
+  // IMPORTANT: Actual attendance takes precedence over leave request
+  // If employee checked in/out, evaluate based on work hours, not leave request
+  const hasAttendance = log?.office_in || log?.office_out;
+  const isHalfDayLeave = Boolean(log?.half_day_slot && log?.half_day_slot !== "INVALID");
 
-  if (isPaidLeave) {
-    flags.push("paid_leave");
-    return result("leave", "Approved paid or earned leave", netHours, flags, {
-      total_break_minutes: totalBreakMinutes,
-      gross_hours: Number(grossHours.toFixed(2)),
-      half_day_slot: null,
-    });
-  }
+  if (!hasAttendance) {
+    // IMPORTANT: For half-day leave, do NOT set status - return absent/no_record
+    // Status will be determined by actual attendance when employee checks in
+    if (isHalfDayLeave) {
+      flags.push("half_day_leave_pending");
+      return result("absent", "Half-day leave request - status determined by actual attendance", 0, flags, {
+        total_break_minutes: totalBreakMinutes,
+        gross_hours: 0,
+        half_day_slot: log.half_day_slot,
+      });
+    }
 
-  if (log?.leave_type && !isPaidLeave) {
-    flags.push("unpaid_leave");
-    return result("absent", "Unpaid leave counts as absent", 0, flags, {
-      total_break_minutes: 0,
-      half_day_slot: null,
-    });
-  }
+    // For full-day leave only - use leave request status
+    if (isPaidLeave) {
+      flags.push("paid_leave");
+      return result("leave", "Approved paid or earned leave", netHours, flags, {
+        total_break_minutes: totalBreakMinutes,
+        gross_hours: Number(grossHours.toFixed(2)),
+        half_day_slot: null,
+      });
+    }
 
-  if (!log?.office_in || !log?.office_out) {
+    if (log?.leave_type && !isPaidLeave) {
+      flags.push("unpaid_leave");
+      return result("absent", "Unpaid leave counts as absent", 0, flags, {
+        total_break_minutes: 0,
+        half_day_slot: null,
+      });
+    }
+
+    // No attendance and no leave - missing login/logout
     flags.push("missing_login_or_logout");
     return result("absent", "Missing login or logout", 0, flags, {
       total_break_minutes: totalBreakMinutes,
       half_day_slot: null,
     });
+  }
+
+  // Has actual attendance - proceed to work hours calculation
+  // Leave information is preserved in log.leave_type and log.leave_status for reference
+  // but the status is determined by actual work hours
+  if (leaveStatus === "approved") {
+    flags.push("attendance_overrides_leave");
   }
 
   const lateInfo = evaluateLateLogin(log);
@@ -456,9 +476,9 @@ export function classifyDayPolicy({
     );
   }
 
-  if (grossHours < MIN_HALF_DAY_HOURS) {
-    flags.push("less_than_4_gross_hours");
-    return result("absent", "Less than 4 gross hours", netHours, flags, {
+  if (netHours < MIN_HALF_DAY_HOURS) {
+    flags.push("less_than_4_net_hours");
+    return result("absent", "Less than 4 net hours", netHours, flags, {
       total_break_minutes: totalBreakMinutes,
       gross_hours: Number(grossHours.toFixed(2)),
       attendance_track: "full_day_morning_half_day",
@@ -483,22 +503,25 @@ export function classifyDayPolicy({
   let reason = "Less than 9 gross hours";
 
   if (inSec !== null && inSec < T_HALF_DAY_LOGIN_START) {
+    // Full-day: use gross hours
     if (grossHours >= MIN_FULL_DAY_HOURS) {
       baseBucket = "full_day";
       reason = "9+ gross hours completed before half-day login cutoff";
       flags.push("full_day_policy_satisfied");
-    } else if (grossHours >= MIN_HALF_DAY_HOURS) {
+    } else if (netHours >= MIN_HALF_DAY_HOURS) {
+      // Half-day: use net hours (minus breaks)
       baseBucket = "half_day";
-      reason = "Early login with at least 4 and less than 9 gross hours";
+      reason = "Early login with at least 4 net hours and less than 9 gross hours";
       flags.push("early_login_morning_half_day");
     } else {
-      flags.push("less_than_9_gross_hours");
+      flags.push("less_than_4_net_hours");
     }
-  } else if (grossHours >= MIN_HALF_DAY_HOURS) {
+  } else if (netHours >= MIN_HALF_DAY_HOURS) {
+    // Half-day: use net hours (minus breaks)
     baseBucket = "half_day";
-    reason = "Login at or after 10:30 AM and at least 4 gross hours completed";
+    reason = "Login at or after 10:30 AM and at least 4 net hours completed";
   } else {
-    flags.push("less_than_4_gross_hours");
+    flags.push("less_than_4_net_hours");
   }
 
   if (totalBreakMinutes > MAX_BREAK_MINUTES) {

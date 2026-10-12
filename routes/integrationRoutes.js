@@ -1256,6 +1256,7 @@ router.get(
               dateStr,
               holidaySet,
               noRecordStatus: "absent",
+              halfDayLeaveAsNoRecord: true,
             });
 
           if (
@@ -1659,6 +1660,7 @@ router.get(
               dateStr,
               holidaySet,
               noRecordStatus: "absent",
+              halfDayLeaveAsNoRecord: true,
             }
           );
 
@@ -1903,6 +1905,7 @@ router.get(
               late_minutes,
               production_hours,
               total_break_minutes,
+              half_day_slot,
               leave_type,
               leave_status
             FROM attendance_records
@@ -2102,6 +2105,7 @@ router.get(
                   holidaySet,
                   noRecordStatus:
                     "absent",
+                  halfDayLeaveAsNoRecord: true,
                 }
               );
 
