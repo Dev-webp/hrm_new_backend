@@ -13,6 +13,7 @@ import { desktopOnly } from "./middleware/desktopOnly.js";
 import integrationRoutes from "./routes/integrationRoutes.js";
 
 import invoiceSsoRoutes from "./routes/invoiceSsoRoutes.js";
+import opsSsoRoutes from "./routes/opsSsoRoutes.js";
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -149,6 +150,7 @@ app.use("/api/activity-logs", activityRoutes);
 app.use("/api/offer-letters", offerLetterRoutes);
 app.use("/api/letters", letterRoutes);
 app.use("/api", invoiceSsoRoutes);
+app.use("/api", opsSsoRoutes);
 
 
 app.use((req, res) => {

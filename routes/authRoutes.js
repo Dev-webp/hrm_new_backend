@@ -4,6 +4,8 @@ import jwt from "jsonwebtoken";
 import { pool } from "../middleware/db.js";
 import { verifyToken } from "../middleware/auth.js";
 import { emitNotification } from "../socketManager.js";
+import { randomUUID } from "node:crypto";
+import crypto from "crypto";
 
 const router = express.Router();
 
@@ -18,6 +20,45 @@ async function notifyInvoiceOnlineStatus(email, isOnline) {
     });
   } catch (err) {
     console.error("Invoice online-status sync error (non-fatal):", err.message);
+  }
+}
+// ▲▲▲ NEW block ends here ▲▲▲
+
+// ▼▼▼ NEW — sync employees to OPS backend ▼▼▼
+const OPS_BACKEND_URL = process.env.OPS_BACKEND_URL || "http://localhost:4000";
+async function syncEmployeeToOps(employee) {
+  try {
+    const response = await fetch(`${OPS_BACKEND_URL}/api/employees/sync-user`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-sync-secret": process.env.HRMS_OPS_SSO_SECRET,
+      },
+      body: JSON.stringify({
+        name: employee.full_name,
+        email: employee.email,
+        department: employee.department,
+        location: employee.branch,
+        employee_id: employee.employee_code,
+        permissions: {
+          ops_leads: employee.ops_leads || false,
+          quality_audit: employee.quality_audit || false,
+          case_filing: employee.case_filing || false,
+          case_processing: employee.case_processing || false,
+        },
+      }),
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      console.log(`[OPS SYNC] Synced employee: ${employee.email}`);
+    } else {
+      console.error(`[OPS SYNC] Failed to sync ${employee.email}:`, data.message);
+    }
+    return data;
+  } catch (err) {
+    console.error(`[OPS SYNC] Error syncing ${employee.email}:`, err.message);
+    return { success: false, message: err.message };
   }
 }
 // ▲▲▲ NEW block ends here ▲▲▲
@@ -60,9 +101,9 @@ router.post("/login", async (req, res) => {
     }
 
  const userRes = await pool.query(
- `SELECT id, full_name, email, password, role, department, branch, designation, employee_code, login_access_type, invoice_access
+ `SELECT id, full_name, email, password, role, department, branch, designation, employee_code, login_access_type, invoice_access, invoice_permissions, ops_access, ops_permissions
    FROM users
-   WHERE email = $1`,
+   WHERE LOWER(email) = LOWER($1)`,
       [normalizedEmail]
     );
 
@@ -233,7 +274,10 @@ res.json({
     designation: user.designation,
     branch: user.branch,
     employee_code: user.employee_code,
-    invoice_access: user.invoice_access === true   // add this line
+    invoice_access: user.invoice_access === true,
+    invoice_permissions: user.invoice_permissions ? (typeof user.invoice_permissions === 'string' ? JSON.parse(user.invoice_permissions) : user.invoice_permissions) : {},
+    ops_access: user.ops_access === true,
+    ops_permissions: user.ops_permissions ? (typeof user.ops_permissions === 'string' ? JSON.parse(user.ops_permissions) : user.ops_permissions) : {}
   }
 });
 
@@ -318,6 +362,8 @@ router.post("/invoice-sso", verifyToken, async (req, res) => {
       });
     }
 
+    console.log("[SSO_DEBUG] HRMS signs with fp:", crypto.createHash("sha256").update(String(process.env.HRMS_INVOICE_SSO_SECRET)).digest("hex").slice(0, 8), "len:", String(process.env.HRMS_INVOICE_SSO_SECRET).length);
+
     // Create a short-lived token ONLY for HRMS → Invoice SSO
 const ssoToken = jwt.sign(
   {
@@ -348,4 +394,130 @@ const ssoToken = jwt.sign(
 
 
 
+router.post("/ops-sso", verifyToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, email, employee_code, status, ops_access
+         FROM users WHERE id = $1 LIMIT 1`,
+      [req.user.id]
+    );
+    const user = result.rows[0];
+    if (!user) return res.status(401).json({ message: "HRMS user not found" });
+
+    // Deactivated users must not get a new OPS session.
+    if (user.status && String(user.status).toLowerCase() !== "active") {
+      return res.status(403).json({ message: "Account is not active" });
+    }
+
+    // Entry is granted per person by a SUPER_ADMIN (users.ops_access).
+    // OPS itself decides what each person may do.
+    const allowed =
+      user.ops_access === true &&
+      String(user.email || "").trim() !== "" &&
+      String(user.employee_code || "").trim() !== "";
+    if (!allowed) {
+      return res.status(403).json({ message: "OPS access is not authorized for this account" });
+    }
+
+    const secret = process.env.HRMS_OPS_SSO_SECRET;
+    const reused = [process.env.JWT_SECRET, process.env.HRMS_INVOICE_SSO_SECRET]
+      .filter(Boolean)
+      .includes(secret);
+    if (!secret || secret.length < 32 || reused) {
+      console.error("[OPS_SSO] HRMS_OPS_SSO_SECRET missing, short, or reused");
+      return res.status(503).json({ message: "OPS SSO is not configured" });
+    }
+
+    const ssoToken = jwt.sign(
+      {
+        email: user.email.trim().toLowerCase(),
+        employee_code: user.employee_code.trim(),
+        purpose: "ops_sso",
+        hrms_user_id: user.id,
+        jti: randomUUID(),
+      },
+      secret,
+      { algorithm: "HS256", expiresIn: "60s", issuer: "hrms", audience: "ops" }
+    );
+
+    res.set("Cache-Control", "no-store");
+    return res.json({ success: true, ssoToken });
+  } catch (error) {
+    console.error("[HRMS_OPS_SSO_ERROR]", error.message);
+    return res.status(500).json({ message: "Unable to start OPS SSO" });
+  }
+});
+
+
+// ───────────────── SYNC EMPLOYEES TO OPS ─────────────────
+router.post("/sync-employees-to-ops", verifyToken, async (req, res) => {
+  try {
+    // Only allow admins to sync employees
+    const userResult = await pool.query(
+      `SELECT role FROM users WHERE id = $1 LIMIT 1`,
+      [req.user.id]
+    );
+    const user = userResult.rows[0];
+
+    if (!user || user.role !== "SUPER_ADMIN") {
+      return res.status(403).json({ message: "Only SUPER_ADMIN can sync employees" });
+    }
+
+    // Fetch all employees with OPS access from HRMS
+    const employeesResult = await pool.query(
+      `SELECT
+        id,
+        full_name,
+        email,
+        employee_code,
+        department,
+        branch,
+        ops_access,
+        ops_leads,
+        quality_audit,
+        case_filing,
+        case_processing,
+        status
+       FROM users
+       WHERE ops_access = true AND status = 'active'
+       ORDER BY full_name`
+    );
+
+    const employees = employeesResult.rows;
+    console.log(`[OPS SYNC] Found ${employees.length} employees with OPS access`);
+
+    // Sync each employee to OPS backend
+    const syncResults = [];
+    let successCount = 0;
+    let failureCount = 0;
+
+    for (const employee of employees) {
+      const result = await syncEmployeeToOps(employee);
+      syncResults.push({
+        email: employee.email,
+        name: employee.full_name,
+        success: result.success,
+        message: result.message,
+      });
+
+      if (result.success) {
+        successCount++;
+      } else {
+        failureCount++;
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Sync completed: ${successCount} successful, ${failureCount} failed`,
+      total: employees.length,
+      successCount,
+      failureCount,
+      results: syncResults,
+    });
+  } catch (error) {
+    console.error("[OPS SYNC ERROR]", error.message);
+    res.status(500).json({ message: "Unable to sync employees to OPS" });
+  }
+});
 export default router;

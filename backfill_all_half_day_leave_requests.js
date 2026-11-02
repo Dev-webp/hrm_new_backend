@@ -1,4 +1,4 @@
-import { pool } from "./middleware/db.js";
+cimport { pool } from "./middleware/db.js";
 import { halfDaySlotForSession } from "./utils/leaveRequestPolicy.js";
 
 async function backfillAllHalfDayLeaveRequests() {

@@ -95,6 +95,19 @@ function monthsCompleted(joiningDate, targetDate = new Date()) {
   );
 }
 
+function daysCompleted(joiningDate, targetDate = new Date()) {
+  if (!joiningDate) return 0;
+
+  const join = new Date(joiningDate);
+  const target = new Date(targetDate);
+
+  // Calculate difference in milliseconds, convert to days
+  const diffTime = target - join;
+  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+
+  return diffDays;
+}
+
 async function getPolicyNumber(key, fallback, db = pool) {
   const result = await db.query(
     `SELECT config_value FROM policy_config WHERE config_key = $1`,
@@ -105,7 +118,8 @@ async function getPolicyNumber(key, fallback, db = pool) {
 }
 
 export async function ensureMonthlyPaidLeaveCredit(userId, targetDate = new Date(), db = pool) {
-  targetDate = capAtCurrentMonth(targetDate);
+  // Removed capAtCurrentMonth to allow future month credits
+  targetDate = new Date(targetDate);
   const { year, month } = getYearMonth(targetDate);
 
   const userRes = await db.query(
@@ -117,15 +131,18 @@ export async function ensureMonthlyPaidLeaveCredit(userId, targetDate = new Date
     throw new Error("User not found");
   }
 
-  const probationMonths = await getPolicyNumber("paid_leave_probation_months", 3, db);
+  const probationDays = await getPolicyNumber("paid_leave_probation_days", 90, db);
   const monthlyCredit = await getPolicyNumber("paid_leave_per_month", 1, db);
 
-  const completedMonths = monthsCompleted(
+  // Calculate eligibility as of the first day of the target month
+  // This ensures future months get credit if employee will be eligible by then
+  const monthStartDate = new Date(year, month - 1, 1);
+  const completedDays = daysCompleted(
     userRes.rows[0].joining_date,
-    targetDate
+    monthStartDate
   );
 
-  const eligible = completedMonths >= probationMonths;
+  const eligible = completedDays >= probationDays;
   const credit = eligible ? monthlyCredit : 0;
 
   await db.query(
@@ -151,13 +168,15 @@ export async function ensureMonthlyPaidLeaveCredit(userId, targetDate = new Date
 
   return {
     eligible,
-    probationMonths,
+    probationDays,
+    completedDays,
     monthlyCredit: credit,
   };
 }
 
 export async function getProfessionalLeaveBalance(userId, targetDate = new Date()) {
-  targetDate = capAtCurrentMonth(targetDate);
+  // Removed capAtCurrentMonth to allow future leave balances
+  targetDate = new Date(targetDate);
   const { year, month } = getYearMonth(targetDate);
 
   const creditInfo = await ensureMonthlyPaidLeaveCredit(userId, targetDate);
@@ -181,7 +200,8 @@ export async function getProfessionalLeaveBalance(userId, targetDate = new Date(
     year,
     month,
     eligible: creditInfo.eligible,
-    probationMonths: creditInfo.probationMonths,
+    probationDays: creditInfo.probationDays,
+    completedDays: creditInfo.completedDays,
     current_month_credit: creditInfo.monthlyCredit,
     total_paid_credited: totalCredited,
     paid_used: paidUsed,
@@ -264,15 +284,10 @@ function parseAttendanceDate(attendanceDate) {
   return date;
 }
 
-function rejectFutureLeaveMonth(targetDate) {
-  const now = new Date();
-  const targetMonth = new Date(targetDate.getFullYear(), targetDate.getMonth(), 1);
-  const currentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  if (targetMonth > currentMonth) {
-    const err = new Error("Paid leave cannot be assigned for a future month");
-    err.statusCode = 400;
-    throw err;
-  }
+function rejectFutureLeaveMonth(targetDate, paidDays = 0) {
+  // Allow both paid and unpaid leave for future months
+  // Employees can plan their leave in advance
+  return;
 }
 
 /**
@@ -359,10 +374,10 @@ export async function adjustLeaveBalanceForAttendanceStatusChange({
 
 export async function deductApprovedLeaveSplit(userId, paidDays = 0, unpaidDays = 0, targetDate = new Date()) {
   targetDate = new Date(targetDate);
-  rejectFutureLeaveMonth(targetDate);
-  const { year, month } = getYearMonth(targetDate);
   const paid = Number(paidDays || 0);
   const unpaid = Number(unpaidDays || 0);
+  rejectFutureLeaveMonth(targetDate, paid);
+  const { year, month } = getYearMonth(targetDate);
 
   await ensureMonthlyPaidLeaveCredit(userId, targetDate);
 

@@ -6,15 +6,13 @@ import { pool } from "../middleware/db.js";
 
 const router = express.Router();
 
-// Shared secret both backends know — separate from JWT_SECRET so a leaked
-// SSO secret can't be used to forge full HRMS sessions, and vice versa.
-const SSO_SECRET = process.env.INVOICE_SSO_SECRET;
 const SSO_TOKEN_TTL_SECONDS = 60;
 
 router.post("/invoice-sso", verifyToken, async (req, res) => {
   try {
-    if (!SSO_SECRET) {
-      console.error("[INVOICE_SSO] INVOICE_SSO_SECRET is not configured");
+    const ssoSecret = process.env.HRMS_INVOICE_SSO_SECRET;
+    if (!ssoSecret) {
+      console.error("[INVOICE_SSO] HRMS_INVOICE_SSO_SECRET is not configured");
       return res.status(500).json({ success: false, message: "SSO is not configured" });
     }
 
@@ -24,7 +22,7 @@ router.post("/invoice-sso", verifyToken, async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT id, full_name, email, role, branch, invoice_access
+      `SELECT id, full_name, email, role, branch, employee_code, invoice_access
        FROM users
        WHERE id = $1`,
       [userId]
@@ -48,13 +46,12 @@ router.post("/invoice-sso", verifyToken, async (req, res) => {
     const ssoToken = jwt.sign(
       {
         email: user.email,
-        full_name: user.full_name,
-        hrms_role: user.role,
-        branch: user.branch,
+        employee_code: user.employee_code,
+        hrms_user_id: user.id,
         purpose: "invoice_sso",
       },
-      SSO_SECRET,
-      { expiresIn: SSO_TOKEN_TTL_SECONDS }
+      ssoSecret,
+      { expiresIn: `${SSO_TOKEN_TTL_SECONDS}s` }
     );
 
     return res.status(200).json({ success: true, ssoToken });

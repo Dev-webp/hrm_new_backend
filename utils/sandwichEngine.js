@@ -45,15 +45,18 @@ export function buildDayStateResolver({ attMap, holidayMap, approvedLeaveSet, jo
     }
     if (ds > todayStr) return "pending";
     if (ds === todayStr && !(rec && rec.check_out_time)) return "pending";
+    // No record on a past day is always "off" for sandwich purposes
+    // regardless of holiday/saturday special handling
+    if (!rec) return "off";
     return "off"; // absent, no record, approved leave, missing checkout on a past day
   };
 }
 
 export function buildAnchors({ activeDates, holidayMap }) {
   return activeDates.filter(ds => {
+    // Only Sundays are subject to sandwich policy, not holidays
     if (dow(ds) === 0) return true;
-    const h = holidayMap.get(ds);
-    return h && String(h.type || "holiday").toLowerCase() !== "halfday";
+    return false;
   });
 }
 
@@ -67,7 +70,11 @@ export function evaluateSandwich({ anchors, stateOf, anchorWorked, joiningDate, 
     if (joiningDate && anchor < joiningDate) { results.push({ ...base, reason: "BEFORE_JOINING" }); continue; }
     if (anchorWorked && anchorWorked(anchor)) { results.push({ ...base, reason: `${type}_WORKED` }); continue; }
 
-    const before = stateOf(addDays(anchor, -1));
+    let before = stateOf(addDays(anchor, -1));
+    // If day before is non_ordinary (holiday/Sunday), check the day before that
+    if (before === "non_ordinary") {
+      before = stateOf(addDays(anchor, -2));
+    }
     const after = stateOf(addDays(anchor, 1));
     if (before === "worked") { results.push({ ...base, reason: "DAY_BEFORE_WORKED" }); continue; }
     if (before !== "off") { results.push({ ...base, reason: `DAY_BEFORE_${before.toUpperCase()}` }); continue; }

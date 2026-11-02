@@ -25,17 +25,27 @@ import { logPayslip, getClientIp } from "../utils/activityLogger.js";
 
 const router = express.Router();
 
-// ── Helper: parse year/month from "YYYY-MM" or "YYYY-MM-DD" ──
-function parseYearMonth(monthStr) {
-  if (!monthStr) {
+// ── Helper: parse year/month from "YYYY-MM", "YYYY-MM-DD", or Date object ──
+function parseYearMonth(monthValue) {
+  if (!monthValue) {
     const err = new Error("month is required");
     err.statusCode = 400;
     throw err;
   }
 
-  const clean = String(monthStr).trim();
+  let monthStr;
 
-  const match = clean.match(/^(\d{4})-(\d{2})(?:-\d{2})?$/);
+  // Handle Date object
+  if (monthValue instanceof Date) {
+    const year = monthValue.getFullYear();
+    const month = monthValue.getMonth() + 1;
+    monthStr = `${year}-${String(month).padStart(2, '0')}`;
+  } else {
+    // Handle string
+    monthStr = String(monthValue).trim();
+  }
+
+  const match = monthStr.match(/^(\d{4})-(\d{2})(?:-\d{2})?$/);
 
   if (!match) {
     const err = new Error("Invalid month format. Use YYYY-MM, example: 2026-06");
@@ -141,6 +151,7 @@ router.get(
         leave     : calc.leave,
         salary    : calc.salary,
         employee  : calc.employee,
+        sandwich  : calc.sandwich,
       });
     } catch (err) {
       console.error("payroll/attendance-preview:", err);
@@ -317,8 +328,63 @@ router.get(
         ),
       ]);
 
+      // Calculate attendance details dynamically for each payslip
+      const payslipsWithDetails = await Promise.all(
+        dataRes.rows.map(async (p) => {
+          try {
+            console.log(`[payslips] Processing payslip ${p.id}, month value: ${p.month}, type: ${typeof p.month}`);
+            const { year, month: m } = parseYearMonth(p.month);
+            const calc = await calculatePayroll(pool, p.user_id, year, m);
+
+            // Extract attendance details from breakdown
+            const bd = typeof p.breakdown === "string"
+              ? JSON.parse(p.breakdown || "{}")
+              : (p.breakdown || {});
+
+            return {
+              ...p,
+              present_days: calc.attendance?.fullDays || 0,
+              absent_days: calc.attendance?.absentDays || 0,
+              paid_leaves: calc.leave?.paidLeaveUsed || 0,
+              unpaid_leaves: calc.leave?.unpaidLeaveDays || 0,
+              half_days: calc.attendance?.halfDays || 0,
+              sandwich_days: calc.sandwich?.sandwichResults?.length || 0,
+              paid_sundays: calc.sandwich?.paidSundays?.length || 0,
+              unpaid_sundays: calc.sandwich?.unpaidSundays?.length || 0,
+              holidays: calc.calendar?.holidayDates?.length || 0,
+              total_days: calc.calendar?.totalDaysInMonth || 0,
+              is_eligible_for_paid_leave: calc.leave?.eligible || false,
+              days_since_joining: calc.leave?.daysCompleted || 0,
+              daily_rate: calc.salary?.dailyRate || 0,
+              payable_days: calc.salary?.payableDays || 0,
+              net_pay: calc.salary?.netPay || p.net_pay,
+            };
+          } catch (err) {
+            console.error(`Error calculating attendance for payslip ${p.id} (user_id: ${p.user_id}, month: ${p.month}):`, err);
+            // Return payslip with default values on error
+            return {
+              ...p,
+              present_days: 0,
+              absent_days: 0,
+              paid_leaves: 0,
+              unpaid_leaves: 0,
+              half_days: 0,
+              sandwich_days: 0,
+              paid_sundays: 0,
+              unpaid_sundays: 0,
+              holidays: 0,
+              total_days: 0,
+              is_eligible_for_paid_leave: false,
+              days_since_joining: 0,
+              daily_rate: 0,
+              payable_days: 0,
+            };
+          }
+        })
+      );
+
       res.json({
-        data : dataRes.rows.map(parseBreakdown),
+        data : payslipsWithDetails,
         total: Number(countRes.rows[0]?.total || 0),
         page : pageNum,
         limit: limitNum,
@@ -423,19 +489,16 @@ router.get(
         return res.status(403).json({ message: "Access denied" });
       }
 
-      // Safe breakdown extraction (handles DB string OR already-parsed object)
-      let bd = {};
-      if (p.breakdown) {
-        bd = typeof p.breakdown === "string"
-          ? (() => {
-              try {
-                return JSON.parse(p.breakdown);
-              } catch {
-                return {};
-              }
-            })()
-          : p.breakdown;
-      }
+      // Dynamically recalculate attendance and salary based on current data
+      const { year, month: m } = parseYearMonth(p.month);
+      const calc = await calculatePayroll(pool, p.user_id, year, m, {
+        incentives: Number(p.incentives || 0),
+        manualDeductions: Number(p.deductions || 0),
+        tax: Number(p.tax || 0),
+      });
+
+      // Use dynamically calculated breakdown
+      const bd = calc;
 
       const monthLabel = new Date(p.month).toLocaleDateString("en-IN", {
         month: "long", year: "numeric",
@@ -505,9 +568,9 @@ doc.rect(0, 0, doc.page.width, 100).fill("#ff8c00");
       detailRow("DEPARTMENT",          p.department,            col1, dStart + 38);
       detailRow("BRANCH",              p.branch,                col2, dStart + 38);
       detailRow("JOINING DATE",        p.joining_date,          col1, dStart + 76);
-      detailRow("EXPERIENCE",          `${bd.monthsCompleted || 0} months`, col2, dStart + 76);
+      detailRow("EXPERIENCE",          `${bd.leave?.daysCompleted || 0} days`, col2, dStart + 76);
       detailRow("PAID LEAVE ELIGIBLE",
-        bd.eligible ? "✓ YES (After 3 months)" : `✗ NOT YET (${bd.monthsCompleted || 0}/3 months)`,
+        bd.leave?.eligible ? "✓ YES (After 90 days)" : `✗ NOT YET (${bd.leave?.daysCompleted || 0}/90 days)`,
         col1, dStart + 114);
       detailRow("EMAIL",               p.email || "—",          col2, dStart + 114);
 
@@ -523,12 +586,12 @@ doc.rect(0, 0, doc.page.width, 100).fill("#ff8c00");
 
       const attHeaders = ["Description", "Days", "Description", "Days"];
       const attData = [
-        ["Total Days in Month",   bd.totalDaysInMonth   ?? "—", "Working Days",     bd.workingDaysCount  ?? "—"],
-        ["Sundays (Paid)",        bd.sundayCount        ?? "—", "Company Holidays",  bd.holidayCount     ?? "—"],
-        ["Full Days Present",     bd.fullDays           ?? "—", "Half Days",         bd.halfDays         ?? "—"],
-        ["Absent Days",           bd.absentDays         ?? "—", "Approved Leaves",   bd.approvedLeaveCount ?? "—"],
-        ["Paid Leaves Used",      bd.paidLeaveUsed      ?? "—", "Unpaid Leaves",     bd.unpaidLeaveDays  ?? "—"],
-        ["Late Logins",           bd.lateLogins         ?? "—", "Late Half Days",    bd.lateLoginHalfDays ?? "—"],
+        ["Total Days in Month",   bd.calendar?.totalDaysInMonth   ?? "—", "Working Days",     bd.calendar?.workingDaysCount  ?? "—"],
+        ["Sundays (Paid)",        bd.sandwich?.paidSundays?.length ?? "—", "Company Holidays",  bd.calendar?.holidayCount     ?? "—"],
+        ["Full Days Present",     bd.attendance?.fullDays           ?? "—", "Half Days",         bd.attendance?.halfDays         ?? "—"],
+        ["Absent Days",           bd.attendance?.absentDays         ?? "—", "Approved Leaves",   "0"],
+        ["Paid Leaves Used",      bd.leave?.paidLeaveUsed      ?? "—", "Unpaid Leaves",     bd.leave?.unpaidLeaveDays  ?? "—"],
+        ["Late Logins",           bd.attendance?.lateLogins         ?? "—", "Late Half Days",    bd.attendance?.lateLoginHalfDays ?? "—"],
       ];
 
       const colW = [200, 60, 200, 60];
@@ -569,17 +632,17 @@ doc.rect(0, 0, doc.page.width, 100).fill("#ff8c00");
       doc.moveDown(0.5);
 
 const salaryRows = [
-  ["Monthly CTC / Salary", `₹ ${fmtINR(p.basic_salary)}`, null],
-  [`Daily Rate (÷ ${bd.totalDaysInMonth || "?"} calendar days)`, `₹ ${fmtINR(bd.dailyRate || 0)}`, null],
-  ["Unpaid / Absent Days", `${bd.unpaidLeaveDays || 0} days`, "deduction"],
-  ["Leave Deduction", `- ₹ ${fmtINR(p.leave_deduction || 0)}`, "deduction"],
+  ["Monthly CTC / Salary", `₹ ${fmtINR(bd.employee?.monthly_salary || p.basic_salary)}`, null],
+  [`Daily Rate (÷ ${bd.calendar?.totalDaysInMonth || "?"} calendar days)`, `₹ ${fmtINR(bd.salary?.dailyRate || 0)}`, null],
+  ["Unpaid / Absent Days", `${bd.leave?.unpaidLeaveDays || 0} days`, "deduction"],
+  ["Leave Deduction", `- ₹ ${fmtINR(0)}`, "deduction"],
   ["─── EARNINGS ───", "", "section"],
-  ["Salary After Leave Deduction", `₹ ${fmtINR(p.earned_basic)}`, "earning"],
-  ["Incentives", `+ ₹ ${fmtINR(p.incentives)}`, "earning"],
-  ["Gross Pay", `₹ ${fmtINR(Number(p.basic_salary) + Number(p.incentives || 0))}`, "gross"],
+  ["Salary After Leave Deduction", `₹ ${fmtINR(bd.salary?.earnedBasic || 0)}`, "earning"],
+  ["Incentives", `+ ₹ ${fmtINR(bd.salary?.incentives || 0)}`, "earning"],
+  ["Gross Pay", `₹ ${fmtINR(bd.salary?.grossPay || 0)}`, "gross"],
   ["─── DEDUCTIONS ───", "", "section"],
-  ["Total Deductions", `- ₹ ${fmtINR(p.deductions)}`, "deduction"],
-  ["Tax (TDS)", `- ₹ ${fmtINR(p.tax)}`, "deduction"],
+  ["Total Deductions", `- ₹ ${fmtINR(bd.salary?.totalDeductions || 0)}`, "deduction"],
+  ["Tax (TDS)", `- ₹ ${fmtINR(bd.salary?.tax || 0)}`, "deduction"],
 ];
 
       let sY = doc.y;
@@ -612,16 +675,16 @@ const salaryRows = [
       doc.fontSize(12).fillColor("#000000").font("Helvetica-Bold")
          .text("NET SALARY (TAKE HOME)", 62, sY + 13);
       doc.fontSize(16).fillColor("#000000").font("Helvetica-Bold")
-         .text(`₹ ${fmtINR(p.net_pay)}`, 62, sY + 10,
+         .text(`₹ ${fmtINR(bd.salary?.netPay || p.net_pay)}`, 62, sY + 10,
            { width: tblW - 24, align: "right" });
 
       doc.y = sY + 60;
 
-      if (!bd.eligible) {
+      if (!bd.leave?.eligible) {
         doc.fontSize(8).fillColor("#6b7280").font("Helvetica")
            .text(
-             `ℹ Paid leave benefit available after completing 3 months from joining ` +
-             `(${p.joining_date}). Currently ${bd.monthsCompleted || 0} month(s) completed.`,
+             `ℹ Paid leave benefit available after completing 90 days from joining ` +
+             `(${p.joining_date}). Currently ${bd.leave?.daysCompleted || 0} day(s) completed.`,
              50, doc.y, { width: tblW }
            );
         doc.moveDown(0.4);

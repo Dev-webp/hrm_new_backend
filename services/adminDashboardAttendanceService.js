@@ -301,7 +301,9 @@ summary.halfDay * 0.5;
 
 const denominator =
 effectivePresent +
-summary.absent;
+summary.absent +
+summary.paidLeave +
+summary.unpaidLeave;
 
 return {
 workingDays: records.filter(
@@ -386,6 +388,8 @@ attendanceEndDate
 const branchClause = branch
 ? "AND u.branch = $3"
 : "";
+
+const statusClause = "AND COALESCE(u.status, 'active') = 'active'";
 
 const singleBranchClause = branch
 ? "AND u.branch = $1"
@@ -476,6 +480,7 @@ pool.query(
   WHERE
     a.date BETWEEN $1::date AND $2::date
     AND u.role <> 'SUPER_ADMIN'
+    ${statusClause}
     ${branchClause}
   ORDER BY a.user_id, a.date
   `,

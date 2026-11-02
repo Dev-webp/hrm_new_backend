@@ -2771,6 +2771,12 @@ router.put(
 
       const employee = employeeRes.rows[0];
 
+      console.log("🔍 EMPLOYEE DATA DEBUG:", {
+        employee,
+        fullName: employee?.full_name,
+        email: employee?.email,
+      });
+
       if (!canEditAttendance(req.user, employee)) {
         return res.status(403).json({
           message:
@@ -3222,10 +3228,17 @@ const updatedRecord = rawUpdatedRecord
             : "Attendance",
 
         details:
-          `Attendance edited for ${employee.full_name} ` +
-          `(${employee.email}) on ${date}. ` +
-          `Reason: ${reason}. ` +
-          `Status: ${newValues.status || "--"}.`,
+          `Attendance edited for ${employee.full_name || employee.email || "Unknown employee"} (${employee.email || "N/A"}) on ${date}. Reason: ${reason}. Status: ${newValues.status || "--"}.`,
+
+        target_name: employee.full_name || employee.email || "Unknown",
+
+        metadata: {
+          employeeName: employee.full_name || employee.email || "Unknown",
+          employee_id: employee.id,
+          date: date,
+          reason: reason,
+          status: newValues.status || "--",
+        },
 
         ip: getClientIp(req),
 
@@ -5288,6 +5301,8 @@ router.get(
       res.json({
         summary,
 
+        totalEmployees: employees.length,
+
         employees: employeeStats,
 
         /*
@@ -5360,7 +5375,7 @@ router.get(
       const { status = "active" } = req.query;
       const effectiveBranch = isBranchRestrictedOperationalRole(req.user) ? req.user.branch
         : req.query.branch && req.query.branch !== "all" ? req.query.branch : null;
-      let query = `SELECT id, full_name, role, department, branch FROM users WHERE role!='SUPER_ADMIN'`;
+      let query = `SELECT id, full_name, role, department, branch FROM users WHERE role!='SUPER_ADMIN' AND status='active'`;
       const params = []; let idx = 1;
       if (effectiveBranch) { query += ` AND branch=$${idx}`; params.push(effectiveBranch); idx++; }
       if (status && status !== "all") { query += ` AND COALESCE(status, 'active')=$${idx}`; params.push(status); idx++; }

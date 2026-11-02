@@ -9,6 +9,7 @@ import {
   normalizeBranchFilter,
 } from "../middleware/auth.js";
 import { syncInvoiceUser } from "../utils/invoiceSync.js";
+import { syncOpsUser } from "../utils/opsSync.js";
 import { getClientIp, logActivity } from "../utils/activityLogger.js";
 import {
   assertAssignableDepartment,
@@ -76,8 +77,8 @@ router.get(
       const branch = normalizeBranchFilter(req.query.branch);
       let query = `
        SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
-       u.login_access_type, u.invoice_access,
-               u.employee_code, u.salary, u.joining_date, u.status, u.profile_initials,
+       u.login_access_type, u.invoice_access, u.ops_access, u.ops_permissions,
+               u.employee_code, u.salary, u.joining_date, u.date_of_birth, u.status, u.profile_initials,
                designation, bank_name, bank_account, bank_ifsc,
                aadhar_number, d.code AS department_code,
                -- Only return visible_password for SUPER_ADMIN
@@ -129,6 +130,62 @@ router.get(
 );
 
 // ─────────────────────────────────────────────────────────────
+// CRM / INVOICE ACCESS toggle (using HRMS authentication)
+// ─────────────────────────────────────────────────────────────
+router.patch(
+  "/admin/employees/:id/invoice-access",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { invoice_access } = req.body;
+
+      if (typeof invoice_access !== "boolean") {
+        return res.status(400).json({
+          success: false,
+          message: "invoice_access must be true or false",
+        });
+      }
+
+      const employeeResult = await pool.query(
+        `SELECT id, full_name, email, branch, department, role, invoice_access
+         FROM users
+         WHERE id = $1`,
+        [id]
+      );
+
+      if (!employeeResult.rows.length) {
+        return res.status(404).json({
+          success: false,
+          message: "Employee not found",
+        });
+      }
+
+      const updated = await pool.query(
+        `UPDATE users
+         SET invoice_access = $1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2
+         RETURNING id, full_name, email, branch, department, role, invoice_access`,
+        [invoice_access, id]
+      );
+
+      res.json({
+        success: true,
+        message: `Invoice access ${invoice_access ? "enabled" : "disabled"}`,
+        employee: updated.rows[0],
+      });
+    } catch (error) {
+      console.error("[INVOICE_ACCESS_UPDATE_FAILED]", error.message);
+      res.status(500).json({
+        success: false,
+        message: "Failed to update invoice access",
+      });
+    }
+  }
+);
+
+// ─────────────────────────────────────────────────────────────
 // 2. GET single employee – includes aadhar & visible password for super admin
 // ─────────────────────────────────────────────────────────────
 router.get(
@@ -140,8 +197,9 @@ router.get(
       const { id } = req.params;
       const result = await pool.query(
         `SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
-       u.login_access_type, u.employee_code, u.invoice_access,
-                u.salary, u.joining_date, u.status, u.profile_initials,
+       u.login_access_type, u.employee_code, u.invoice_access, u.ops_access,
+       COALESCE(u.ops_permissions, '{}'::jsonb) as ops_permissions,
+                u.salary, u.joining_date, u.date_of_birth, u.status, u.profile_initials,
                 u.designation, u.bank_name, u.bank_account, u.bank_ifsc,
                 aadhar_number,
                 d.code AS department_code,
@@ -182,7 +240,8 @@ router.post(
     try {
       let { full_name, email, role, department, branch, salary, password,
             designation, bank_name, bank_account, bank_ifsc, employee_code, department_code,
-            aadhar_number, invoice_access, invoice_permissions } = req.body;
+            aadhar_number, invoice_access, invoice_permissions, date_of_birth, joining_date,
+            ops_access, ops_permissions } = req.body;
 
       if (req.user.role === "MANAGER") {
         branch = req.user.branch;
@@ -219,21 +278,22 @@ router.post(
 
       const plainPassword = password && password.trim() !== "" ? password : "Welcome@123";
       const hashedPassword = await bcrypt.hash(plainPassword, 10);
-      const joining_date = new Date().toISOString().split('T')[0];
+      joining_date = joining_date || new Date().toISOString().split('T')[0];
       const profile_initials = getInitials(full_name);
 
       const result = await pool.query(
         `INSERT INTO users
          (full_name, email, password, role, department, branch, employee_code,
-          salary, joining_date, status, profile_initials,
+          salary, joining_date, date_of_birth, status, profile_initials,
           designation, bank_name, bank_account, bank_ifsc,
-          aadhar_number, visible_password, invoice_access)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+          aadhar_number, visible_password, invoice_access, ops_access, ops_permissions)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
          RETURNING id`,
         [full_name, email, hashedPassword, role.toUpperCase(), department, branch, finalCode,
-         salary, joining_date, 'active', profile_initials,
+         salary, joining_date, date_of_birth || null, 'active', profile_initials,
          designation || null, bank_name || null, bank_account || null, bank_ifsc || null,
-         aadhar_number || null, plainPassword, invoice_access === true]
+         aadhar_number || null, plainPassword, invoice_access === true,
+         ops_access === true, JSON.stringify(ops_permissions || {})]
       );
 
       // Provision/update the matching Invoice/CRM account if access was granted.
@@ -247,6 +307,20 @@ router.post(
           location: branch,
           employee_id: finalCode,
           permissions: invoice_permissions || {},
+        });
+      }
+
+      // Provision/update the matching OPS account if access was granted.
+      // Non-blocking — the HRMS employee record above is already committed
+      // regardless of whether this succeeds.
+      if (ops_access === true) {
+        syncOpsUser({
+          name: full_name,
+          email,
+          department,
+          location: branch,
+          employee_id: finalCode,
+          permissions: ops_permissions || {},
         });
       }
 
@@ -280,11 +354,14 @@ router.put(
       const { id } = req.params;
       let { full_name, email, role, department, branch, salary, password,
             designation, bank_name, bank_account, bank_ifsc, aadhar_number, department_code,
-            invoice_access, invoice_permissions } = req.body;
+            invoice_access, invoice_permissions, joining_date, date_of_birth, ops_access, ops_permissions } = req.body;
 
-      const empCheck = await pool.query("SELECT branch, role FROM users WHERE id = $1", [id]);
+      console.log("[UPDATE EMPLOYEE] Received OPS data:", { ops_access, ops_permissions });
+
+      const empCheck = await pool.query("SELECT branch, role, employee_code FROM users WHERE id = $1", [id]);
       if (empCheck.rows.length === 0) return res.status(404).json({ message: "Employee not found" });
       const employee = empCheck.rows[0];
+      const existingEmployeeCode = employee.employee_code;
 
       if (req.user.role === "MANAGER") {
         if (employee.branch !== req.user.branch) {
@@ -315,27 +392,31 @@ router.put(
         SET full_name = $1, email = $2, role = $3, department = $4, branch = $5,
             salary = $6, profile_initials = $7,
             designation = $8, bank_name = $9, bank_account = $10, bank_ifsc = $11,
-            aadhar_number = $12, invoice_access = $13
+            aadhar_number = $12, invoice_access = $13, joining_date = $14, date_of_birth = $15,
+            ops_access = $16, ops_permissions = $17
       `;
       let params = [full_name, email, role.toUpperCase(), department, branch, salary,
                     getInitials(full_name), designation || null, bank_name || null,
                     bank_account || null, bank_ifsc || null, aadhar_number || null,
-                    invoice_access === true];
-      let paramIndex = 14;
+                    invoice_access === true, joining_date || null, date_of_birth || null,
+                    ops_access === true, JSON.stringify(ops_permissions || {})];
 
       // If password is provided, update both hashed and visible password
       if (password && password.trim() !== "") {
         const hashedPassword = await bcrypt.hash(password, 10);
-        updateQuery += `, password = $${paramIndex}, visible_password = $${paramIndex + 1}`;
+        updateQuery += `, password = $18, visible_password = $19`;
         params.push(hashedPassword, password);
-        paramIndex += 2;
+        updateQuery += ` WHERE id = $20 RETURNING id`;
+        params.push(id);
+      } else {
+        updateQuery += ` WHERE id = $18 RETURNING id`;
+        params.push(id);
       }
-
-      updateQuery += ` WHERE id = $${paramIndex} RETURNING id`;
-      params.push(id);
 
       const result = await pool.query(updateQuery, params);
       if (result.rows.length === 0) return res.status(404).json({ message: "Employee not found" });
+
+      console.log("[UPDATE EMPLOYEE] Saved OPS data:", { ops_access, ops_permissions });
 
       if (invoice_access === true) {
         syncInvoiceUser({
@@ -343,9 +424,23 @@ router.put(
           email,
           department,
           location: branch,
-          employee_id: null,
+          employee_id: existingEmployeeCode,
           permissions: invoice_permissions || {},
         });
+      }
+
+      if (ops_access === true) {
+        console.log("[OPS SYNC] Attempting to sync user to OPS database...");
+        console.log("[OPS SYNC] OPS Backend URL:", process.env.OPS_BACKEND_URL);
+        const syncResult = await syncOpsUser({
+          name: full_name,
+          email,
+          department,
+          location: branch,
+          employee_id: existingEmployeeCode,
+          permissions: ops_permissions || {},
+        });
+        console.log("[OPS SYNC] Sync result:", syncResult);
       }
 
       res.json({ message: "Employee updated successfully" });

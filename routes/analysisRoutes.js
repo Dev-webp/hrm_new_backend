@@ -161,6 +161,7 @@ router.get(
           `SELECT id AS user_id, full_name, department, branch, role
            FROM users
            WHERE role != 'SUPER_ADMIN'
+           AND status = 'active'
            ${branchFilter}
            ORDER BY full_name ASC`,
           empParams
@@ -559,6 +560,7 @@ router.get(
             `SELECT id AS user_id
              FROM users
              WHERE role != 'SUPER_ADMIN'
+             AND status = 'active'
              ${branchFilter}`,
             empParams
           ),

@@ -58,24 +58,24 @@ function splitLeaveByMonth(fromDate, toDate) {
     const month = current.getMonth();
     // Get last day of current month
     const lastDayOfMonth = new Date(year, month + 1, 0);
-    
+
    // The segment ends at either the last day of month or the leave end date
     const segmentEnd = lastDayOfMonth < end ? lastDayOfMonth : end;
-    
+
     // Calculate days in this segment
     const daysInSegment = Math.floor((segmentEnd - current) / (1000 * 60 * 60 * 24)) + 1;
-    
+
     segments.push({
       date: new Date(current),
       year,
       month: month + 1, // Convert to 1-based month
       days: daysInSegment
     });
-    
+
     // Move to first day of next month
     current = new Date(year, month + 1, 1);
   }
-  
+
   return segments;
 }
 
@@ -85,29 +85,29 @@ function splitLeaveByMonth(fromDate, toDate) {
  */
 async function deductLeaveAcrossMonths(userId, paidDays, unpaidDays, fromDate, toDate) {
   const segments = splitLeaveByMonth(fromDate, toDate);
-  
+
   if (segments.length === 1) {
     // Single month - use existing function
     return await deductApprovedLeaveSplit(userId, paidDays, unpaidDays, fromDate);
   }
-  
+
   // Multi-month - deduct month by month, using each month's balance
   let remainingPaid = paidDays;
   let remainingUnpaid = unpaidDays;
   let totalPaidDeducted = 0;
   let totalUnpaidDeducted = 0;
-  
+
   for (const segment of segments) {
     const segmentDate = new Date(segment.date);
-    
+
     // Get this month's balance
     const balance = await getProfessionalLeaveBalance(userId, segmentDate);
     const availablePaid = Math.min(remainingPaid, Number(balance.paid_leave_balance || 0));
-    
+
     // Calculate how many paid vs unpaid days for this segment
     const segmentPaid = Math.min(availablePaid, segment.days);
     const segmentUnpaid = Math.max(0, segment.days - segmentPaid);
-    
+
     // Deduct from this month
     await deductApprovedLeaveSplit(
       userId,
@@ -115,14 +115,14 @@ async function deductLeaveAcrossMonths(userId, paidDays, unpaidDays, fromDate, t
       segmentUnpaid,
       segmentDate
     );
-    
+
     // Update remaining totals
     remainingPaid -= segmentPaid;
     remainingUnpaid -= segmentUnpaid;
     totalPaidDeducted += segmentPaid;
     totalUnpaidDeducted += segmentUnpaid;
   }
-  
+
   return {
     paid_days: totalPaidDeducted,
     unpaid_days: totalUnpaidDeducted,
@@ -131,15 +131,55 @@ async function deductLeaveAcrossMonths(userId, paidDays, unpaidDays, fromDate, t
 
 async function buildApprovalPreview(leave, includeSundayPenalty = false) {
   const fromDate = new Date(leave.from_date);
+  const toDate = new Date(leave.to_date);
   if (Number.isNaN(fromDate.getTime())) throw new Error("Invalid leave from_date");
+  if (Number.isNaN(toDate.getTime())) throw new Error("Invalid leave to_date");
 
-  const balance = await getProfessionalLeaveBalance(leave.user_id, fromDate);
+  // Split leave across months if it spans multiple months
+  const segments = [];
+  let currentDate = new Date(fromDate);
+
+  while (currentDate <= toDate) {
+    const year = currentDate.getFullYear();
+    const month = currentDate.getMonth() + 1;
+    const segmentKey = `${year}-${month}`;
+
+    if (!segments.find(s => s.key === segmentKey)) {
+      segments.push({
+        key: segmentKey,
+        year,
+        month,
+        date: new Date(currentDate),
+        days: 0
+      });
+    }
+
+    const segment = segments.find(s => s.key === segmentKey);
+    segment.days++;
+    currentDate.setDate(currentDate.getDate() + 1);
+  }
+
+  // Calculate paid/unpaid split for each month segment
+  let totalPaid = 0;
+  let totalUnpaid = 0;
+  let remainingPaidAllocation = Number(leave.requested_days ?? leave.days ?? 0);
+
+  for (const segment of segments) {
+    const segmentDate = new Date(segment.year, segment.month - 1, 1);
+    const balance = await getProfessionalLeaveBalance(leave.user_id, segmentDate);
+    const availablePaid = Number(balance.paid_leave_balance || 0);
+
+    // Allocate paid days to this segment (up to available balance)
+    const segmentPaid = Math.min(remainingPaidAllocation, availablePaid, segment.days);
+    const segmentUnpaid = Math.max(0, segment.days - segmentPaid);
+
+    totalPaid += segmentPaid;
+    totalUnpaid += segmentUnpaid;
+    remainingPaidAllocation -= segmentPaid;
+  }
+
   const requestedDays = Number(leave.requested_days ?? leave.days ?? 0);
-  const availablePaid = Number(balance.paid_leave_balance || 0);
-  const paidDays = Math.min(requestedDays, availablePaid);   // paid consumed automatically, no employee flag
-  const unpaidDays = Math.max(0, requestedDays - paidDays);
-  const remainingPaidBalance = Math.max(0, availablePaid - paidDays);
-  const finalCategory = paidDays > 0 ? "Paid" : "Unpaid";
+  const finalCategory = totalPaid > 0 ? "Paid" : "Unpaid";
   const canApprove = true;
 
   const monthLeaves = await pool.query(
@@ -156,8 +196,8 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
   if (flags.is_sudden) reasons.push("Sudden leave penalty applied");
   if (flags.sat_mon_exceeded) reasons.push("Saturday/Monday monthly limit exceeded");
   if (sundayPenalty) reasons.push("Sunday penalty included");
-  if (unpaidDays > 0) {
-    reasons.push(`Paid leave balance insufficient — ${paidDays} paid, ${unpaidDays} unpaid`);
+  if (totalUnpaid > 0) {
+    reasons.push(`Paid leave balance insufficient — ${totalPaid} paid, ${totalUnpaid} unpaid`);
   }
   if (!reasons.length) reasons.push("Normal leave approval");
 
@@ -178,11 +218,11 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
     reason: leave.reason?.trim() || "No reason provided.",
     use_paid_leave: true,  // Fixed value — backend now decides automatically
     employee_use_paid_leave: true,  // Fixed value — backend now decides automatically
-    available_paid_balance: availablePaid,
-    paid_days: paidDays,
-    unpaid_days: unpaidDays,
-    remaining_paid_balance: remainingPaidBalance,
-    salary_deduction_days: unpaidDays,
+    available_paid_balance: totalPaid, // Changed to show total paid across all months
+    paid_days: totalPaid,
+    unpaid_days: totalUnpaid,
+    remaining_paid_balance: 0, // Will be calculated per month during actual approval
+    salary_deduction_days: totalUnpaid,
     include_sunday_penalty: sundayPenalty,
     sudden_leave_penalty: Boolean(flags.is_sudden),
     penalty_days: penaltyDays,
@@ -356,6 +396,64 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
     );
 
     // ==========================================================
+    // CALCULATE PER-MONTH PAID/UNPAID ALLOCATION
+    // ==========================================================
+
+    const monthSegments = [];
+    let tempCurrent = new Date(from);
+    let tempPaidRemaining = paidRemaining;
+
+    while (tempCurrent <= to) {
+      const year = tempCurrent.getFullYear();
+      const month = tempCurrent.getMonth() + 1;
+      const segmentKey = `${year}-${month}`;
+
+      let segment = monthSegments.find(s => s.key === segmentKey);
+      if (!segment) {
+        // Get this month's balance
+        const segmentDate = new Date(year, month - 1, 1);
+        const balance = await getProfessionalLeaveBalance(leave.user_id, segmentDate);
+        const availablePaid = Number(balance.paid_leave_balance || 0);
+
+        segment = {
+          key: segmentKey,
+          year,
+          month,
+          totalDays: 0,
+          paidDays: 0,
+          availablePaid,
+          firstWorkingDay: null
+        };
+        monthSegments.push(segment);
+      }
+
+      // Check if this is a working day (not Sunday, not holiday)
+      const dayOfWeek = tempCurrent.getDay();
+      const tempDateStr = `${year}-${String(month).padStart(2, '0')}-${String(tempCurrent.getDate()).padStart(2, '0')}`;
+      const isHoliday = holidayDates.has(tempDateStr);
+      const isWorkingDay = dayOfWeek !== 0 && !isHoliday;
+
+      // Count this day
+      segment.totalDays++;
+
+      // Track first working day for paid leave allocation
+      if (isWorkingDay && segment.firstWorkingDay === null) {
+        segment.firstWorkingDay = tempDateStr;
+      }
+
+      // Allocate paid days to this segment (only to working days)
+      if (tempPaidRemaining > 0 && segment.availablePaid > 0 && isWorkingDay) {
+        const allocation = Math.min(tempPaidRemaining, segment.availablePaid, 1);
+        segment.paidDays += allocation;
+        tempPaidRemaining -= allocation;
+      }
+
+      tempCurrent.setDate(tempCurrent.getDate() + 1);
+    }
+
+    console.log("MONTH SEGMENTS:", monthSegments);
+
+    // ==========================================================
     // LOOP THROUGH EVERY LEAVE DATE
     // ==========================================================
 
@@ -417,7 +515,7 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
       }
 
       // ========================================================
-      // CALCULATE PAID / UNPAID
+      // CALCULATE PAID / UNPAID (Per-Month Logic - First Working Day)
       // ========================================================
 
       const dayWeight =
@@ -425,9 +523,25 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
           ? 0.5
           : 1;
 
-      const allocation = allocateLeaveDay({ paidRemaining, dayWeight });
-      const isPaid = allocation.isPaidLeave;
-      paidRemaining = allocation.paidRemaining;
+      // For cross-month leave, check if this day's month has paid allocation
+      const dayMonth = current.getMonth() + 1;
+      const dayYear = current.getFullYear();
+
+      // Check if this day falls in a month with paid allocation
+      let isPaid = false;
+      if (paidRemaining > 0) {
+        // Find this month's segment
+        const segment = monthSegments.find(s => s.year === dayYear && s.month === dayMonth);
+
+        if (segment && segment.paidDays > 0) {
+          // Only allocate paid leave to the first working day of this month
+          if (dateStr === segment.firstWorkingDay) {
+            isPaid = true;
+            segment.paidDays -= dayWeight; // Decrement from this month's allocation
+            paidRemaining -= dayWeight;
+          }
+        }
+      }
 
       // ========================================================
       // FINAL ATTENDANCE STATUS
@@ -448,13 +562,13 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
         // Half-day leave request - DO NOT set status
         // Status will be determined by actual attendance when employee checks in
         finalStatus = null;
-        finalLeaveType = allocation.leaveType; // Still track paid/unpaid for payroll
+        finalLeaveType = isPaid ? "paid_leave" : "unpaid_leave"; // Still track paid/unpaid for payroll
         finalHalfDaySlot = halfDaySlot || "INVALID";
         console.log("HALF-DAY LEAVE REQUEST - NO STATUS SET:", { dateStr, session: leave.half_day_session, slot: finalHalfDaySlot });
       } else {
         // Full-day leave request - use paid_leave or unpaid_leave status
-        finalStatus = allocation.status;
-        finalLeaveType = allocation.leaveType;
+        finalStatus = isPaid ? "paid_leave" : "unpaid_leave";
+        finalLeaveType = isPaid ? "paid_leave" : "unpaid_leave";
         finalHalfDaySlot = null;
       }
 
@@ -692,7 +806,7 @@ router.get(
     try {
       const result = await pool.query(
         `
-        SELECT 
+        SELECT
           l.id,
           l.leave_type,
           l.from_date,
@@ -830,7 +944,7 @@ router.get(
       const branch = normalizeBranchFilter(req.query.branch);
 
       let query = `
-        SELECT 
+        SELECT
           l.id,
           l.user_id,
           u.full_name,
@@ -1003,7 +1117,7 @@ const changeLeaveStatus = async (req, res) => {
 
       const leaveCheck = await pool.query(
         `
-        SELECT 
+        SELECT
           l.*,
           u.full_name,
           u.branch
@@ -1216,7 +1330,7 @@ if (status === "approved") {
   );
 }
 
- 
+
 
       const changeReason = status === "rejected"
         ? (rejection_reason || "No rejection reason supplied")

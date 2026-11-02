@@ -7,8 +7,9 @@ const INVOICE_BACKEND_URL =
   process.env.INVOICE_BACKEND_URL || "http://localhost:5000";
 
 export async function syncInvoiceUser({ name, email, department, location, employee_id, permissions }) {
+  console.log("[INVOICE SYNC] Starting sync with data:", { name, email, department, location, employee_id, permissions });
   try {
-    const res = await fetch(`${INVOICE_BACKEND_URL}/api/admin/sync-user`, {
+    const res = await fetch(`${INVOICE_BACKEND_URL}/api/auth/sync-user`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -19,6 +20,8 @@ export async function syncInvoiceUser({ name, email, department, location, emplo
     const data = await res.json();
     if (!res.ok) {
       console.error("Invoice user sync failed (non-fatal):", data?.message);
+    } else {
+      console.log("[INVOICE SYNC] Success:", data);
     }
     return data;
   } catch (err) {
