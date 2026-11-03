@@ -235,6 +235,11 @@ export function getComputedAttendanceStatus(record = {}, context = {}) {
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, "_");
+  const leaveStatus = String(
+    record?.leave_status || record?.leave_request_status || ""
+  )
+    .trim()
+    .toLowerCase();
   const isHalfDayLeave =
     leaveDurationType === "half_day" ||
     Boolean(record?.half_day_session || record?.halfDaySession) ||
@@ -244,7 +249,8 @@ export function getComputedAttendanceStatus(record = {}, context = {}) {
   // If employee checked in/out, evaluate based on work hours, not leave request
   // Only use leave status if there is NO actual attendance
   if (!hasPunch) {
-    // Payroll callers keep their legacy leave accounting unless this is set.
+    // Dashboard display: half-day leave without attendance shows as no_record
+    // This flag takes precedence for dashboard display purposes
     if (isHalfDayLeave && context.halfDayLeaveAsNoRecord === true) {
       return {
         computed_status: "no_record",
@@ -253,6 +259,39 @@ export function getComputedAttendanceStatus(record = {}, context = {}) {
         policy_bucket: "no_record",
         policy_reason: "Half-day leave does not determine attendance status",
         policy_flags: ["half_day_leave_no_attendance"],
+        late_minutes: 0,
+        production_hours: 0,
+        total_break_minutes: Number(record?.total_break_minutes || 0),
+        attendance_track: null,
+        required_checkout_time: null,
+      };
+    }
+
+    // Company Policy: Approved half-day leave without check-in becomes full-day leave
+    // This applies when NOT using halfDayLeaveAsNoRecord (e.g., for payroll, leave ledger)
+    if (isHalfDayLeave && leaveStatus === "approved") {
+      if (isPaidLeave) {
+        return {
+          computed_status: "paid_leave",
+          display_status: "Paid Leave",
+          policy_status: "paid_leave",
+          policy_bucket: "paid_leave",
+          policy_reason: "Approved half-day leave upgraded to full-day paid leave",
+          policy_flags: ["half_day_leave_upgraded_to_full", "paid_leave"],
+          late_minutes: 0,
+          production_hours: 0,
+          total_break_minutes: Number(record?.total_break_minutes || 0),
+          attendance_track: null,
+          required_checkout_time: null,
+        };
+      }
+      return {
+        computed_status: "unpaid_leave",
+        display_status: "Unpaid Leave",
+        policy_status: "unpaid_leave",
+        policy_bucket: "unpaid_leave",
+        policy_reason: "Approved half-day leave upgraded to full-day unpaid leave",
+        policy_flags: ["half_day_leave_upgraded_to_full", "unpaid_leave"],
         late_minutes: 0,
         production_hours: 0,
         total_break_minutes: Number(record?.total_break_minutes || 0),

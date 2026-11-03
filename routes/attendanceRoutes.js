@@ -416,7 +416,7 @@ function buildLateLoginPolicyMeta(log, monthlyLateStats = {}, dateStr) {
 
   if (log?.office_in) {
     if (lateInfo.is_late_window) status = "Late";
-    else if (lateInfo.is_beyond_grace) status = "Half Day";
+    else if (lateInfo.is_beyond_grace) status = "On Time";
     else status = "On Time";
   }
 
@@ -578,7 +578,7 @@ async function finalizeForgottenCheckoutsBeforeToday() {
        AND check_in_time IS NOT NULL
        AND check_out_time IS NULL
        AND COALESCE(status, '') NOT IN (
-         'leave', 'paid_leave', 'unpaid_leave', 'half_day', 'holiday', 'absent'
+         'leave', 'paid_leave', 'unpaid_leave', 'holiday', 'absent'
        )`,
     [today]
   );
@@ -712,7 +712,7 @@ async function recalcAttendanceForUserDate(userId, dateStr, options = {}) {
 
     if (
       isPastAttendanceDate(dateStr) &&
-      !["leave", "paid_leave", "unpaid_leave", "half_day", "holiday"].includes(currentStatus)
+      !["leave", "paid_leave", "unpaid_leave", "holiday"].includes(currentStatus)
     ) {
       await pool.query(
         `UPDATE attendance_records
@@ -2554,13 +2554,10 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
 
     const leaveByUserDate = new Map();
     for (const lv of leaveResult.rows) {
-      const cur = new Date(lv.from_date + "T00:00:00");
-      const to = new Date(lv.to_date + "T00:00:00");
+      const cur = new Date(lv.from_date);
+      const to = new Date(lv.to_date);
       while (cur <= to) {
-        const year = cur.getFullYear();
-        const month = String(cur.getMonth() + 1).padStart(2, "0");
-        const day = String(cur.getDate()).padStart(2, "0");
-        const dateStr = `${year}-${month}-${day}`;
+        const dateStr = cur.toISOString().slice(0, 10);
         if (dateStr >= start && dateStr <= end) {
           leaveByUserDate.set(`${lv.user_id}_${dateStr}`, lv);
         }
@@ -2602,13 +2599,10 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
 
     // Synthesize rows for approved-leave days with NO attendance_records row.
     for (const lv of leaveResult.rows) {
-      const cur = new Date(lv.from_date + "T00:00:00");
-      const to = new Date(lv.to_date + "T00:00:00");
+      const cur = new Date(lv.from_date);
+      const to = new Date(lv.to_date);
       while (cur <= to) {
-        const year = cur.getFullYear();
-        const month = String(cur.getMonth() + 1).padStart(2, "0");
-        const day = String(cur.getDate()).padStart(2, "0");
-        const dateStr = `${year}-${month}-${day}`;
+        const dateStr = cur.toISOString().slice(0, 10);
         if (dateStr >= start && dateStr <= end && !seenUserDate.has(`${lv.user_id}_${dateStr}`)) {
           const synthetic = {
             user_id: lv.user_id,

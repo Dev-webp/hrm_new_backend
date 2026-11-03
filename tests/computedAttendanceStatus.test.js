@@ -51,7 +51,29 @@ describe("canonical attendance status calculation", () => {
     assert.equal(mapPolicyBucketToDisplayStatus(policy.bucket), "Present");
   });
 
-  it("keeps approved paid and unpaid half-day leave as no record without punches", () => {
+  it("upgrades approved paid and unpaid half-day leave to full-day leave without punches", () => {
+    for (const leaveType of ["paid_leave", "unpaid_leave"]) {
+      const result = getComputedAttendanceStatus(
+        {
+          date: "2026-10-12",
+          status: "absent",
+          leave_type: leaveType,
+          leave_status: "approved",
+          leave_request_status: "approved",
+          leave_duration_type: "half_day",
+          is_paid_leave: leaveType === "paid_leave",
+        },
+        {
+          dateStr: "2026-10-12",
+        }
+      );
+
+      assert.equal(result.computed_status, leaveType === "paid_leave" ? "paid_leave" : "unpaid_leave");
+      assert.match(result.policy_reason, /upgraded to full-day/i);
+    }
+  });
+
+  it("dashboard shows half-day leave as no_record without punches when halfDayLeaveAsNoRecord is true", () => {
     for (const leaveType of ["paid_leave", "unpaid_leave"]) {
       const result = getComputedAttendanceStatus(
         {
@@ -71,6 +93,54 @@ describe("canonical attendance status calculation", () => {
 
       assert.equal(result.computed_status, "no_record");
     }
+  });
+
+  it("preserves approved half-day leave information when employee checks in for remaining session", () => {
+    const shared = {
+      date: "2026-10-12",
+      leave_type: "paid_leave",
+      leave_status: "approved",
+      leave_request_status: "approved",
+      leave_duration_type: "half_day",
+      half_day_session: "morning",
+      is_paid_leave: true,
+    };
+
+    // Morning half-day leave with afternoon check-in (14:30 starts afternoon track)
+    const afternoonCheckIn = getComputedAttendanceStatus(
+      {
+        ...shared,
+        check_in_time: "14:30:00",
+        check_out_time: "19:00:00",
+        total_break_minutes: 0,
+      },
+      {
+        dateStr: "2026-10-12",
+        todayStr: "2026-10-31",
+      }
+    );
+
+    assert.equal(afternoonCheckIn.computed_status, "half_day");
+    // Afternoon track is triggered when checking in at 14:30
+    assert.match(afternoonCheckIn.policy_reason, /afternoon half-day/i);
+  });
+
+  it("marks half-day attendance with missing checkout as absent for past dates", () => {
+    const result = getComputedAttendanceStatus(
+      {
+        date: "2026-10-01",
+        check_in_time: "10:00:00",
+        check_out_time: null,
+        half_day_slot: "SLOT_A",
+      },
+      {
+        dateStr: "2026-10-01",
+        todayStr: "2026-10-31",
+      }
+    );
+
+    assert.equal(result.computed_status, "absent");
+    assert.match(result.policy_reason, /missed checkout/i);
   });
 
   it("uses existing net-hours policy for attendance during approved half-day leave", () => {

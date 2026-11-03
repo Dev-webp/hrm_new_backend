@@ -396,13 +396,20 @@ export function classifyDayPolicy({
   const isHalfDayLeave = Boolean(log?.half_day_slot && log?.half_day_slot !== "INVALID");
 
   if (!hasAttendance) {
-    // IMPORTANT: For half-day leave, do NOT set status - return absent/no_record
-    // Status will be determined by actual attendance when employee checks in
-    if (isHalfDayLeave) {
-      flags.push("half_day_leave_pending");
-      return result("absent", "Half-day leave request - status determined by actual attendance", 0, flags, {
-        total_break_minutes: totalBreakMinutes,
-        gross_hours: 0,
+    // Company Policy: Approved half-day leave without check-in becomes full-day leave
+    if (isHalfDayLeave && leaveStatus === "approved") {
+      flags.push("half_day_leave_upgraded_to_full");
+      if (isPaidLeave) {
+        flags.push("paid_leave");
+        return result("leave", "Approved half-day leave upgraded to full-day paid leave", 0, flags, {
+          total_break_minutes: 0,
+          gross_hours: 0,
+          half_day_slot: log.half_day_slot,
+        });
+      }
+      flags.push("unpaid_leave");
+      return result("absent", "Approved half-day leave upgraded to full-day unpaid leave", 0, flags, {
+        total_break_minutes: 0,
         half_day_slot: log.half_day_slot,
       });
     }
