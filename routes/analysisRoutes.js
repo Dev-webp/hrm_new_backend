@@ -10,6 +10,7 @@ import { formatTime12Hour } from "../utils/timeFormat.js";
 import { getComputedAttendanceStatus } from "../utils/computedAttendanceStatus.js";
 import { formatDateStr } from "../utils/attendancePolicy.js";
 import { calculateBreakMinutesFromRows } from "../utils/breakMinutes.js";
+import { computeMonthSandwich } from "../utils/sandwichEngine.js";
 
 const router = express.Router();
 
@@ -241,6 +242,29 @@ router.get(
         let breakTotal = 0;
         let breakDays = 0;
 
+        // Build attendance map for this employee for sandwich calculation
+        const empAttMap = new Map();
+        for (const dateStr of days) {
+          const rec = attMap.get(`${emp.user_id}|${dateStr}`);
+          if (rec) empAttMap.set(dateStr, rec);
+        }
+
+        // Calculate sandwich Sundays using the sandwich engine
+        const todayStr = new Date().toISOString().split('T')[0];
+        const sandwichResults = computeMonthSandwich({
+          month,
+          attMap: empAttMap,
+          holidayMap: new Map(holidayRes.rows.map(h => [h.date, { type: 'holiday' }])),
+          joiningDate: emp.joining_date || null,
+          todayStr,
+          freePerMonth: 1
+        });
+
+        // Count sandwich Sundays (SUNDAY anchors with isSandwich: true)
+        summary.sandwich_sundays = sandwichResults.filter(
+          r => r.anchorType === 'SUNDAY' && r.isSandwich === true
+        ).length;
+
         for (const dateStr of days) {
           const rec = attMap.get(`${emp.user_id}|${dateStr}`) || { date: dateStr };
           const computed = getComputedAttendanceStatus(rec, {
@@ -266,12 +290,6 @@ router.get(
 
           // Calculate unpaid leaves combined (unpaid + absent + no_record)
           summary.unpaid_leaves_combined = summary.unpaid_leave_days + summary.absent_days + summary.no_record_days;
-
-          // Calculate sandwich Sundays
-          const dayOfWeek = new Date(dateStr).getDay();
-          if (dayOfWeek === 0 && computed.sandwich_rule_applied) {
-            summary.sandwich_sundays += 1;
-          }
 
           if (["full_day", "working", "in_progress"].includes(computed.computed_status)) {
             summary.present_days += 1;
@@ -408,6 +426,24 @@ router.get(
       // ── Build lookup maps (O(n) not O(n²)) ───────────────────
       const attMap = new Map(attRows.rows.map(r => [r.date, r]));
       const holidaySet = new Set(holidayRows.rows.map(r => r.date));
+      const holidayMap = new Map(holidayRows.rows.map(r => [r.date, { type: r.type, name: r.name }]));
+      const joiningDate = userRows.rows[0]?.joining_date || null;
+
+      // Calculate sandwich Sundays for this employee
+      const sandwichResults = computeMonthSandwich({
+        month,
+        attMap,
+        holidayMap,
+        joiningDate,
+        todayStr: formatDateStr(new Date()),
+        freePerMonth: 1
+      });
+
+      // Build a map of date -> sandwich results for quick lookup
+      const sandwichByDate = new Map();
+      for (const result of sandwichResults) {
+        sandwichByDate.set(result.date, result);
+      }
 
       // Group breaks by date
       const breakMap = new Map();
@@ -516,6 +552,9 @@ router.get(
           is_paid_leave: att?.is_paid_leave || null,
           leave_type: att?.leave_type || null,
           leave_request_id: att?.leave_request_id || null,
+          // Add sandwich results for calendar display
+          sandwich_results: sandwichByDate.get(dateStr) ? [sandwichByDate.get(dateStr)] : [],
+          sandwich_rule_applied: sandwichByDate.get(dateStr)?.isSandwich === true,
         });
       }
 
