@@ -1,0 +1,15 @@
+ backfill_all_half_day_leave_requests.js     |   2 +-
+ routes/analysisRoutes.js                    |   2 +
+ routes/attendanceRoutes.js                  |  25 +++-
+ routes/authRoutes.js                        | 178 ++++++++++++++++++++++-
+ routes/employeeRoutes.js                    | 139 +++++++++++++++---
+ routes/invoiceSsoRoutes.js                  |  19 +--
+ routes/leaveRoutes.js                       | 154 +++++++++++++++++---
+ routes/payrollRoutes.js                     | 143 +++++++++++++-----
+ routes/payrollService.js                    | 218 ++++++++++++++++++++++------
+ server.js                                   |   2 +
+ services/adminDashboardAttendanceService.js |   7 +-
+ utils/invoiceSync.js                        |   5 +-
+ utils/leavePolicy.js                        |  53 ++++---
+ utils/sandwichEngine.js                     |  13 +-
+ 14 files changed, 793 insertions(+), 167 deletions(-)

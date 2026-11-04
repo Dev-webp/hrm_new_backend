@@ -1579,6 +1579,8 @@ router.get("/attendance/stats", verifyToken, async (req, res) => {
       } else if (row.status === "half_day") {
         present += 0.5;
       } else if (row.status === "leave") {
+        // Treat all leave types (paid, unpaid, no_record) as absent for dashboard calculation
+        absent += 1;
         leave += 1;
       } else if (row.status === "absent") {
         absent += 1;

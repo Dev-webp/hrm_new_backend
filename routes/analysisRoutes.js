@@ -231,9 +231,12 @@ router.get(
           avg_break_mins: 0,
           break_exceeded_days: 0,
           absent_days: 0,
+          no_record_days: 0,
           leave_days: 0,
           paid_leave_days: 0,
           unpaid_leave_days: 0,
+          unpaid_leaves_combined: 0, // unpaid_leave + absent + no_record
+          sandwich_sundays: 0,
         };
         let breakTotal = 0;
         let breakDays = 0;
@@ -250,6 +253,7 @@ router.get(
           if (computed.computed_status === "full_day") summary.full_days += 1;
           else if (computed.computed_status === "half_day") summary.half_days += 1;
           else if (computed.computed_status === "absent") summary.absent_days += 1;
+          else if (computed.computed_status === "no_record") summary.no_record_days += 1;
           else if (computed.computed_status === "paid_leave") {
             summary.paid_leave_days += 1;
             summary.leave_days += 1;
@@ -258,6 +262,15 @@ router.get(
             summary.leave_days += 1;
           } else if (computed.computed_status === "leave") {
             summary.leave_days += 1;
+          }
+
+          // Calculate unpaid leaves combined (unpaid + absent + no_record)
+          summary.unpaid_leaves_combined = summary.unpaid_leave_days + summary.absent_days + summary.no_record_days;
+
+          // Calculate sandwich Sundays
+          const dayOfWeek = new Date(dateStr).getDay();
+          if (dayOfWeek === 0 && computed.sandwich_rule_applied) {
+            summary.sandwich_sundays += 1;
           }
 
           if (["full_day", "working", "in_progress"].includes(computed.computed_status)) {
