@@ -71,7 +71,7 @@ router.post(
     const client = await pool.connect();
 
     try {
-      const { date, name, type = "holiday" } = req.body;
+      const { date, name, type = "holiday", branch = "all" } = req.body;
 
       console.log("POST /holidays called:", req.body);
 
@@ -91,20 +91,20 @@ router.post(
 
       const result = await client.query(
         `
-        INSERT INTO company_holidays (date, name, type, created_by)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO company_holidays (date, name, type, branch, created_by)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (date)
         DO UPDATE SET
           name = EXCLUDED.name,
-          type = EXCLUDED.type
+          type = EXCLUDED.type,
+          branch = EXCLUDED.branch
         RETURNING id, TO_CHAR(date, 'YYYY-MM-DD') AS date, name, type, branch, created_by, created_at
         `,
-        [date, name, type, req.user.id]
+        [date, name, type, branch, req.user.id]
       );
 
       if (type === "holiday") {
-        const updateRes = await client.query(
-          `
+        let attendanceQuery = `
           UPDATE attendance_records
           SET status = 'holiday',
               check_in_time = NULL,
@@ -115,9 +115,16 @@ router.post(
               holiday_name = $2,
               updated_at = NOW()
           WHERE date = $1
-          `,
-          [date, name]
-        );
+        `;
+        let attendanceParams = [date, name];
+
+        // If branch is specified, only update that branch
+        if (branch && branch !== "all") {
+          attendanceQuery += ` AND branch = $3`;
+          attendanceParams.push(branch);
+        }
+
+        const updateRes = await client.query(attendanceQuery, attendanceParams);
 
         console.log("Holiday applied rows:", updateRes.rowCount);
       }
@@ -211,6 +218,76 @@ router.get("/holidays/working-days", verifyToken, async (req, res) => {
 // DELETE holiday
 // ======================================================
 
+router.delete(
+  "/holidays/:date",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const { date } = req.params;
+
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({ message: "Invalid date format" });
+      }
+
+      await client.query("BEGIN");
+
+      // Get holiday info before deleting
+      const holidayResult = await client.query(
+        "SELECT name, type, branch FROM company_holidays WHERE date = $1",
+        [date]
+      );
+
+      if (holidayResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ message: "Holiday not found" });
+      }
+
+      const holiday = holidayResult.rows[0];
+
+      // Delete the holiday
+      await client.query("DELETE FROM company_holidays WHERE date = $1", [date]);
+
+      // If it was a full day holiday, remove holiday status from attendance
+      if (holiday.type === "holiday") {
+        let attendanceQuery = `
+          UPDATE attendance_records
+          SET status = CASE
+            WHEN check_in_time IS NOT NULL THEN 'present'
+            ELSE 'absent'
+          END,
+              holiday_name = NULL,
+              updated_at = NOW()
+          WHERE date = $1 AND status = 'holiday'
+        `;
+        let attendanceParams = [date];
+
+        // If branch was specified, only update that branch
+        if (holiday.branch && holiday.branch !== "all") {
+          attendanceQuery += ` AND branch = $2`;
+          attendanceParams.push(holiday.branch);
+        }
+
+        await client.query(attendanceQuery, attendanceParams);
+      }
+
+      await client.query(`REFRESH MATERIALIZED VIEW mv_monthly_attendance`);
+      await client.query("COMMIT");
+
+      res.json({ message: "Holiday deleted successfully" });
+    } catch (err) {
+      await client.query("ROLLBACK").catch((rollbackErr) => {
+        console.error("DELETE /holidays rollback failed:", rollbackErr);
+      });
+      console.error("DELETE /holidays error:", err);
+      res.status(500).json({ message: err.message });
+    } finally {
+      client.release();
+    }
+  }
+);
 
 console.log("✅ Holiday routes loaded");
 

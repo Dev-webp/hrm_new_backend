@@ -242,20 +242,21 @@ return records.reduce(
 (summary, record) => {
 summary.totalEmployees += 1;
 
-
-  if (
-    record.is_present &&
-    !record.is_working
-  ) {
-    summary.present += 1;
-  }
-
-  if (record.is_working) {
-    summary.working += 1;
-  }
-
+  // If it's a half-day, only count it as half-day (not as present or working)
   if (record.is_half_day) {
     summary.halfDay += 1;
+  } else {
+    // Full days: count as present or working
+    if (
+      record.is_present &&
+      !record.is_working
+    ) {
+      summary.present += 1;
+    }
+
+    if (record.is_working) {
+      summary.working += 1;
+    }
   }
 
   if (record.is_absent) {

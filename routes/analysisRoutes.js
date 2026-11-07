@@ -219,6 +219,10 @@ router.get(
         `${month}-${String(index + 1).padStart(2, "0")}`
       );
 
+      // Create holiday map once (outside employee loop for performance)
+      const holidayMap = new Map(holidayRes.rows.map(h => [h.date, { type: 'holiday' }]));
+      const todayStr = new Date().toISOString().split('T')[0];
+
       const employees = empRes.rows.map((emp) => {
         const summary = {
           user_id: emp.user_id,
@@ -243,18 +247,23 @@ router.get(
         let breakDays = 0;
 
         // Build attendance map for this employee for sandwich calculation
+        // Include ALL days in the month (with empty records for no attendance)
         const empAttMap = new Map();
         for (const dateStr of days) {
           const rec = attMap.get(`${emp.user_id}|${dateStr}`);
-          if (rec) empAttMap.set(dateStr, rec);
+          if (rec) {
+            empAttMap.set(dateStr, rec);
+          } else {
+            // Add empty record for days without attendance
+            empAttMap.set(dateStr, { date: dateStr });
+          }
         }
 
         // Calculate sandwich Sundays using the sandwich engine
-        const todayStr = new Date().toISOString().split('T')[0];
         const sandwichResults = computeMonthSandwich({
           month,
           attMap: empAttMap,
-          holidayMap: new Map(holidayRes.rows.map(h => [h.date, { type: 'holiday' }])),
+          holidayMap,
           joiningDate: emp.joining_date || null,
           todayStr,
           freePerMonth: 1

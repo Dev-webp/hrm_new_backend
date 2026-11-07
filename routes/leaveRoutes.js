@@ -104,9 +104,34 @@ async function deductLeaveAcrossMonths(userId, paidDays, unpaidDays, fromDate, t
     const balance = await getProfessionalLeaveBalance(userId, segmentDate);
     const availablePaid = Math.min(remainingPaid, Number(balance.paid_leave_balance || 0));
 
+    // Count working days in this segment (exclude Sundays and holidays)
+    let workingDaysInSegment = 0;
+    let tempDate = new Date(segment.date);
+    const segmentEndDate = new Date(segment.year, segment.month, 0);
+
+    const holidays = await pool.query(
+      `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date
+       FROM company_holidays
+       WHERE date BETWEEN $1::date AND $2::date
+         AND type = 'holiday'`,
+      [tempDate.toISOString().slice(0, 10), segmentEndDate.toISOString().slice(0, 10)]
+    );
+    const holidaySet = new Set(holidays.rows.map(h => h.date));
+
+    while (tempDate <= segmentEndDate) {
+      const dayOfWeek = tempDate.getDay();
+      const dateStr = tempDate.toISOString().slice(0, 10);
+      const isHoliday = holidaySet.has(dateStr);
+
+      if (dayOfWeek !== 0 && !isHoliday) {
+        workingDaysInSegment++;
+      }
+      tempDate.setDate(tempDate.getDate() + 1);
+    }
+
     // Calculate how many paid vs unpaid days for this segment
-    const segmentPaid = Math.min(availablePaid, segment.days);
-    const segmentUnpaid = Math.max(0, segment.days - segmentPaid);
+    const segmentPaid = Math.min(availablePaid, workingDaysInSegment);
+    const segmentUnpaid = Math.max(0, workingDaysInSegment - segmentPaid);
 
     // Deduct from this month
     await deductApprovedLeaveSplit(
@@ -169,9 +194,34 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
     const balance = await getProfessionalLeaveBalance(leave.user_id, segmentDate);
     const availablePaid = Number(balance.paid_leave_balance || 0);
 
-    // Allocate paid days to this segment (up to available balance)
-    const segmentPaid = Math.min(remainingPaidAllocation, availablePaid, segment.days);
-    const segmentUnpaid = Math.max(0, segment.days - segmentPaid);
+    // Count only working days in this segment (exclude Sundays and holidays)
+    let workingDaysInSegment = 0;
+    let tempDate = new Date(segment.date);
+    const segmentEndDate = new Date(segment.year, segment.month, 0);
+    
+    const holidays = await pool.query(
+      `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date
+       FROM company_holidays
+       WHERE date BETWEEN $1::date AND $2::date
+         AND type = 'holiday'`,
+      [tempDate.toISOString().slice(0, 10), segmentEndDate.toISOString().slice(0, 10)]
+    );
+    const holidaySet = new Set(holidays.rows.map(h => h.date));
+
+    while (tempDate <= segmentEndDate) {
+      const dayOfWeek = tempDate.getDay();
+      const dateStr = tempDate.toISOString().slice(0, 10);
+      const isHoliday = holidaySet.has(dateStr);
+      
+      if (dayOfWeek !== 0 && !isHoliday) {
+        workingDaysInSegment++;
+      }
+      tempDate.setDate(tempDate.getDate() + 1);
+    }
+
+    // Allocate paid days to this segment (up to available balance and working days)
+    const segmentPaid = Math.min(remainingPaidAllocation, availablePaid, workingDaysInSegment);
+    const segmentUnpaid = Math.max(0, workingDaysInSegment - segmentPaid);
 
     totalPaid += segmentPaid;
     totalUnpaid += segmentUnpaid;
@@ -179,6 +229,8 @@ async function buildApprovalPreview(leave, includeSundayPenalty = false) {
   }
 
   const requestedDays = Number(leave.requested_days ?? leave.days ?? 0);
+  // FIX: If paid leave is available, use it regardless of original leave_type
+  // Only use unpaid if paid leave is exhausted
   const finalCategory = totalPaid > 0 ? "Paid" : "Unpaid";
   const canApprove = true;
 
@@ -395,63 +447,9 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
       holidays.rows.map((row) => row.date)
     );
 
-    // ==========================================================
-    // CALCULATE PER-MONTH PAID/UNPAID ALLOCATION
-    // ==========================================================
-
-    const monthSegments = [];
-    let tempCurrent = new Date(from);
-    let tempPaidRemaining = paidRemaining;
-
-    while (tempCurrent <= to) {
-      const year = tempCurrent.getFullYear();
-      const month = tempCurrent.getMonth() + 1;
-      const segmentKey = `${year}-${month}`;
-
-      let segment = monthSegments.find(s => s.key === segmentKey);
-      if (!segment) {
-        // Get this month's balance
-        const segmentDate = new Date(year, month - 1, 1);
-        const balance = await getProfessionalLeaveBalance(leave.user_id, segmentDate);
-        const availablePaid = Number(balance.paid_leave_balance || 0);
-
-        segment = {
-          key: segmentKey,
-          year,
-          month,
-          totalDays: 0,
-          paidDays: 0,
-          availablePaid,
-          firstWorkingDay: null
-        };
-        monthSegments.push(segment);
-      }
-
-      // Check if this is a working day (not Sunday, not holiday)
-      const dayOfWeek = tempCurrent.getDay();
-      const tempDateStr = `${year}-${String(month).padStart(2, '0')}-${String(tempCurrent.getDate()).padStart(2, '0')}`;
-      const isHoliday = holidayDates.has(tempDateStr);
-      const isWorkingDay = dayOfWeek !== 0 && !isHoliday;
-
-      // Count this day
-      segment.totalDays++;
-
-      // Track first working day for paid leave allocation
-      if (isWorkingDay && segment.firstWorkingDay === null) {
-        segment.firstWorkingDay = tempDateStr;
-      }
-
-      // Allocate paid days to this segment (only to working days)
-      if (tempPaidRemaining > 0 && segment.availablePaid > 0 && isWorkingDay) {
-        const allocation = Math.min(tempPaidRemaining, segment.availablePaid, 1);
-        segment.paidDays += allocation;
-        tempPaidRemaining -= allocation;
-      }
-
-      tempCurrent.setDate(tempCurrent.getDate() + 1);
-    }
-
-    console.log("MONTH SEGMENTS:", monthSegments);
+    console.log("MONTH SEGMENTS: Not recalculating - using stored paid_days from leave request");
+    console.log("TOTAL PAID ALLOCATION:", paidRemaining);
+    console.log("TOTAL UNPAID ALLOCATION:", Number(leave.unpaid_days || 0));
 
     // ==========================================================
     // LOOP THROUGH EVERY LEAVE DATE
@@ -515,7 +513,7 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
       }
 
       // ========================================================
-      // CALCULATE PAID / UNPAID (Per-Month Logic - First Working Day)
+      // CALCULATE PAID / UNPAID
       // ========================================================
 
       const dayWeight =
@@ -523,24 +521,17 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
           ? 0.5
           : 1;
 
-      // For cross-month leave, check if this day's month has paid allocation
-      const dayMonth = current.getMonth() + 1;
-      const dayYear = current.getFullYear();
+      // Check if this day is a working day (not Sunday, not holiday)
+      const isWorkingDay = current.getDay() !== 0 && !holidayDates.has(dateStr);
 
-      // Check if this day falls in a month with paid allocation
+      console.log(`DATE: ${dateStr}, isWorkingDay: ${isWorkingDay}, paidRemaining: ${paidRemaining}`);
+
+      // Allocate paid leave to working days (first come, first served)
       let isPaid = false;
-      if (paidRemaining > 0) {
-        // Find this month's segment
-        const segment = monthSegments.find(s => s.year === dayYear && s.month === dayMonth);
-
-        if (segment && segment.paidDays > 0) {
-          // Only allocate paid leave to the first working day of this month
-          if (dateStr === segment.firstWorkingDay) {
-            isPaid = true;
-            segment.paidDays -= dayWeight; // Decrement from this month's allocation
-            paidRemaining -= dayWeight;
-          }
-        }
+      if (isWorkingDay && paidRemaining >= dayWeight) {
+        isPaid = true;
+        paidRemaining -= dayWeight;
+        console.log(`  ALLOCATED PAID: ${dateStr}, remaining: ${paidRemaining}`);
       }
 
       // ========================================================
@@ -680,23 +671,25 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
 
           DO UPDATE SET
 
-            status = EXCLUDED.status,
+            status = $3,
 
-            leave_type = EXCLUDED.leave_type,
+            leave_type = $4,
 
-            leave_status = EXCLUDED.leave_status,
+            leave_status = 'approved',
 
-            is_paid_leave = EXCLUDED.is_paid_leave,
+            is_paid_leave = $5,
 
-            leave_request_id = EXCLUDED.leave_request_id,
+            leave_request_id = $6,
 
-            half_day_slot = EXCLUDED.half_day_slot,
+            half_day_slot = $7,
 
-            branch = EXCLUDED.branch,
+            branch = $8,
 
-            department = EXCLUDED.department,
+            department = $9,
 
             updated_at = CURRENT_TIMESTAMP
+
+          WHERE (EXCLUDED.check_in_time IS NULL AND EXCLUDED.check_out_time IS NULL)
           `,
           [
             leave.user_id,

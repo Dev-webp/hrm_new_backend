@@ -142,68 +142,13 @@ export async function getEarnedLeaveBalance(employeeId, year = new Date().getFul
 }
 
 export async function accrueMonthlyLeave(employeeId, asOf = new Date()) {
-  const userRes = await pool.query(
-    `SELECT id, COALESCE(joining_date, DATE(created_at)) AS joining_date, status
-     FROM users WHERE id = $1`,
-    [employeeId]
-  );
-  if (!userRes.rows.length || userRes.rows[0].status !== "active") {
-    return { accrued: false, reason: "user_not_found_or_inactive" };
-  }
-
-  const joiningDate = userRes.rows[0].joining_date;
-  const eligible = await isEligibleForPaidLeave(joiningDate, asOf);
-  if (!eligible) {
-    return {
-      accrued: false,
-      reason: "probation_not_complete",
-      monthsCompleted: monthsSinceJoining(joiningDate, asOf),
-    };
-  }
-
-  const { perMonth } = await getPaidLeavePolicy();
+  // DISABLED: Use leavePolicy.js ensureMonthlyPaidLeaveCredit instead
+  // This function was causing duplicate crediting along with leavePolicy.js
+  // Return success to maintain API compatibility
   const year = asOf.getFullYear();
   const month = asOf.getMonth() + 1;
-  const todayStr = asOf.toISOString().slice(0, 10);
-
-  const existing = await pool.query(
-    `SELECT id, accrual_date, last_accrual_date
-     FROM leave_balance
-     WHERE user_id = $1 AND year = $2 AND month = $3`,
-    [employeeId, year, month]
-  );
-
-  const accrualMark =
-    existing.rows[0]?.accrual_date || existing.rows[0]?.last_accrual_date;
-  if (
-    existing.rows.length &&
-    accrualMark &&
-    String(accrualMark).slice(0, 7) === `${year}-${String(month).padStart(2, "0")}`
-  ) {
-    const bal = await getLeaveBalance(employeeId, year, month);
-    return { accrued: false, reason: "already_accrued_this_month", balance: bal.current_balance };
-  }
-
-  await pool.query(
-    `INSERT INTO leave_balance
-       (user_id, year, month, earned_leave_balance, earned_leave_credited,
-        earned_leave_used, balance, accrual_date, last_accrual_date, updated_at)
-     VALUES ($1, $2, $3, $4, $4, 0, $4, $5, $5, NOW())
-     ON CONFLICT (user_id, year, month) DO UPDATE SET
-       earned_leave_balance = leave_balance.earned_leave_balance + EXCLUDED.earned_leave_balance,
-       earned_leave_credited = COALESCE(leave_balance.earned_leave_credited, 0) + EXCLUDED.earned_leave_credited,
-       balance = GREATEST(0,
-         COALESCE(leave_balance.earned_leave_credited, leave_balance.earned_leave_balance, 0)
-         + EXCLUDED.earned_leave_credited
-         - COALESCE(leave_balance.earned_leave_used, 0)),
-       accrual_date = EXCLUDED.accrual_date,
-       last_accrual_date = EXCLUDED.last_accrual_date,
-       updated_at = NOW()`,
-    [employeeId, year, month, perMonth, todayStr]
-  );
-
   const bal = await getLeaveBalance(employeeId, year, month);
-  return { accrued: true, added: perMonth, balance: bal.current_balance, ...bal };
+  return { accrued: false, reason: "use_leavePolicy_ensureMonthlyPaidLeaveCredit", balance: bal.current_balance };
 }
 
 export const accrueMonthlyEarnedLeave = accrueMonthlyLeave;
@@ -276,7 +221,7 @@ export async function deductLeave(employeeId, days, year, month, leaveCategory =
        paid_leave_used = COALESCE(leave_balance.paid_leave_used, 0) + EXCLUDED.paid_leave_used,
        unpaid_leave_used = COALESCE(leave_balance.unpaid_leave_used, 0) + EXCLUDED.unpaid_leave_used,
        updated_at = NOW()`,
-    [employeeId, year, month, sickUsed, casualUsed, paid, unpaid]
+    [employeeId, year, month, sickUsed, 0, paid, unpaid]
   );
 
   return {
