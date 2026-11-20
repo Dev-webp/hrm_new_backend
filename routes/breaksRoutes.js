@@ -364,7 +364,7 @@ router.get("/breaks", verifyToken, async (req, res) => {
 router.put(
     "/breaks/:userId",
     verifyToken,
-    authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
+    authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
     async (req, res) => {
 
         try {
@@ -653,7 +653,7 @@ return res.json({
 router.get(
     "/breaks/user/:userId",
     verifyToken,
-    authorizeRoles("SUPER_ADMIN"),
+    authorizeRoles("SUPER_ADMIN", "HR"),
     async (req, res) => {
 
         try {

@@ -19,6 +19,8 @@ import {
   ensureEmployeeCodeAvailable,
   generateEmployeeCode,
 } from "../utils/employeeCode.js";
+import { createEmployee } from "../services/employeeService.js";
+import { createOnboardingCase } from "../services/lifecycleService.js";
 
 const router = express.Router();
 
@@ -70,15 +72,15 @@ async function updateDepartmentCodeIfProvided({ code, department, branch }) {
 router.get(
   "/admin/employees",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     try {
       const { department, search, status = "active" } = req.query;
       const branch = normalizeBranchFilter(req.query.branch);
       let query = `
        SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
-       u.login_access_type, u.invoice_access, u.ops_access, u.ops_permissions,
-               u.employee_code, u.salary, u.joining_date, u.date_of_birth, u.status, u.profile_initials,
+       u.login_access_type, u.invoice_access, u.invoice_permissions, u.ops_access, u.ops_permissions,
+               u.employee_code, u.salary, u.joining_date, u.date_of_birth, u.status, u.employment_status, u.profile_initials,
                designation, bank_name, bank_account, bank_ifsc,
                aadhar_number, d.code AS department_code,
                -- Only return visible_password for SUPER_ADMIN
@@ -135,7 +137,7 @@ router.get(
 router.patch(
   "/admin/employees/:id/invoice-access",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "MANAGER"),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -191,13 +193,13 @@ router.patch(
 router.get(
   "/admin/employees/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { id } = req.params;
       const result = await pool.query(
         `SELECT u.id, u.full_name, u.email, u.role, u.department, u.branch,
-       u.login_access_type, u.employee_code, u.invoice_access, u.ops_access,
+       u.login_access_type, u.employee_code, u.invoice_access, u.invoice_permissions, u.ops_access,
        COALESCE(u.ops_permissions, '{}'::jsonb) as ops_permissions,
                 u.salary, u.joining_date, u.date_of_birth, u.status, u.profile_initials,
                 u.designation, u.bank_name, u.bank_account, u.bank_ifsc,
@@ -235,13 +237,16 @@ router.get(
 router.post(
   "/admin/employees",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
+    const client = await pool.connect();
     try {
+      await client.query('BEGIN');
+      
       let { full_name, email, role, department, branch, salary, password,
             designation, bank_name, bank_account, bank_ifsc, employee_code, department_code,
             aadhar_number, invoice_access, invoice_permissions, date_of_birth, joining_date,
-            ops_access, ops_permissions } = req.body;
+            ops_access, ops_permissions, skipOnboarding = false } = req.body;
 
       if (req.user.role === "MANAGER") {
         branch = req.user.branch;
@@ -256,81 +261,61 @@ router.post(
       }
 
       if (!full_name || !email || !role || !department || !branch || !salary) {
+        await client.query('ROLLBACK');
         return res.status(400).json({ message: "Missing required fields" });
       }
 
       await assertAssignableDepartment(department, branch);
-      if (req.user.role === "SUPER_ADMIN") {
+      if (["SUPER_ADMIN", "HR"].includes(req.user.role)) {
         await updateDepartmentCodeIfProvided({ code: department_code, department, branch });
       }
 
-      const existing = await pool.query("SELECT id FROM users WHERE email = $1", [email]);
-      if (existing.rows.length > 0) {
-        return res.status(400).json({ message: "Email already exists" });
+      // Use the new service
+      const result = await createEmployee(client, {
+        full_name, email, role, department, branch, salary, password,
+        designation, bank_name, bank_account, bank_ifsc, employee_code,
+        aadhar_number, invoice_access, invoice_permissions, date_of_birth, joining_date,
+        ops_access, ops_permissions
+      }, req.user, { skipOnboarding });
+
+      // Create onboarding case if not skipped
+      if (!skipOnboarding) {
+        await createOnboardingCase(client, result.employee.id, joining_date || new Date().toISOString().split('T')[0], req.user.id);
       }
 
-      let finalCode = employee_code;
-      if (!finalCode) {
-        finalCode = await generateEmployeeCode();
-      } else {
-        await ensureEmployeeCodeAvailable(finalCode);
-      }
+      await client.query('COMMIT');
 
-      const plainPassword = password && password.trim() !== "" ? password : "Welcome@123";
-      const hashedPassword = await bcrypt.hash(plainPassword, 10);
-      joining_date = joining_date || new Date().toISOString().split('T')[0];
-      const profile_initials = getInitials(full_name);
-
-      const result = await pool.query(
-        `INSERT INTO users
-         (full_name, email, password, role, department, branch, employee_code,
-          salary, joining_date, date_of_birth, status, profile_initials,
-          designation, bank_name, bank_account, bank_ifsc,
-          aadhar_number, visible_password, invoice_access, ops_access, ops_permissions)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-         RETURNING id`,
-        [full_name, email, hashedPassword, role.toUpperCase(), department, branch, finalCode,
-         salary, joining_date, date_of_birth || null, 'active', profile_initials,
-         designation || null, bank_name || null, bank_account || null, bank_ifsc || null,
-         aadhar_number || null, plainPassword, invoice_access === true,
-         ops_access === true, JSON.stringify(ops_permissions || {})]
-      );
-
-      // Provision/update the matching Invoice/CRM account if access was granted.
-      // Non-blocking — the HRMS employee record above is already committed
-      // regardless of whether this succeeds.
-      if (invoice_access === true) {
+      // Non-blocking sync calls (after commit)
+      if (result.invoiceAccess) {
         syncInvoiceUser({
           name: full_name,
           email,
           department,
           location: branch,
-          employee_id: finalCode,
-          permissions: invoice_permissions || {},
+          employee_id: result.finalCode,
+          permissions: result.invoicePermissions,
         });
       }
 
-      // Provision/update the matching OPS account if access was granted.
-      // Non-blocking — the HRMS employee record above is already committed
-      // regardless of whether this succeeds.
-      if (ops_access === true) {
+      if (result.opsAccess) {
         syncOpsUser({
           name: full_name,
           email,
           department,
           location: branch,
-          employee_id: finalCode,
-          permissions: ops_permissions || {},
+          employee_id: result.finalCode,
+          permissions: result.opsPermissions,
         });
       }
 
       res.status(201).json({
-        id: result.rows[0].id,
-        employee_code: finalCode,
+        id: result.employee.id,
+        employee_code: result.finalCode,
         hrmsLogin: email,
-        hrmsPassword: plainPassword   // return plain password for display
+        hrmsPassword: result.plainPassword
       });
     } catch (error) {
+      await client.query('ROLLBACK');
       console.error(error);
       if (error.code === "23505" && String(error.constraint || "").includes("employee_code")) {
         return res.status(400).json({ message: "Employee ID already exists" });
@@ -338,6 +323,8 @@ router.post(
       res
         .status(error.statusCode || 500)
         .json({ message: error.statusCode ? error.message : "Failed to create employee" });
+    } finally {
+      client.release();
     }
   }
 );
@@ -348,15 +335,20 @@ router.post(
 router.put(
   "/admin/employees/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { id } = req.params;
       let { full_name, email, role, department, branch, salary, password,
             designation, bank_name, bank_account, bank_ifsc, aadhar_number, department_code,
-            invoice_access, invoice_permissions, joining_date, date_of_birth, ops_access, ops_permissions } = req.body;
+            invoice_access, invoice_permissions, joining_date, date_of_birth, ops_access, ops_permissions, phone_number } = req.body;
 
-      console.log("[UPDATE EMPLOYEE] Received OPS data:", { ops_access, ops_permissions });
+      console.log("[UPDATE EMPLOYEE] Received data:", { 
+        invoice_access, 
+        invoice_permissions: JSON.stringify(invoice_permissions), 
+        ops_access, 
+        ops_permissions: JSON.stringify(ops_permissions) 
+      });
 
       const empCheck = await pool.query("SELECT branch, role, employee_code FROM users WHERE id = $1", [id]);
       if (empCheck.rows.length === 0) return res.status(404).json({ message: "Employee not found" });
@@ -383,7 +375,7 @@ router.put(
       }
 
       await assertAssignableDepartmentForUpdate(id, department, branch);
-      if (req.user.role === "SUPER_ADMIN") {
+      if (["SUPER_ADMIN", "HR"].includes(req.user.role)) {
         await updateDepartmentCodeIfProvided({ code: department_code, department, branch });
       }
 
@@ -392,24 +384,27 @@ router.put(
         SET full_name = $1, email = $2, role = $3, department = $4, branch = $5,
             salary = $6, profile_initials = $7,
             designation = $8, bank_name = $9, bank_account = $10, bank_ifsc = $11,
-            aadhar_number = $12, invoice_access = $13, joining_date = $14, date_of_birth = $15,
-            ops_access = $16, ops_permissions = $17
+            aadhar_number = $12, invoice_access = $13, invoice_permissions = $14,
+            joining_date = $15, date_of_birth = $16,
+            ops_access = $17, ops_permissions = $18, phone_number = $19
       `;
       let params = [full_name, email, role.toUpperCase(), department, branch, salary,
                     getInitials(full_name), designation || null, bank_name || null,
                     bank_account || null, bank_ifsc || null, aadhar_number || null,
-                    invoice_access === true, joining_date || null, date_of_birth || null,
-                    ops_access === true, JSON.stringify(ops_permissions || {})];
+                    invoice_access === true, JSON.stringify(invoice_permissions || {}),
+                    joining_date || null, date_of_birth || null,
+                    ops_access === true, JSON.stringify(ops_permissions || {}),
+                    phone_number || null];
 
       // If password is provided, update both hashed and visible password
       if (password && password.trim() !== "") {
         const hashedPassword = await bcrypt.hash(password, 10);
-        updateQuery += `, password = $18, visible_password = $19`;
+        updateQuery += `, password = $20, visible_password = $21`;
         params.push(hashedPassword, password);
-        updateQuery += ` WHERE id = $20 RETURNING id`;
+        updateQuery += ` WHERE id = $22 RETURNING id`;
         params.push(id);
       } else {
-        updateQuery += ` WHERE id = $18 RETURNING id`;
+        updateQuery += ` WHERE id = $20 RETURNING id`;
         params.push(id);
       }
 
@@ -459,7 +454,7 @@ router.put(
 router.get(
   "/admin/employees/:id/login-access",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -540,7 +535,7 @@ router.get(
 router.put(
   "/admin/employees/:id/login-access",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER"),
   async (req, res) => {
     const client = await pool.connect();
 
@@ -743,7 +738,7 @@ if (
 router.patch(
   "/admin/employees/:id/status",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { status } = req.body;
@@ -807,7 +802,7 @@ router.patch(
 router.delete(
   "/admin/employees/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { id } = req.params;

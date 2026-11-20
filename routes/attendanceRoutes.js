@@ -939,7 +939,7 @@ router.get("/my-attendance", verifyToken, async (req, res) => {
 router.get(
   "/all-attendance",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { month } = req.query;
@@ -994,7 +994,7 @@ router.get(
 router.post(
   "/get-attendance-summary",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { email, month } = req.body;
@@ -1053,95 +1053,9 @@ router.post(
 // ───────────────────────────────────────────────────────────────────
 // GET /api/holidays?month=YYYY-MM  (or ?year=YYYY for full year)
 //
-// FIX: Return `type` column directly (was returning is_paid boolean).
-// Frontend reads h.type to distinguish "holiday" vs "halfday".
 // ───────────────────────────────────────────────────────────────────
-router.get("/holidays", verifyToken, async (req, res) => {
-  try {
-    const { month, year } = req.query;
-    let rows;
-
-    if (year && /^\d{4}$/.test(year)) {
-      // Full year
-      const r = await pool.query(
-        `SELECT
-           TO_CHAR(date, 'YYYY-MM-DD') AS date,
-           name,
-           COALESCE(type, 'holiday')   AS type
-         FROM company_holidays
-         WHERE EXTRACT(YEAR FROM date) = $1
-         ORDER BY date`,
-        [parseInt(year)]
-      );
-      rows = r.rows;
-    } else if (month && /^\d{4}-\d{2}$/.test(month)) {
-      const [y, m] = month.split("-");
-      const r = await pool.query(
-        `SELECT
-           TO_CHAR(date, 'YYYY-MM-DD') AS date,
-           name,
-           COALESCE(type, 'holiday')   AS type
-         FROM company_holidays
-         WHERE EXTRACT(YEAR FROM date)  = $1
-           AND EXTRACT(MONTH FROM date) = $2
-         ORDER BY date`,
-        [parseInt(y), parseInt(m)]
-      );
-      rows = r.rows;
-    } else {
-      return res.status(400).json({ message: "Provide month=YYYY-MM or year=YYYY" });
-    }
-
-    res.json(rows);
-  } catch (err) {
-    console.error("GET /holidays error:", err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
+// GET /api/holidays moved to holidays.js with branch support
 // ───────────────────────────────────────────────────────────────────
-// POST /api/holidays  { date, name, type }
-// Add a holiday or half-day.
-// ───────────────────────────────────────────────────────────────────
-router.post(
-  "/holidays",
-  verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
-  async (req, res) => {
-    try {
-      const { date, name, type } = req.body;
-
-      if (!date || !name) {
-        return res.status(400).json({ message: "date and name are required" });
-      }
-
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-        return res.status(400).json({ message: "date must be YYYY-MM-DD" });
-      }
-
-      const validType = type === "halfday" ? "halfday" : "holiday";
-
-      const result = await pool.query(
-        `INSERT INTO company_holidays (date, name, type)
-         VALUES ($1::date, $2, $3)
-         ON CONFLICT (date) DO UPDATE
-           SET name = EXCLUDED.name,
-               type = EXCLUDED.type
-         RETURNING
-           TO_CHAR(date, 'YYYY-MM-DD') AS date,
-           name,
-           COALESCE(type, 'holiday') AS type`,
-        [date, name.trim(), validType]
-      );
-
-      scheduleViewRefresh();
-      res.json(result.rows[0]);
-    } catch (err) {
-      console.error("POST /holidays error:", err);
-      res.status(500).json({ message: err.message });
-    }
-  }
-);
 
 // ───────────────────────────────────────────────────────────────────
 // POST /api/attendance  { action }
@@ -1333,7 +1247,7 @@ router.post("/attendance", verifyToken, async (req, res) => {
 router.get(
   "/attendance-history/:email",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { email } = req.params;
@@ -1384,7 +1298,7 @@ router.get(
 router.post(
   "/save-attendance-summary",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { month, summary } = req.body;
@@ -2647,7 +2561,7 @@ router.get("/attendance/bulk-monthly", verifyToken, async (req, res) => {
 router.put(
   "/attendance/:userId",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     const client = await pool.connect();
 
@@ -3356,7 +3270,7 @@ const updatedRecord = rawUpdatedRecord
 router.post(
   "/attendance/apply-holiday",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { date } = req.body;
@@ -3392,7 +3306,7 @@ router.post(
 router.post(
   "/attendance/recalculate",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR"),
   async (req, res) => {
     try {
       const { start, end } = req.body;
@@ -3959,7 +3873,7 @@ router.get(
 router.get(
   "/attendance/user/:userId",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER"),
   async (req, res) => {
     try {
       const { userId } = req.params;
@@ -4388,7 +4302,7 @@ router.get(
   "/admin/dashboard/attendance",
   verifyToken,
   authorizeRoles(
-    "SUPER_ADMIN",
+    "SUPER_ADMIN", "HR",
     "OPERATIONAL_MANAGER",
     "MANAGER",
     "SUB_ADMIN"
@@ -5365,7 +5279,7 @@ router.get(
 router.get(
   "/admin/employees",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     try {
       const { status = "active" } = req.query;
@@ -5402,7 +5316,7 @@ router.get("/auth/me", verifyToken, async (req, res) => {
 router.get(
   "/employees/list",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     try {
       const { branch, status = "active" } = req.query;
@@ -5439,6 +5353,557 @@ router.get(
   }
 );
 
-console.log("✅ attendanceRoutes.js loaded — policy engine integrated");
+// ═══════════════════════════════════════════════════════════════════
+// LIVE WORK TIMER API (Server-side timestamps, auto-clock-in on login)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/attendance/timer/status
+ * Returns current timer status for the logged-in employee
+ * Includes: is_clocked_in, clock_in_time, break_status, break_start_time, session_last_active
+ */
+router.get("/attendance/timer/status", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const today = todayLocalDateStr();
+    const now = new Date();
+
+    // Get today's attendance record
+    const attResult = await pool.query(
+      `SELECT id, check_in_time, check_out_time, status, total_break_minutes,
+              post_login_idle_minutes, last_active_at
+       FROM attendance_records
+       WHERE user_id = $1 AND date = $2`,
+      [userId, today]
+    );
+
+    const record = attResult.rows[0] || null;
+
+    // Get current active break
+    const breakResult = await pool.query(
+      `SELECT break_type, start_time
+       FROM employee_breaks
+       WHERE user_id = $1 AND date = $2 AND end_time IS NULL
+       LIMIT 1`,
+      [userId, today]
+    );
+
+    const activeBreak = breakResult.rows[0] || null;
+
+    // Determine clock-in status
+    const isClockedIn = record && record.check_in_time && !record.check_out_time;
+
+    // Calculate elapsed time in seconds (server-side)
+    let elapsedSeconds = 0;
+    if (isClockedIn && record.check_in_time) {
+      const checkInTime = new Date(`${today}T${record.check_in_time}`);
+      const nowServer = new Date();
+      // Subtract completed break time from elapsed
+      const completedBreakSeconds = (record.total_break_minutes || 0) * 60;
+      // Subtract current active break time (if any)
+      let activeBreakSeconds = 0;
+      if (activeBreak && activeBreak.start_time) {
+        const breakStartTime = new Date(`${today}T${activeBreak.start_time}`);
+        activeBreakSeconds = Math.floor((nowServer - breakStartTime) / 1000);
+      }
+      const grossSeconds = Math.floor((nowServer - checkInTime) / 1000);
+      elapsedSeconds = Math.max(0, grossSeconds - completedBreakSeconds - activeBreakSeconds);
+    }
+
+    // Calculate break elapsed time
+    let breakElapsedSeconds = 0;
+    if (activeBreak && activeBreak.start_time) {
+      const breakStartTime = new Date(`${today}T${activeBreak.start_time}`);
+      const nowServer = new Date();
+      breakElapsedSeconds = Math.floor((nowServer - breakStartTime) / 1000);
+    }
+
+    res.json({
+      is_clocked_in: isClockedIn,
+      clock_in_time: record?.check_in_time || null,
+      clock_out_time: record?.check_out_time || null,
+      elapsed_seconds: elapsedSeconds,
+      break_status: activeBreak?.break_type || null,
+      break_start_time: activeBreak?.start_time || null,
+      break_elapsed_seconds: breakElapsedSeconds,
+      total_break_minutes: record?.total_break_minutes || 0,
+      session_last_active: record?.last_active_at || now.toISOString(),
+      server_time: now.toISOString(),
+    });
+  } catch (err) {
+    console.error("GET /attendance/timer/status error:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * POST /api/attendance/timer/clock-in
+ * Auto-clock-in on login with duplicate prevention
+ * Server-side timestamp
+ */
+router.post("/attendance/timer/clock-in", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const now = new Date();
+    const today = todayLocalDateStr(now);
+    const timeStr = now.toTimeString().slice(0, 8);
+
+    // Check if already clocked in today
+    const existing = await pool.query(
+      `SELECT id, check_in_time, check_out_time
+       FROM attendance_records
+       WHERE user_id = $1 AND date = $2`,
+      [userId, today]
+    );
+
+    if (existing.rows.length > 0) {
+      const record = existing.rows[0];
+      // If already clocked in and not clocked out, return existing record
+      if (record.check_in_time && !record.check_out_time) {
+        return res.json({
+          message: "Already clocked in",
+          clock_in_time: record.check_in_time,
+          already_clocked_in: true,
+        });
+      }
+      // If clocked out, don't allow re-clock-in on same day
+      if (record.check_out_time) {
+        return res.status(409).json({
+          message: "Already clocked out for today",
+          clock_in_time: record.check_in_time,
+          clock_out_time: record.check_out_time,
+        });
+      }
+    }
+
+    // Get user details
+    const userRes = await pool.query(
+      `SELECT branch, department, full_name FROM users WHERE id=$1`,
+      [userId]
+    );
+    if (!userRes.rows.length) return res.status(404).json({ message: "User not found" });
+    const { branch, department, full_name } = userRes.rows[0];
+
+    // Calculate late minutes
+    const lateMinutes = calculateLateMinutes(timeStr);
+
+    // Insert new attendance record with server timestamp
+    const insertResult = await pool.query(
+      `INSERT INTO attendance_records
+         (user_id, date, check_in_time, status, branch, department,
+          late_minutes, production_hours, total_break_minutes,
+          extra_break_ins, extra_break_outs, last_active_at)
+       VALUES ($1,$2,$3,'present',$4,$5,$6,0,0,'[]','[]',$7)
+       ON CONFLICT (user_id, date) DO UPDATE SET
+         check_in_time=EXCLUDED.check_in_time,
+         check_out_time=NULL,
+         status='present',
+         late_minutes=EXCLUDED.late_minutes,
+         production_hours=0,
+         total_break_minutes=0,
+         half_day_slot=NULL,
+         last_active_at=EXCLUDED.last_active_at,
+         updated_at=CURRENT_TIMESTAMP
+       WHERE attendance_records.check_in_time IS NULL
+       RETURNING id`,
+      [userId, today, timeStr, branch, department, lateMinutes, now.toISOString()]
+    );
+
+    if (!insertResult.rowCount) {
+      return res.status(409).json({ message: "Already checked in today" });
+    }
+
+    const attId = insertResult.rows[0]?.id;
+
+    // Send notifications
+    notifyCheckin({ id: userId, full_name, branch, department }, timeStr, lateMinutes, attId)
+      .catch((err) => console.error("Timer check-in notification error:", err));
+    if (lateMinutes > 0) {
+      notifyLateLogin({ id: userId, full_name, branch, department }, lateMinutes, attId)
+        .catch((err) => console.error("Timer late-login notification error:", err));
+    }
+
+    invalidateCache("summary");
+    invalidateCache(`individual|${userId}|${today.slice(0,7)}`);
+    scheduleViewRefresh();
+
+    res.json({
+      message: "Clocked in successfully",
+      clock_in_time: timeStr,
+      late_minutes: lateMinutes,
+      server_timestamp: now.toISOString(),
+    });
+  } catch (err) {
+    console.error("POST /attendance/timer/clock-in error:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * POST /api/attendance/timer/clock-out
+ * Server-side timestamp for clock-out
+ */
+router.post("/attendance/timer/clock-out", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const now = new Date();
+    const today = todayLocalDateStr(now);
+    const timeStr = now.toTimeString().slice(0, 8);
+
+    // Check if clocked in
+    const existing = await pool.query(
+      `SELECT id, check_in_time, check_out_time
+       FROM attendance_records
+       WHERE user_id = $1 AND date = $2`,
+      [userId, today]
+    );
+
+    if (!existing.rows.length || !existing.rows[0].check_in_time) {
+      return res.status(400).json({ message: "Not clocked in" });
+    }
+
+    if (existing.rows[0].check_out_time) {
+      return res.status(409).json({ message: "Already clocked out" });
+    }
+
+    // Update with server timestamp
+    await pool.query(
+      `UPDATE attendance_records
+       SET check_out_time=$1, last_active_at=$2, updated_at=CURRENT_TIMESTAMP
+       WHERE user_id=$3 AND date=$4
+         AND check_in_time IS NOT NULL
+         AND check_out_time IS NULL`,
+      [timeStr, now.toISOString(), userId, today]
+    );
+
+    // Recalculate attendance
+    await recalcAttendanceForUserDate(userId, today, {
+      source: "timer_clock_out",
+      logResult: true,
+    });
+
+    invalidateCache("summary");
+    invalidateCache(`individual|${userId}|${today.slice(0,7)}`);
+    scheduleViewRefresh();
+
+    res.json({
+      message: "Clocked out successfully",
+      clock_out_time: timeStr,
+      server_timestamp: now.toISOString(),
+    });
+  } catch (err) {
+    console.error("POST /attendance/timer/clock-out error:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * POST /api/attendance/timer/break/start
+ * Start a break with server-side timestamp
+ * break_type: 'break1', 'break2', 'lunch', 'break3'
+ */
+router.post("/attendance/timer/break/start", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { break_type = "break1" } = req.body;
+    const now = new Date();
+    const today = todayLocalDateStr(now);
+    const timeStr = now.toTimeString().slice(0, 8);
+
+    // Check if clocked in
+    const attResult = await pool.query(
+      `SELECT id, check_in_time, check_out_time
+       FROM attendance_records
+       WHERE user_id = $1 AND date = $2`,
+      [userId, today]
+    );
+
+    if (!attResult.rows.length || !attResult.rows[0].check_in_time) {
+      return res.status(400).json({ message: "Must clock in before starting break" });
+    }
+
+    if (attResult.rows[0].check_out_time) {
+      return res.status(400).json({ message: "Already clocked out" });
+    }
+
+    // Check if break is already active
+    const existingBreak = await pool.query(
+      `SELECT id, end_time
+       FROM employee_breaks
+       WHERE user_id = $1 AND date = $2 AND break_type = $3`,
+      [userId, today, break_type]
+    );
+
+    if (existingBreak.rows.length > 0) {
+      const breakRec = existingBreak.rows[0];
+      if (!breakRec.end_time) {
+        return res.status(409).json({ message: "Break already in progress" });
+      }
+    }
+
+    // Insert break record with server timestamp
+    await pool.query(
+      `INSERT INTO employee_breaks (user_id, date, break_type, start_time)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (user_id, date, break_type) DO UPDATE SET
+         start_time = EXCLUDED.start_time,
+         end_time = NULL,
+         duration_minutes = NULL`,
+      [userId, today, break_type, timeStr]
+    );
+
+    // Update last_active_at
+    await pool.query(
+      `UPDATE attendance_records
+       SET last_active_at = $1
+       WHERE user_id = $2 AND date = $3`,
+      [now.toISOString(), userId, today]
+    );
+
+    res.json({
+      message: "Break started",
+      break_type,
+      start_time: timeStr,
+      server_timestamp: now.toISOString(),
+    });
+  } catch (err) {
+    console.error("POST /attendance/timer/break/start error:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * POST /api/attendance/timer/break/end
+ * End a break with server-side timestamp
+ */
+router.post("/attendance/timer/break/end", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { break_type = "break1" } = req.body;
+    const now = new Date();
+    const today = todayLocalDateStr(now);
+    const timeStr = now.toTimeString().slice(0, 8);
+
+    // Check if break is active
+    const existingBreak = await pool.query(
+      `SELECT id, start_time, end_time
+       FROM employee_breaks
+       WHERE user_id = $1 AND date = $2 AND break_type = $3`,
+      [userId, today, break_type]
+    );
+
+    if (!existingBreak.rows.length) {
+      return res.status(400).json({ message: "Break not found" });
+    }
+
+    if (existingBreak.rows[0].end_time) {
+      return res.status(409).json({ message: "Break already ended" });
+    }
+
+    // Update break with server timestamp and calculate duration
+    await pool.query(
+      `UPDATE employee_breaks
+       SET end_time = $1,
+           duration_minutes = ${timeToSqlMinutesExpr("start_time", "$1")},
+           updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = $2 AND date = $3 AND break_type = $4`,
+      [timeStr, userId, today, break_type]
+    );
+
+    // Update total_break_minutes in attendance
+    await pool.query(
+      `UPDATE attendance_records
+       SET total_break_minutes = (
+           SELECT COALESCE(SUM(duration_minutes), 0)
+           FROM employee_breaks
+           WHERE user_id = $1 AND date = $2
+         ),
+         last_active_at = $3
+       WHERE user_id = $1 AND date = $2`,
+      [userId, today, now.toISOString()]
+    );
+
+    res.json({
+      message: "Break ended",
+      break_type,
+      end_time: timeStr,
+      server_timestamp: now.toISOString(),
+    });
+  } catch (err) {
+    console.error("POST /attendance/timer/break/end error:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * POST /api/attendance/timer/heartbeat
+ * Update session last_active timestamp for idle detection
+ * Called periodically from frontend (e.g., every 30 seconds)
+ */
+router.post("/attendance/timer/heartbeat", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const now = new Date();
+    const today = todayLocalDateStr(now);
+
+    // Update last_active_at if clocked in
+    await pool.query(
+      `UPDATE attendance_records
+       SET last_active_at = $1
+       WHERE user_id = $2 AND date = $3 AND check_in_time IS NOT NULL AND check_out_time IS NULL`,
+      [now.toISOString(), userId, today]
+    );
+
+    res.json({
+      server_time: now.toISOString(),
+      message: "Heartbeat received",
+    });
+  } catch (err) {
+    console.error("POST /attendance/timer/heartbeat error:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * POST /api/attendance/timer/auto-clock-in
+ * Auto-clock-in on login (called from frontend after successful authentication)
+ * Prevents duplicate clock-in on re-login
+ */
+router.post("/attendance/timer/auto-clock-in", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const now = new Date();
+    const today = todayLocalDateStr(now);
+    const timeStr = now.toTimeString().slice(0, 8);
+
+    // Check if already clocked in today
+    const existing = await pool.query(
+      `SELECT id, check_in_time, check_out_time
+       FROM attendance_records
+       WHERE user_id = $1 AND date = $2`,
+      [userId, today]
+    );
+
+    // If already clocked in and not clocked out, return success without creating duplicate
+    if (existing.rows.length > 0 && existing.rows[0].check_in_time && !existing.rows[0].check_out_time) {
+      return res.json({
+        message: "Already clocked in",
+        clock_in_time: existing.rows[0].check_in_time,
+        auto_clocked_in: false,
+      });
+    }
+
+    // If clocked out, don't auto-clock-in again
+    if (existing.rows.length > 0 && existing.rows[0].check_out_time) {
+      return res.json({
+        message: "Already clocked out for today",
+        clock_in_time: existing.rows[0].check_in_time,
+        clock_out_time: existing.rows[0].check_out_time,
+        auto_clocked_in: false,
+      });
+    }
+
+    // Get user details
+    const userRes = await pool.query(
+      `SELECT branch, department, full_name FROM users WHERE id=$1`,
+      [userId]
+    );
+    if (!userRes.rows.length) return res.status(404).json({ message: "User not found" });
+    const { branch, department, full_name } = userRes.rows[0];
+
+    // Calculate late minutes
+    const lateMinutes = calculateLateMinutes(timeStr);
+
+    // Insert new attendance record with server timestamp
+    const insertResult = await pool.query(
+      `INSERT INTO attendance_records
+         (user_id, date, check_in_time, status, branch, department,
+          late_minutes, production_hours, total_break_minutes,
+          extra_break_ins, extra_break_outs, last_active_at)
+       VALUES ($1,$2,$3,'present',$4,$5,$6,0,0,'[]','[]',$7)
+       ON CONFLICT (user_id, date) DO UPDATE SET
+         check_in_time=EXCLUDED.check_in_time,
+         check_out_time=NULL,
+         status='present',
+         late_minutes=EXCLUDED.late_minutes,
+         production_hours=0,
+         total_break_minutes=0,
+         half_day_slot=NULL,
+         last_active_at=EXCLUDED.last_active_at,
+         updated_at=CURRENT_TIMESTAMP
+       WHERE attendance_records.check_in_time IS NULL
+       RETURNING id`,
+      [userId, today, timeStr, branch, department, lateMinutes, now.toISOString()]
+    );
+
+    if (!insertResult.rowCount) {
+      return res.status(409).json({ message: "Already checked in today" });
+    }
+
+    const attId = insertResult.rows[0]?.id;
+
+    // Send notifications
+    notifyCheckin({ id: userId, full_name, branch, department }, timeStr, lateMinutes, attId)
+      .catch((err) => console.error("Auto clock-in notification error:", err));
+    if (lateMinutes > 0) {
+      notifyLateLogin({ id: userId, full_name, branch, department }, lateMinutes, attId)
+        .catch((err) => console.error("Auto late-login notification error:", err));
+    }
+
+    invalidateCache("summary");
+    invalidateCache(`individual|${userId}|${today.slice(0,7)}`);
+    scheduleViewRefresh();
+
+    res.json({
+      message: "Auto clock-in successful",
+      clock_in_time: timeStr,
+      late_minutes: lateMinutes,
+      auto_clocked_in: true,
+      server_timestamp: now.toISOString(),
+    });
+  } catch (err) {
+    console.error("POST /attendance/timer/auto-clock-in error:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * POST /api/attendance/fix-holiday-leave-conflict
+ * Fix attendance records where holidays are incorrectly marked as paid/unpaid leave
+ */
+router.post('/fix-holiday-leave-conflict', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Fix records where status is 'holiday' but has leave_status='approved' or leave_type
+    const result = await client.query(`
+      UPDATE attendance_records
+      SET leave_status = NULL,
+          leave_type = NULL,
+          is_paid_leave = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE status = 'holiday'
+        AND (leave_status IS NOT NULL OR leave_type IS NOT NULL OR is_paid_leave IS NOT NULL)
+      RETURNING user_id, date, status, leave_status, leave_type, is_paid_leave
+    `);
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: 'Fixed holiday-leave conflicts',
+      fixed_count: result.rows.length,
+      fixed_records: result.rows
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error fixing holiday-leave conflicts:', error);
+    res.status(500).json({ error: 'Failed to fix holiday-leave conflicts' });
+  } finally {
+    client.release();
+  }
+});
+
+console.log("✅ attendanceRoutes.js loaded — policy engine integrated + live timer API");
 
 export default router;

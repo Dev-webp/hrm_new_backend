@@ -637,7 +637,7 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
       } else {
         // No existing punches
         // For half-day leave: status = null (No Record)
-        // For full-day leave: status = paid_leave/unpaid_leave
+        // For full-day leave: status = 'leave' (paid/unpaid info stored in is_paid_leave)
         console.log("NO EXISTING PUNCHES - USING LEAVE STATUS:", dateStr);
 
         await pool.query(
@@ -657,35 +657,35 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
           VALUES (
             $1,
             $2::date,
+            'leave',
             $3,
-            $4,
             'approved',
+            $4,
             $5,
             $6,
             $7,
-            $8,
-            $9
+            $8
           )
 
           ON CONFLICT (user_id, date)
 
           DO UPDATE SET
 
-            status = $3,
+            status = 'leave',
 
-            leave_type = $4,
+            leave_type = $3,
 
             leave_status = 'approved',
 
-            is_paid_leave = $5,
+            is_paid_leave = $4,
 
-            leave_request_id = $6,
+            leave_request_id = $5,
 
-            half_day_slot = $7,
+            half_day_slot = $6,
 
-            branch = $8,
+            branch = $7,
 
-            department = $9,
+            department = $8,
 
             updated_at = CURRENT_TIMESTAMP
 
@@ -694,7 +694,6 @@ async function syncApprovedLeaveAttendance(leave, deduction) {
           [
             leave.user_id,
             dateStr,
-            finalStatus,
             finalLeaveType,
             isPaid,
             leave.id,
@@ -765,7 +764,7 @@ async function recalcLeaveAttendanceDates(leave, source) {
 router.get(
   "/leaves/my/balance",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
   async (req, res) => {
     try {
       const now = new Date();
@@ -794,7 +793,7 @@ router.get(
 router.get(
   "/leaves/my",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
   async (req, res) => {
     try {
       const result = await pool.query(
@@ -844,7 +843,7 @@ router.get(
 router.get(
   "/leaves/approved-monthly",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { userId, month, context } = req.query;
@@ -930,7 +929,7 @@ router.get(
 router.get(
   "/leaves",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { date, status } = req.query;
@@ -1015,7 +1014,7 @@ router.get(
 router.get(
   "/leave/pending-count",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN"),
   async (req, res) => {
     try {
       const params = [];
@@ -1071,7 +1070,7 @@ router.get(
 router.get(
   "/leave/:id/approval-preview",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const scoped = await getScopedLeave(req, req.params.id);
@@ -1134,6 +1133,14 @@ const changeLeaveStatus = async (req, res) => {
       if (req.user.role === "MANAGER" && leave.branch !== req.user.branch) {
         return res.status(403).json({
           message: "Access denied – different branch",
+        });
+      }
+
+      // HR can apply for leave, but their own requests must be
+      // approved/rejected by SUPER_ADMIN — HR cannot self-approve.
+      if (req.user.role === "HR" && Number(leave.user_id) === Number(req.user.id)) {
+        return res.status(403).json({
+          message: "HR leave requests require SUPER_ADMIN approval",
         });
       }
 
@@ -1397,7 +1404,7 @@ if (status === "approved") {
 router.patch(
   "/leave/:id/status",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   changeLeaveStatus
 );
 
@@ -1406,7 +1413,7 @@ router.post("/leaves", verifyToken, async (req, res) => {
   try {
     const { user_id } = req.body;
 
-    if (req.user.role !== "SUPER_ADMIN" && req.user.id !== user_id) {
+    if (!["SUPER_ADMIN", "HR"].includes(req.user.role) && req.user.id !== user_id) {
       return res.status(403).json({
         message: "Access denied – you can only request leaves for yourself",
       });
@@ -1472,7 +1479,7 @@ const deleteLeaveRequest = async (req, res) => {
       }
     } else if (role === "MANAGER" && leave.branch !== req.user.branch) {
       return res.status(403).json({ message: "Access denied - different branch" });
-    } else if (!["SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"].includes(role)) {
+    } else if (!["SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "HR"].includes(role)) {
       return res.status(403).json({ message: "Access denied" });
     }
 
@@ -1552,7 +1559,7 @@ const deleteLeaveRequest = async (req, res) => {
 router.delete(
   "/leave/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
   deleteLeaveRequest
 );
 

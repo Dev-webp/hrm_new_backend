@@ -6,6 +6,7 @@ import { verifyToken } from "../middleware/auth.js";
 import { emitNotification } from "../socketManager.js";
 import { randomUUID } from "node:crypto";
 import crypto from "crypto";
+import { calculateLateMinutes } from "../utils/attendancePolicy.js";
 
 const router = express.Router();
 
@@ -263,6 +264,60 @@ emitNotification({
 // 🔄 SYNC — mark this employee online for invoice round-robin
 notifyInvoiceOnlineStatus(user.email, true);
 
+// 🕐 AUTO CLOCK-IN on login (DISABLED - employees must manually check in)
+// Only for employee roles, not for admins/managers
+// if (["EMPLOYEE", "SUB_ADMIN"].includes(user.role)) {
+//   (async () => {
+//     try {
+//       const today = new Date().toISOString().slice(0, 10);
+//       const timeStr = new Date().toTimeString().slice(0, 8);
+
+//       // Check if already clocked in today
+//       const existing = await pool.query(
+//         `SELECT id, check_in_time, check_out_time
+//          FROM attendance_records
+//          WHERE user_id = $1 AND date = $2`,
+//         [user.id, today]
+//       );
+
+//       // Only auto-clock-in if not already clocked in and not clocked out
+//       if (existing.rows.length === 0 || (!existing.rows[0].check_in_time && !existing.rows[0].check_out_time)) {
+//         const lateMinutes = calculateLateMinutes(timeStr);
+
+//         await pool.query(
+//           `INSERT INTO attendance_records
+//              (user_id, date, check_in_time, status, branch, department,
+//               late_minutes, production_hours, total_break_minutes,
+//               extra_break_ins, extra_break_outs, last_active_at)
+//            VALUES ($1,$2,$3,'present',$4,$5,$6,0,0,'[]','[]',$7)
+//            ON CONFLICT (user_id, date) DO UPDATE SET
+//              check_in_time=EXCLUDED.check_in_time,
+//              check_out_time=NULL,
+//              status='present',
+//              late_minutes=EXCLUDED.late_minutes,
+//              production_hours=0,
+//              total_break_minutes=0,
+//              half_day_slot=NULL,
+//              last_active_at=EXCLUDED.last_active_at,
+//              updated_at=CURRENT_TIMESTAMP
+//            WHERE attendance_records.check_in_time IS NULL`,
+//           [user.id, today, timeStr, user.branch, user.department, lateMinutes, new Date().toISOString()]
+//         );
+
+//         console.log("[AUTO_CLOCK_IN]", {
+//           userId: user.id,
+//           email: user.email,
+//           clock_in_time: timeStr,
+//           late_minutes: lateMinutes
+//         });
+//       }
+//     } catch (err) {
+//       // Non-blocking: log error but don't fail login
+//       console.error("[AUTO_CLOCK_IN_ERROR]", err.message);
+//     }
+//   })();
+// }
+
 res.json({
   token,
   user: {
@@ -411,10 +466,25 @@ router.post("/ops-sso", verifyToken, async (req, res) => {
 
     // Entry is granted per person by a SUPER_ADMIN (users.ops_access).
     // OPS itself decides what each person may do.
+    console.log("[OPS_SSO] Checking access for user:", {
+      id: user.id,
+      email: user.email,
+      employee_code: user.employee_code,
+      ops_access: user.ops_access,
+      status: user.status
+    });
+
     const allowed =
       user.ops_access === true &&
       String(user.email || "").trim() !== "" &&
       String(user.employee_code || "").trim() !== "";
+
+    console.log("[OPS_SSO] Access allowed:", allowed, {
+      has_ops_access: user.ops_access === true,
+      has_email: String(user.email || "").trim() !== "",
+      has_employee_code: String(user.employee_code || "").trim() !== ""
+    });
+
     if (!allowed) {
       return res.status(403).json({ message: "OPS access is not authorized for this account" });
     }
@@ -459,7 +529,7 @@ router.post("/sync-employees-to-ops", verifyToken, async (req, res) => {
     );
     const user = userResult.rows[0];
 
-    if (!user || user.role !== "SUPER_ADMIN") {
+    if (!user || !["SUPER_ADMIN", "HR"].includes(user.role)) {
       return res.status(403).json({ message: "Only SUPER_ADMIN can sync employees" });
     }
 

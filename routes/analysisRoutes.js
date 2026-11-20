@@ -139,17 +139,21 @@ function safeAnalysisRecords(records = []) {
 router.get(
   "/attendance-analysis/summary",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
+      console.log('=== SUMMARY API CALLED ===', req.query);
       const { month = "2026-05", branch } = req.query;
       const eb = effectiveBranch(req.user, branch);
 
       const ck = cacheKey("summary", month, eb || "all");
       const cached = getCache(ck);
-      if (cached) return res.json({ ...cached, _cached: true });
+      // Temporarily disable cache to force fresh data
+      // if (cached) return res.json({ ...cached, _cached: true });
 
       const { start, end, year, month: monthNumber } = monthRange(month);
+      const contextStart = shiftDate(start, -2);
+      const contextEnd = shiftDate(end, 1);
       const empParams = [];
       let branchFilter = "";
       if (eb) {
@@ -157,7 +161,7 @@ router.get(
         branchFilter = "AND branch = $1";
       }
 
-      const [empRes, attRes, breakRes, holidayRes] = await Promise.all([
+      const [empRes, attRes, breakRes, holidayRes, awiRes, leaveRes] = await Promise.all([
         pool.query(
           `SELECT id AS user_id, full_name, department, branch, role
            FROM users
@@ -194,6 +198,20 @@ router.get(
            WHERE date BETWEEN $1::date AND $2::date`,
           [start, end]
         ),
+        pool.query(
+          `SELECT user_id, TO_CHAR(date,'YYYY-MM-DD') AS date, final_status
+           FROM awi_cases
+           WHERE date BETWEEN $1::date AND $2::date
+           AND final_status IN ('authorized_absence', 'unauthorized_absence')`,
+          [contextStart, contextEnd]
+        ),
+        pool.query(
+          `SELECT user_id, TO_CHAR(lr.from_date,'YYYY-MM-DD') AS date, lr.status, lr.leave_type
+           FROM leave_requests lr
+           WHERE lr.from_date BETWEEN $1::date AND $2::date
+           AND lr.status = 'approved'`,
+          [contextStart, contextEnd]
+        ),
       ]);
 
       const holidaySet = new Set(holidayRes.rows.map((r) => r.date));
@@ -206,6 +224,16 @@ router.get(
       const breakMap = new Map(
         Array.from(breakRowsByKey.entries()).map(([key, rows]) => [key, calculateBreakMinutesFromRows(rows)])
       );
+      const awiMap = new Map();
+      for (const row of awiRes.rows) {
+        const key = `${row.user_id}|${row.date}`;
+        awiMap.set(key, row.final_status);
+      }
+      const leaveMap = new Map();
+      for (const row of leaveRes.rows) {
+        const key = `${row.user_id}|${row.date}`;
+        leaveMap.set(key, { status: row.status, leave_type: row.leave_type });
+      }
       const attMap = new Map();
       for (const row of attRes.rows) {
         const key = `${row.user_id}|${row.date}`;
@@ -242,6 +270,11 @@ router.get(
           unpaid_leave_days: 0,
           unpaid_leaves_combined: 0, // unpaid_leave + absent + no_record
           sandwich_sundays: 0,
+          authorized_awi_days: 0, // authorized_absence (1 day absent)
+          unauthorized_absent_days: 0, // unauthorized_absence (1+1)
+          paid_sundays: 0,
+          unpaid_sundays: 0,
+          holidays: 0,
         };
         let breakTotal = 0;
         let breakDays = 0;
@@ -259,20 +292,105 @@ router.get(
           }
         }
 
-        // Calculate sandwich Sundays using the sandwich engine
-        const sandwichResults = computeMonthSandwich({
-          month,
-          attMap: empAttMap,
-          holidayMap,
-          joiningDate: emp.joining_date || null,
-          todayStr,
-          freePerMonth: 1
-        });
+        // NEW SANDWICH POLICY IMPLEMENTATION
+        // 1. Find all leaves on Saturday (day 6) and Monday (day 1)
+        // 2. First occurrence: Sunday remains paid
+        // 3. Second+ occurrence: Sunday becomes unpaid (LOP)
+        const unpaidSundays = new Set();
+        const qualifyingLeaves = [];
 
-        // Count sandwich Sundays (SUNDAY anchors with isSandwich: true)
-        summary.sandwich_sundays = sandwichResults.filter(
-          r => r.anchorType === 'SUNDAY' && r.isSandwich === true
-        ).length;
+        // Collect all qualifying leaves (Saturday/Monday leaves + AWI + Absent + No Record)
+        for (const dateStr of days) {
+          const dow = new Date(dateStr).getDay();
+          const awiKey = `${emp.user_id}|${dateStr}`;
+          const leaveKey = `${emp.user_id}|${dateStr}`;
+          const attKey = `${emp.user_id}|${dateStr}`;
+
+          // Check for AWI
+          if (awiMap.has(awiKey)) {
+            qualifyingLeaves.push({ date: dateStr, dow, type: 'AWI' });
+          }
+          // Check for approved leave on Saturday or Monday
+          else if ((dow === 6 || dow === 1) && leaveMap.has(leaveKey)) {
+            qualifyingLeaves.push({ date: dateStr, dow, type: 'LEAVE' });
+          }
+          // Check for regular absence on Saturday or Monday
+          else if ((dow === 6 || dow === 1) && attMap.has(attKey)) {
+            const attRec = attMap.get(attKey);
+            if (attRec.status === 'absent') {
+              qualifyingLeaves.push({ date: dateStr, dow, type: 'ABSENCE' });
+            }
+          }
+          // Check for no record on Saturday or Monday
+          else if ((dow === 6 || dow === 1) && !attMap.has(attKey)) {
+            qualifyingLeaves.push({ date: dateStr, dow, type: 'NO_RECORD' });
+          }
+        }
+
+        // Sort qualifying leaves by date
+        qualifyingLeaves.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+        // Track Sundays affected by each qualifying leave
+        const affectedSundays = new Map(); // Sunday date -> count of qualifying occurrences
+
+        for (const leave of qualifyingLeaves) {
+          const leaveDate = new Date(leave.date);
+          const leaveDow = leaveDate.getDay();
+
+          // If leave is on Saturday (day 6), check Sunday (day 0, which is leaveDate + 1)
+          if (leaveDow === 6) {
+            const sundayDate = new Date(leaveDate);
+            sundayDate.setDate(sundayDate.getDate() + 1);
+            const sundayStr = formatDateStr(sundayDate);
+            if (sundayStr.startsWith(month)) {
+              affectedSundays.set(sundayStr, (affectedSundays.get(sundayStr) || 0) + 1);
+            }
+          }
+          // If leave is on Monday (day 1), check Sunday (day 0, which is leaveDate - 1)
+          else if (leaveDow === 1) {
+            const sundayDate = new Date(leaveDate);
+            sundayDate.setDate(sundayDate.getDate() - 1);
+            const sundayStr = formatDateStr(sundayDate);
+            if (sundayStr.startsWith(month)) {
+              affectedSundays.set(sundayStr, (affectedSundays.get(sundayStr) || 0) + 1);
+            }
+          }
+        }
+
+        // Mark Sundays as unpaid if they have 2+ qualifying occurrences
+        for (const [sundayStr, count] of affectedSundays.entries()) {
+          if (count >= 2) {
+            unpaidSundays.add(sundayStr);
+          }
+        }
+
+        if (emp.user_id === 46 || emp.full_name === 'SRIKANTH') {
+          console.log(`[SUMMARY] ${emp.full_name} (ID: ${emp.user_id}) - ALL AWI Cases:`, Array.from(awiMap.entries()).filter(([k]) => k.startsWith(emp.user_id + '|')));
+          console.log(`[SUMMARY] ${emp.full_name} - ALL Leave Requests:`, Array.from(leaveMap.entries()).filter(([k]) => k.startsWith(emp.user_id + '|')));
+          console.log(`[SUMMARY] ${emp.full_name} - Qualifying Leaves:`, qualifyingLeaves);
+          console.log(`[SUMMARY] ${emp.full_name} - Affected Sundays:`, Array.from(affectedSundays.entries()));
+          console.log(`[SUMMARY] ${emp.full_name} - Unpaid Sundays:`, Array.from(unpaidSundays));
+          console.log(`[SUMMARY] ${emp.full_name} - Total Sundays in month:`, days.filter(d => new Date(d).getDay() === 0).length);
+        }
+
+        summary.sandwich_sundays = unpaidSundays.size;
+
+        // Count total Sundays
+        const totalSundays = days.filter(dateStr => new Date(dateStr).getDay() === 0).length;
+
+        // Paid Sundays = Total Sundays - Sandwich Sundays
+        summary.paid_sundays = totalSundays - summary.sandwich_sundays;
+
+        // Count AWI cases directly from awiMap (even if no attendance records exist)
+        for (const dateStr of days) {
+          const awiKey = `${emp.user_id}|${dateStr}`;
+          const awiStatus = awiMap.get(awiKey);
+          if (awiStatus === 'authorized_absence') {
+            summary.authorized_awi_days += 1;
+          } else if (awiStatus === 'unauthorized_absence') {
+            summary.unauthorized_absent_days += 1;
+          }
+        }
 
         for (const dateStr of days) {
           const rec = attMap.get(`${emp.user_id}|${dateStr}`) || { date: dateStr };
@@ -283,26 +401,47 @@ router.get(
             halfDayLeaveAsNoRecord: true,
           });
 
-          if (computed.computed_status === "full_day") summary.full_days += 1;
-          else if (computed.computed_status === "half_day") summary.half_days += 1;
-          else if (computed.computed_status === "absent") summary.absent_days += 1;
-          else if (computed.computed_status === "no_record") summary.no_record_days += 1;
-          else if (computed.computed_status === "paid_leave") {
+          // Check if there's an AWI case for this day that overrides the computed status
+          const awiStatus = awiMap.get(`${emp.user_id}|${dateStr}`);
+          let finalStatus = computed.computed_status;
+          if (awiStatus === 'authorized_absence' || awiStatus === 'unauthorized_absent') {
+            finalStatus = awiStatus;
+          }
+
+          // NEW: If no record, no AWI, no leave request, and not Sunday/holiday → treat as unauthorized AWI
+          else if (!attMap.has(`${emp.user_id}|${dateStr}`) && !awiStatus && !leaveMap.has(`${emp.user_id}|${dateStr}`)) {
+            const dow = new Date(dateStr).getDay();
+            if (dow !== 0 && !holidaySet.has(dateStr)) {
+              finalStatus = 'unauthorized_absence';
+            }
+          }
+
+          if (finalStatus === "full_day") summary.full_days += 1;
+          else if (finalStatus === "half_day") summary.half_days += 1;
+          else if (finalStatus === "absent") summary.absent_days += 1;
+          else if (finalStatus === "no_record") summary.no_record_days += 1;
+          else if (finalStatus === "paid_leave") {
             summary.paid_leave_days += 1;
             summary.leave_days += 1;
-          } else if (computed.computed_status === "unpaid_leave") {
+          } else if (finalStatus === "unpaid_leave") {
             summary.unpaid_leave_days += 1;
             summary.leave_days += 1;
-          } else if (computed.computed_status === "leave") {
+          } else if (finalStatus === "leave") {
             summary.leave_days += 1;
+          } else if (finalStatus === "authorized_absence") {
+            summary.authorized_awi_days += 1;
+          } else if (finalStatus === "unauthorized_absence") {
+            summary.unauthorized_absent_days += 1;
+          } else if (computed.computed_status === "holiday") {
+            summary.holidays += 1;
           }
 
           // Calculate unpaid leaves combined (unpaid + absent + no_record)
           summary.unpaid_leaves_combined = summary.unpaid_leave_days + summary.absent_days + summary.no_record_days;
 
-          if (["full_day", "working", "in_progress"].includes(computed.computed_status)) {
+          if (["full_day", "working", "in_progress"].includes(finalStatus)) {
             summary.present_days += 1;
-          } else if (computed.computed_status === "half_day") {
+          } else if (finalStatus === "half_day") {
             summary.present_days += 0.5;
           }
           if (isLateLoginRecord(rec)) summary.late_days += 1;
@@ -314,6 +453,19 @@ router.get(
         }
 
         summary.avg_break_mins = breakDays ? Math.round(breakTotal / breakDays) : 0;
+        
+        // Debug logging for final counts
+        console.log(`[SUMMARY] ${emp.full_name} (ID: ${emp.user_id}) - Final counts:`, {
+          full_days: summary.full_days,
+          half_days: summary.half_days,
+          absent_days: summary.absent_days,
+          no_record_days: summary.no_record_days,
+          authorized_awi_days: summary.authorized_awi_days,
+          unauthorized_absent_days: summary.unauthorized_absent_days,
+          paid_leave_days: summary.paid_leave_days,
+          unpaid_leave_days: summary.unpaid_leave_days,
+        });
+        
         return summary;
       });
 
@@ -334,6 +486,11 @@ router.get(
         total_paid_leave: employees.reduce((s, e) => s + Number(e.paid_leave_days || 0), 0),
         total_unpaid_leave: employees.reduce((s, e) => s + Number(e.unpaid_leave_days || 0), 0),
         total_leave: employees.reduce((s, e) => s + Number(e.leave_days || 0), 0),
+        total_authorized_awi: employees.reduce((s, e) => s + Number(e.authorized_awi_days || 0), 0),
+        total_unauthorized_absent: employees.reduce((s, e) => s + Number(e.unauthorized_absent_days || 0), 0),
+        total_paid_sundays: employees.reduce((s, e) => s + Number(e.paid_sundays || 0), 0),
+        total_unpaid_sundays: employees.reduce((s, e) => s + Number(e.unpaid_sundays || 0), 0),
+        total_holidays: employees.reduce((s, e) => s + Number(e.holidays || 0), 0),
         avg_break: employees.length
           ? Math.round(
               employees.reduce(
@@ -367,7 +524,7 @@ router.get(
 router.get(
   "/attendance-analysis/individual",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { userId, month } = req.query;
@@ -376,7 +533,8 @@ router.get(
 
       const ck = cacheKey("individual", userId, month);
       const cached = getCache(ck);
-      if (cached) return res.json({ ...cached, _cached: true });
+      // Temporarily disable cache to force fresh data
+      // if (cached) return res.json({ ...cached, _cached: true });
 
       const { start, end, year, month: m } = monthRange(month);
       const contextStart = shiftDate(start, -2);
@@ -392,7 +550,7 @@ router.get(
       }
 
       // ── Fetch attendance context plus the displayed month data ──
-      const [attRows, breakRows, holidayRows, userRows] = await Promise.all([
+      const [attRows, breakRows, holidayRows, awiRows, leaveRows, userRows] = await Promise.all([
         pool.query(
           `SELECT
              TO_CHAR(a.date,'YYYY-MM-DD') AS date,
@@ -426,32 +584,407 @@ router.get(
           [contextStart, contextEnd, userId]
         ),
         pool.query(
-          `SELECT TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date
+          `SELECT user_id, TO_CHAR(date,'YYYY-MM-DD') AS date, final_status
+           FROM awi_cases
+           WHERE user_id = $1 AND date BETWEEN $2 AND $3
+           AND final_status IN ('authorized_absence', 'unauthorized_absence')`,
+          [userId, start, end]
+        ),
+        pool.query(
+          `SELECT user_id, TO_CHAR(from_date,'YYYY-MM-DD') AS date, status, leave_type
+           FROM leave_requests
+           WHERE user_id = $1 AND from_date BETWEEN $2 AND $3
+           AND status = 'approved'`,
+          [userId, start, end]
+        ),
+        pool.query(
+          `SELECT id, full_name, joining_date, branch, department, role
            FROM users WHERE id = $1`,
           [userId]
-        ),
+        )
       ]);
 
       // ── Build lookup maps (O(n) not O(n²)) ───────────────────
       const attMap = new Map(attRows.rows.map(r => [r.date, r]));
       const holidaySet = new Set(holidayRows.rows.map(r => r.date));
       const holidayMap = new Map(holidayRows.rows.map(r => [r.date, { type: r.type, name: r.name }]));
+      const awiMap = new Map(awiRows.rows.map(r => [r.date, r.final_status]));
+      const leaveMap = new Map(leaveRows.rows.map(r => [r.date, { status: r.status, leave_type: r.leave_type }]));
       const joiningDate = userRows.rows[0]?.joining_date || null;
 
-      // Calculate sandwich Sundays for this employee
-      const sandwichResults = computeMonthSandwich({
-        month,
-        attMap,
-        holidayMap,
-        joiningDate,
-        todayStr: formatDateStr(new Date()),
-        freePerMonth: 1
-      });
+      // Add virtual attendance records for AWI days (for sandwich calculation)
+      for (const [date, awiStatus] of awiMap.entries()) {
+        if (!attMap.has(date)) {
+          attMap.set(date, {
+            date,
+            status: awiStatus,
+            check_in_time: null,
+            check_out_time: null,
+            attendance_status: awiStatus
+          });
+        }
+      }
 
-      // Build a map of date -> sandwich results for quick lookup
+      // Build complete attMap with ALL days in the month (for sandwich calculation)
+      const sandwichLastDay = new Date(year, m, 0).getDate();
+      const days = [];
+      for (let d = 1; d <= sandwichLastDay; d++) {
+        days.push(`${month}-${String(d).padStart(2, "0")}`);
+      }
+
+      const completeAttMap = new Map();
+      for (const dateStr of days) {
+        const rec = attMap.get(dateStr);
+        if (rec) {
+          completeAttMap.set(dateStr, rec);
+        } else {
+          // Add empty record for days without attendance
+          completeAttMap.set(dateStr, { date: dateStr });
+        }
+      }
+
+      // NEW SANDWICH POLICY IMPLEMENTATION (same as summary endpoint)
+      const unpaidSundays = new Set();
+      const qualifyingLeaves = [];
+
+      // Collect all qualifying leaves (Saturday/Monday leaves + AWI + Absent + No Record)
+      for (const dateStr of days) {
+        const dow = new Date(dateStr).getDay();
+
+        // Check for AWI
+        if (awiMap.has(dateStr)) {
+          qualifyingLeaves.push({ date: dateStr, dow, type: 'AWI' });
+        }
+        // Check for actual attendance on Saturday or Monday (has check-in/check-out)
+        else if ((dow === 6 || dow === 1) && attMap.has(dateStr)) {
+          const attRec = attMap.get(dateStr);
+          // If employee has actual attendance (check-in AND check-out)
+          if (attRec.check_in_time && attRec.check_out_time) {
+            // Special case: Saturday half-day with check-out BEFORE 7 PM is a qualifying event
+            if (dow === 6 && attRec.status === 'half_day') {
+              const checkOutTime = attRec.check_out_time; // Format: "HH:MM:SS"
+              const [hours] = checkOutTime.split(':').map(Number);
+              // If check-out is before 7 PM (19:00), it's a qualifying event
+              if (hours < 19) {
+                qualifyingLeaves.push({ date: dateStr, dow, type: 'HALF_DAY_EARLY' });
+                continue;
+              }
+            }
+            // Special case: Monday with check-in AFTER 10:30 AM is a qualifying event
+            if (dow === 1) {
+              const checkInTime = attRec.check_in_time; // Format: "HH:MM:SS"
+              const [hours, minutes] = checkInTime.split(':').map(Number);
+              // If check-in is after 10:30 AM (10:30:00), it's a qualifying event
+              if (hours > 10 || (hours === 10 && minutes > 30)) {
+                qualifyingLeaves.push({ date: dateStr, dow, type: 'LATE_LOGIN' });
+                continue;
+              }
+            }
+            // Employee worked (full day or late Saturday/Monday) - not a qualifying event
+            continue;
+          }
+          // If employee has only check-in but no check-out, treat as NOT worked (qualifying event)
+          // This handles cases like "Absent with check-in" where employee didn't complete the day
+          if (attRec.check_in_time && !attRec.check_out_time) {
+            qualifyingLeaves.push({ date: dateStr, dow, type: 'ABSENCE' });
+          }
+          // If status is absent, count as qualifying event
+          else if (attRec.status === 'absent') {
+            qualifyingLeaves.push({ date: dateStr, dow, type: 'ABSENCE' });
+          }
+        }
+        // Check for approved leave on Saturday or Monday
+        // Count as qualifying event if no actual work (no check-in/check-out)
+        else if ((dow === 6 || dow === 1) && leaveMap.has(dateStr)) {
+          if (!attMap.has(dateStr)) {
+            // No attendance record = qualifying event
+            qualifyingLeaves.push({ date: dateStr, dow, type: 'LEAVE' });
+          } else {
+            // Has attendance record - check if actual work was done
+            const attRec = attMap.get(dateStr);
+            if (!attRec.check_in_time || !attRec.check_out_time) {
+              // No actual work = qualifying event (even if status is "On Leave")
+              qualifyingLeaves.push({ date: dateStr, dow, type: 'LEAVE' });
+            }
+            // If employee has check-in AND check-out, they worked - not qualifying event
+          }
+        }
+        // Check for no record on Saturday or Monday
+        else if ((dow === 6 || dow === 1) && !attMap.has(dateStr)) {
+          qualifyingLeaves.push({ date: dateStr, dow, type: 'NO_RECORD' });
+        }
+      }
+
+      // Sort qualifying leaves by date
+      qualifyingLeaves.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+      // Track Sundays affected by each qualifying leave
+      const affectedSundays = new Map(); // Sunday date -> count of qualifying occurrences
+
+      for (const leave of qualifyingLeaves) {
+        const leaveDate = new Date(leave.date);
+        const leaveDow = leaveDate.getDay();
+
+        // If leave is on Saturday (day 6), check Sunday (day 0, which is leaveDate + 1)
+        if (leaveDow === 6) {
+          const sundayDate = new Date(leaveDate);
+          sundayDate.setDate(sundayDate.getDate() + 1);
+          const sundayStr = formatDateStr(sundayDate);
+          if (sundayStr.startsWith(month)) {
+            affectedSundays.set(sundayStr, (affectedSundays.get(sundayStr) || 0) + 1);
+          }
+        }
+        // If leave is on Monday (day 1), check Sunday (day 0, which is leaveDate - 1)
+        else if (leaveDow === 1) {
+          const sundayDate = new Date(leaveDate);
+          sundayDate.setDate(sundayDate.getDate() - 1);
+          const sundayStr = formatDateStr(sundayDate);
+          if (sundayStr.startsWith(month)) {
+            affectedSundays.set(sundayStr, (affectedSundays.get(sundayStr) || 0) + 1);
+          }
+        }
+      }
+
+      // Now recalculate qualifying events for Sunday analysis table
+      // This checks actual attendance status to determine if it's a qualifying event
+      // Only count qualifying events from the payroll month (not previous/next month)
+      const sundayQualifyingEvents = new Map();
+      for (const [sundayStr, count] of affectedSundays.entries()) {
+        const sundayDate = new Date(sundayStr);
+        const saturdayBefore = new Date(sundayDate);
+        saturdayBefore.setDate(saturdayBefore.getDate() - 1);
+        const saturdayStr = formatDateStr(saturdayBefore);
+
+        const mondayAfter = new Date(sundayDate);
+        mondayAfter.setDate(mondayAfter.getDate() + 1);
+        const mondayStr = formatDateStr(mondayAfter);
+
+        let qualifyingCount = 0;
+
+        // Check Saturday - only if it's in the same month
+        if (saturdayStr.startsWith(month)) {
+          if (awiMap.has(saturdayStr)) {
+            qualifyingCount++;
+          } else if (attMap.has(saturdayStr)) {
+            const attRec = attMap.get(saturdayStr);
+            // If employee has check-in AND check-out AND status is half_day
+            // Check if check-out is BEFORE 7 PM (19:00) to qualify as qualifying event
+            if (attRec.check_in_time && attRec.check_out_time && attRec.status === 'half_day') {
+              const checkOutTime = attRec.check_out_time; // Format: "HH:MM:SS"
+              const [hours] = checkOutTime.split(':').map(Number);
+              // If check-out is before 7 PM (19:00), it's a qualifying event
+              if (hours < 19) {
+                qualifyingCount++;
+              }
+              // If check-out is after 7 PM, it's not a qualifying event (worked)
+            }
+            // If employee has check-in AND check-out but NOT half_day, they worked (not qualifying event)
+            else if (attRec.check_in_time && attRec.check_out_time) {
+              // Not a qualifying event
+            }
+            // If employee has only check-in but no check-out, treat as NOT worked (qualifying event)
+            else if (attRec.check_in_time && !attRec.check_out_time) {
+              qualifyingCount++;
+            }
+            // If status is absent, count as qualifying event
+            else if (attRec.status === 'absent') {
+              qualifyingCount++;
+            }
+            // If status is half_day without check-in/check-out, treat as qualifying event
+            else if (attRec.status === 'half_day') {
+              qualifyingCount++;
+            }
+          } else if (leaveMap.has(saturdayStr)) {
+            qualifyingCount++;
+          } else {
+            // No record = qualifying event
+            qualifyingCount++;
+          }
+        }
+
+        // Check Monday - only if it's in the same month
+        if (mondayStr.startsWith(month)) {
+          if (awiMap.has(mondayStr)) {
+            qualifyingCount++;
+          } else if (attMap.has(mondayStr)) {
+            const attRec = attMap.get(mondayStr);
+            // If employee has check-in AND check-out
+            // Check if check-in is AFTER 10:30 AM to qualify as qualifying event
+            if (attRec.check_in_time && attRec.check_out_time) {
+              const checkInTime = attRec.check_in_time; // Format: "HH:MM:SS"
+              const [hours, minutes] = checkInTime.split(':').map(Number);
+              // If check-in is after 10:30 AM (10:30:00), it's a qualifying event
+              if (hours > 10 || (hours === 10 && minutes > 30)) {
+                qualifyingCount++;
+              }
+              // If check-in is before or at 10:30 AM, it's not a qualifying event (worked)
+            }
+            // If employee has only check-in but no check-out, treat as NOT worked (qualifying event)
+            else if (attRec.check_in_time && !attRec.check_out_time) {
+              qualifyingCount++;
+            }
+            // If status is absent, count as qualifying event
+            else if (attRec.status === 'absent') {
+              qualifyingCount++;
+            }
+            // If status is half_day without check-in/check-out, treat as qualifying event
+            else if (attRec.status === 'half_day') {
+              qualifyingCount++;
+            }
+          } else if (leaveMap.has(mondayStr)) {
+            qualifyingCount++;
+          } else {
+            // No record = qualifying event
+            qualifyingCount++;
+          }
+        }
+
+        sundayQualifyingEvents.set(sundayStr, qualifyingCount);
+      }
+
+      // Mark Sundays as unpaid using allowance pool system (same as frontend)
+      // - First Sunday with 1 qualifying event = Paid (allowance)
+      // - Subsequent Sundays with 1 qualifying event = Unpaid (no allowance)
+      // - Sundays with 2+ qualifying events = Unpaid
+      let firstOneEventSundayPaid = false;
+
+      // Sort Sundays by date to identify the first one
+      const sortedSundays = Array.from(affectedSundays.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+
+      // Add ALL Sundays (including those with 0 qualifying events) for complete analysis
+      const allSundays = [];
+      for (let d = 1; d <= sandwichLastDay; d++) {
+        const dateStr = `${month}-${String(d).padStart(2, "0")}`;
+        const dow = new Date(dateStr).getDay();
+        if (dow === 0) {
+          allSundays.push(dateStr);
+        }
+      }
+      allSundays.sort();
+
+      // Detailed logging for Sunday analysis
+      if (parseInt(userId) === 31 || parseInt(userId) === 24 || parseInt(userId) === 46 || parseInt(userId) === 37) {
+        console.log(`\n════════════════════════════════════════════════════════════════════`);
+        console.log(`[SUNDAY ANALYSIS] Employee ID ${userId} - Month ${month}`);
+        console.log(`════════════════════════════════════════════════════════════════════`);
+        console.log(`| Sunday   | Saturday Before | Monday After  | Qualifying Events | Status |`);
+        console.log(`|----------|------------------|----------------|-------------------|---------|`);
+      }
+
+      for (const sundayStr of allSundays) {
+        const count = affectedSundays.get(sundayStr) || 0;
+        const sundayDate = new Date(sundayStr);
+        const saturdayBefore = new Date(sundayDate);
+        saturdayBefore.setDate(saturdayBefore.getDate() - 1);
+        const saturdayStr = formatDateStr(saturdayBefore);
+
+        const mondayAfter = new Date(sundayDate);
+        mondayAfter.setDate(mondayAfter.getDate() + 1);
+        const mondayStr = formatDateStr(mondayAfter);
+
+        // Get Saturday status
+        let saturdayStatus = "present";
+        if (awiMap.has(saturdayStr)) {
+          saturdayStatus = "AWI";
+        } else if (attMap.has(saturdayStr)) {
+          const attRec = attMap.get(saturdayStr);
+          if (attRec.check_in_time && attRec.check_out_time) {
+            // Check if it's a half-day with early check-out (before 7 PM)
+            if (attRec.status === 'half_day') {
+              const checkOutTime = attRec.check_out_time;
+              const [hours] = checkOutTime.split(':').map(Number);
+              if (hours < 19) {
+                saturdayStatus = "half_day_early (qualifying)";
+              } else {
+                saturdayStatus = "worked";
+              }
+            } else {
+              // Employee worked - not a qualifying event
+              saturdayStatus = "worked";
+            }
+          } else if (attRec.status === 'absent') {
+            saturdayStatus = "absent";
+          } else {
+            saturdayStatus = "no_record";
+          }
+        } else if (leaveMap.has(saturdayStr)) {
+          saturdayStatus = "leave";
+        } else {
+          saturdayStatus = "no_record";
+        }
+
+        // Get Monday status
+        let mondayStatus = "present";
+        if (awiMap.has(mondayStr)) {
+          mondayStatus = "AWI";
+        } else if (attMap.has(mondayStr)) {
+          const attRec = attMap.get(mondayStr);
+          if (attRec.check_in_time && attRec.check_out_time) {
+            // Employee worked - not a qualifying event
+            mondayStatus = "worked";
+          } else if (attRec.status === 'absent') {
+            mondayStatus = "absent";
+          } else {
+            mondayStatus = "no_record";
+          }
+        } else if (leaveMap.has(mondayStr)) {
+          mondayStatus = "leave";
+        } else {
+          mondayStatus = "no_record";
+        }
+
+        // Use recalculated qualifying count (actual attendance check)
+        const actualQualifyingCount = sundayQualifyingEvents.get(sundayStr) || count;
+
+        let status = "Paid";
+        if (actualQualifyingCount >= 2) {
+          // 2+ qualifying events = unpaid
+          unpaidSundays.add(sundayStr);
+          status = "Unpaid (2+ events)";
+        } else if (actualQualifyingCount === 1) {
+          // 1 qualifying event
+          if (!firstOneEventSundayPaid) {
+            // First Sunday with 1 event = paid (allowance)
+            firstOneEventSundayPaid = true;
+            status = "Paid (first one-event)";
+          } else {
+            // Subsequent Sundays with 1 event = unpaid (no allowance)
+            unpaidSundays.add(sundayStr);
+            status = "Unpaid (subsequent one-event)";
+          }
+        } else {
+          // count === 0 = paid (no action needed)
+          status = "Paid (0 events)";
+        }
+
+        if (parseInt(userId) === 31 || parseInt(userId) === 24 || parseInt(userId) === 46 || parseInt(userId) === 37) {
+          console.log(`| ${sundayStr} | ${saturdayStr.padEnd(16)} | ${mondayStr.padEnd(14)} | ${actualQualifyingCount.toString().padEnd(17)} | ${status.padEnd(7)} |`);
+        }
+      }
+
+      if (parseInt(userId) === 31 || parseInt(userId) === 24 || parseInt(userId) === 46 || parseInt(userId) === 37) {
+        console.log(`════════════════════════════════════════════════════════════════════\n`);
+      }
+
+      if (parseInt(userId) === 31 || parseInt(userId) === 24 || parseInt(userId) === 46 || parseInt(userId) === 37) {
+        console.log(`[INDIVIDUAL] Employee ID ${userId} - ALL AWI Cases:`, Array.from(awiMap.entries()));
+        console.log(`[INDIVIDUAL] Employee ID ${userId} - ALL Leave Requests:`, Array.from(leaveMap.entries()));
+        console.log(`[INDIVIDUAL] Employee ID ${userId} - Qualifying Leaves:`, qualifyingLeaves);
+        console.log(`[INDIVIDUAL] Employee ID ${userId} - Affected Sundays:`, Array.from(affectedSundays.entries()));
+        console.log(`[INDIVIDUAL] Employee ID ${userId} - Unpaid Sundays:`, Array.from(unpaidSundays));
+      }
+
+      // Build sandwichByDate map for Sunday records
       const sandwichByDate = new Map();
-      for (const result of sandwichResults) {
-        sandwichByDate.set(result.date, result);
+      for (const dateStr of days) {
+        const dow = new Date(dateStr).getDay();
+        if (dow === 0) {
+          sandwichByDate.set(dateStr, {
+            date: dateStr,
+            anchorType: 'SUNDAY',
+            isSandwich: unpaidSundays.has(dateStr)
+          });
+        }
       }
 
       // Group breaks by date
@@ -462,21 +995,112 @@ router.get(
       }
 
       // ── Build full month record array ─────────────────────────
-      const lastDay = new Date(year, m, 0).getDate();
       const records = [];
       const todayStr = formatDateStr(new Date());
 
-      for (let d = 1; d <= lastDay; d++) {
+      for (let d = 1; d <= sandwichLastDay; d++) {
         const dateStr = `${month}-${String(d).padStart(2, "0")}`;
         const dow = new Date(dateStr).getDay();
 
         // Sunday
         if (dow === 0) {
-          records.push(buildEmptyRecord(dateStr, "sunday")); continue;
+          const sandwichResult = sandwichByDate.get(dateStr);
+          records.push({
+            date: dateStr,
+            checkIn: "--",
+            checkOut: "--",
+            status: "sunday",
+            computed_status: "sunday",
+            display_status: sandwichResult?.isSandwich ? "Unpaid Sunday" : "Paid Sunday",
+            policy_status: null,
+            policy_reason: null,
+            lateMinutes: 0,
+            workHours: 0,
+            productionHours: 0,
+            breaks: 0,
+            breakMins: { b1: 0, lunch: 0, b2: 0, b3: 0, b3Count: 0, b3History: [] },
+            breakDetails: { b1: { in: null, out: null }, lunch: { in: null, out: null }, b2: { in: null, out: null }, b3: { in: null, out: null } },
+            half_day_slot: null,
+            leave_duration_type: null,
+            leave_request_status: null,
+            is_paid_leave: null,
+            leave_type: null,
+            leave_request_id: null,
+            sandwich_results: sandwichResult ? [sandwichResult] : [],
+            sandwich_rule_applied: sandwichResult?.isSandwich || false,
+          });
+          continue;
         }
         // Holiday
         if (holidaySet.has(dateStr)) {
           records.push(buildEmptyRecord(dateStr, "holiday")); continue;
+        }
+
+        // Check if there's an AWI case for this day - AWI status ALWAYS overrides attendance status
+        const awiStatus = awiMap.get(dateStr);
+        if (awiStatus) {
+          // Create a record for the AWI day (regardless of whether attendance record exists)
+          records.push({
+            date: dateStr,
+            checkIn: "--",
+            checkOut: "--",
+            status: awiStatus,
+            computed_status: awiStatus,
+            display_status: awiStatus === 'authorized_absence' ? 'Authorized AWI' : 'Unauthorized Absent',
+            policy_status: null,
+            policy_reason: null,
+            lateMinutes: 0,
+            workHours: 0,
+            productionHours: 0,
+            breaks: 0,
+            breakMins: { b1: 0, lunch: 0, b2: 0, b3: 0, b3Count: 0, b3History: [] },
+            breakDetails: { b1: { in: null, out: null }, lunch: { in: null, out: null }, b2: { in: null, out: null }, b3: { in: null, out: null } },
+            half_day_slot: null,
+            leave_duration_type: null,
+            leave_request_status: null,
+            is_paid_leave: null,
+            leave_type: null,
+            leave_request_id: null,
+            sandwich_results: sandwichByDate.get(dateStr) ? [sandwichByDate.get(dateStr)] : [],
+            sandwich_rule_applied: sandwichByDate.get(dateStr)?.isSandwich || false,
+          });
+          continue;
+        }
+
+        // If no attendance record, no AWI, no leave request, and not Sunday/holiday → treat as absent
+        const hasAttRecord = attMap.has(dateStr);
+        const hasAwi = awiStatus && (awiStatus === 'authorized_absence' || awiStatus === 'unauthorized_absence');
+        const hasLeave = leaveMap.has(dateStr);
+        
+        if (!hasAttRecord && !hasAwi && !hasLeave) {
+          const dow = new Date(dateStr).getDay();
+          if (dow !== 0 && !holidaySet.has(dateStr)) {
+            records.push({
+              date: dateStr,
+              checkIn: "--",
+              checkOut: "--",
+              status: 'absent',
+              computed_status: 'absent',
+              display_status: 'Absent',
+              policy_status: null,
+              policy_reason: null,
+              lateMinutes: 0,
+              workHours: 0,
+              productionHours: 0,
+              breaks: 0,
+              breakMins: { b1: 0, lunch: 0, b2: 0, b3: 0, b3Count: 0, b3History: [] },
+              breakDetails: { b1: { in: null, out: null }, lunch: { in: null, out: null }, b2: { in: null, out: null }, b3: { in: null, out: null } },
+              half_day_slot: null,
+              leave_duration_type: null,
+              leave_request_status: null,
+              is_paid_leave: null,
+              leave_type: null,
+              leave_request_id: null,
+              sandwich_results: sandwichByDate.get(dateStr) ? [sandwichByDate.get(dateStr)] : [],
+              sandwich_rule_applied: sandwichByDate.get(dateStr)?.isSandwich || false,
+            });
+            continue;
+          }
         }
 
         const att = attMap.get(dateStr);
@@ -534,12 +1158,18 @@ router.get(
           }
         );
 
+        // Override status with AWI status if it exists
+        let finalStatus = computed.computed_status;
+        if (awiStatus === 'authorized_absence' || awiStatus === 'unauthorized_absent') {
+          finalStatus = awiStatus;
+        }
+
         records.push({
           date:      dateStr,
           checkIn,
           checkOut,
-          status: computed.computed_status,
-          computed_status: computed.computed_status,
+          status: finalStatus,
+          computed_status: finalStatus,
           display_status: computed.display_status,
           policy_status: computed.policy_status,
           policy_reason: computed.policy_reason,
@@ -590,7 +1220,7 @@ router.get(
 router.get(
   "/attendance-analysis/trends",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { branch, months = 6 } = req.query;

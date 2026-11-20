@@ -25,6 +25,27 @@ import { logPayslip, getClientIp } from "../utils/activityLogger.js";
 
 const router = express.Router();
 
+// ── Helper: month date range ──────────────────────────────────
+function monthRange(yearMonth) {
+  const [y, m] = yearMonth.split("-").map(Number);
+  const start = `${yearMonth}-01`;
+  const lastDay = new Date(y, m, 0).getDate();
+  const end = `${yearMonth}-${String(lastDay).padStart(2, "0")}`;
+  return { start, end, year: y, month: m };
+}
+
+// ── Helper: shift date by days ─────────────────────────────────
+function shiftDate(dateStr, days) {
+  const d = new Date(dateStr);
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// ── Helper: days in month ─────────────────────────────────────
+function daysInMonth(year, month) {
+  return new Date(year, month, 0).getDate();
+}
+
 // ── Helper: parse year/month from "YYYY-MM", "YYYY-MM-DD", or Date object ──
 function parseYearMonth(monthValue) {
   if (!monthValue) {
@@ -94,7 +115,7 @@ function parseBreakdown(row) {
 router.get(
   "/payroll/employees",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR"),
   async (req, res) => {
     try {
       const { branch, department, search } = req.query;
@@ -107,7 +128,8 @@ router.get(
             'YYYY-MM-DD'
           ) AS joining_date
         FROM users
-        WHERE role IN ('EMPLOYEE','MANAGER','OPERATIONAL_MANAGER','SUB_ADMIN') AND salary > 0
+        WHERE role IN ('EMPLOYEE','MANAGER','OPERATIONAL_MANAGER','SUB_ADMIN','HR') AND salary > 0
+          AND (employment_status = 'ACTIVE' OR employment_status IS NULL)
       `;
       const params = [];
       let idx = 1;
@@ -137,7 +159,7 @@ router.get(
 router.get(
   "/payroll/attendance-preview",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR"),
   async (req, res) => {
     try {
       const { user_id, month } = req.query;
@@ -169,10 +191,12 @@ router.get(
 router.post(
   "/payroll/generate",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR"),
   async (req, res) => {
     try {
       const { user_id, month, incentives = 0, deductions = 0, tax = 0 } = req.body;
+      console.log(`[PAYROLL GENERATE] Received values:`, { user_id, month, incentives, deductions, tax });
+      
       if (!user_id || !month)
         return res.status(400).json({ message: "user_id and month are required" });
 
@@ -183,7 +207,24 @@ router.post(
         manualDeductions : Number(deductions),
         tax              : Number(tax),
       });
-      const saved = await persistPayslip(pool, calc, { incentives, deductions, tax });
+      
+      console.log(`[PAYROLL GENERATE] Calculated salary:`, calc.salary);
+      
+      // Force manual update to preserve preview values even if they are 0
+      const saved = await persistPayslip(pool, calc, { 
+        incentives, 
+        deductions, 
+        tax,
+        forceManualUpdate: true 
+      });
+      
+      console.log(`[PAYROLL GENERATE] Saved payslip:`, {
+        id: saved.id,
+        incentives: saved.incentives,
+        deductions: saved.deductions,
+        tax: saved.tax,
+        net_pay: saved.net_pay
+      });
 
       // ✅ Activity log: payslip generated
       try {
@@ -219,12 +260,37 @@ router.post(
 );
 
 // ============================================================
+// DELETE /api/payroll/:id
+// ============================================================
+router.delete(
+  "/payroll/:id",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "HR"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const result = await pool.query(
+        "DELETE FROM payslip_records WHERE id = $1 RETURNING *",
+        [id]
+      );
+      if (result.rows.length === 0) {
+        return res.status(404).json({ message: "Payslip not found" });
+      }
+      res.json({ message: "Payslip deleted successfully", payslip: result.rows[0] });
+    } catch (err) {
+      console.error("payroll/delete:", err);
+      res.status(500).json({ message: err.message });
+    }
+  }
+);
+
+// ============================================================
 // POST /api/payroll/batch-generate
 // ============================================================
 router.post(
   "/payroll/batch-generate",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR"),
   async (req, res) => {
     try {
       const { month, branch, department } = req.body;
@@ -278,7 +344,7 @@ router.post(
 router.get(
   "/payroll/payslips",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR"),
   async (req, res) => {
     try {
       const { branch, department, search, month, page = 1, limit = 50 } = req.query;
@@ -291,7 +357,11 @@ router.get(
           p.id, p.user_id, p.month, p.basic_salary, p.earned_basic,
           p.incentives, p.deductions, p.tax, p.net_pay,
           p.working_days, p.present_days, p.payment_status,
-          p.breakdown, p.created_at,
+          p.breakdown, p.created_at, p.unpaid_leave_days,
+          p.half_days, p.paid_sundays, p.unpaid_sundays, p.holidays,
+          p.auth_awi, p.unauth_awi, p.full_days, p.absent_days,
+          p.paid_leave, p.total_paid_days, p.late_login_count,
+          p.awi_deduction_days, p.awi_deduction,
           u.full_name, u.department, u.branch,
           u.employee_code, u.salary AS monthly_ctc
         FROM payslip_records p
@@ -328,60 +398,7 @@ router.get(
         ),
       ]);
 
-      // Calculate attendance details dynamically for each payslip
-      const payslipsWithDetails = await Promise.all(
-        dataRes.rows.map(async (p) => {
-          try {
-            console.log(`[payslips] Processing payslip ${p.id}, month value: ${p.month}, type: ${typeof p.month}`);
-            const { year, month: m } = parseYearMonth(p.month);
-            const calc = await calculatePayroll(pool, p.user_id, year, m);
-
-            // Extract attendance details from breakdown
-            const bd = typeof p.breakdown === "string"
-              ? JSON.parse(p.breakdown || "{}")
-              : (p.breakdown || {});
-
-            return {
-              ...p,
-              present_days: calc.attendance?.fullDays || 0,
-              absent_days: calc.attendance?.absentDays || 0,
-              paid_leaves: calc.leave?.paidLeaveUsed || 0,
-              unpaid_leaves: calc.leave?.unpaidLeaveDays || 0,
-              half_days: calc.attendance?.halfDays || 0,
-              sandwich_days: calc.sandwich?.sandwichResults?.length || 0,
-              paid_sundays: calc.sandwich?.paidSundays?.length || 0,
-              unpaid_sundays: calc.sandwich?.unpaidSundays?.length || 0,
-              holidays: calc.calendar?.holidayDates?.length || 0,
-              total_days: calc.calendar?.totalDaysInMonth || 0,
-              is_eligible_for_paid_leave: calc.leave?.eligible || false,
-              days_since_joining: calc.leave?.daysCompleted || 0,
-              daily_rate: calc.salary?.dailyRate || 0,
-              payable_days: calc.salary?.payableDays || 0,
-              net_pay: calc.salary?.netPay || p.net_pay,
-            };
-          } catch (err) {
-            console.error(`Error calculating attendance for payslip ${p.id} (user_id: ${p.user_id}, month: ${p.month}):`, err);
-            // Return payslip with default values on error
-            return {
-              ...p,
-              present_days: 0,
-              absent_days: 0,
-              paid_leaves: 0,
-              unpaid_leaves: 0,
-              half_days: 0,
-              sandwich_days: 0,
-              paid_sundays: 0,
-              unpaid_sundays: 0,
-              holidays: 0,
-              total_days: 0,
-              is_eligible_for_paid_leave: false,
-              days_since_joining: 0,
-              daily_rate: 0,
-              payable_days: 0,
-            };
-          }
-        })
-      );
+      const payslipsWithDetails = dataRes.rows;
 
       res.json({
         data : payslipsWithDetails,
@@ -403,7 +420,7 @@ router.get(
 router.get(
   "/payroll/payslip/:id",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "HR"),
   async (req, res) => {
     try {
       const result = await pool.query(
@@ -421,7 +438,7 @@ router.get(
         return res.status(404).json({ message: "Payslip not found" });
       const payslip = parseBreakdown(result.rows[0]);
       if (
-        ["OPERATIONAL_MANAGER", "MANAGER"].includes(req.user.role) &&
+        ["OPERATIONAL_MANAGER", "MANAGER", "HR"].includes(req.user.role) &&
         Number(payslip.user_id) !== Number(req.user.id)
       ) {
         return res.status(403).json({ message: "Access denied" });
@@ -439,7 +456,7 @@ router.get(
 router.put(
   "/payroll/payslip/:id/status",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR"),
   async (req, res) => {
     try {
       const { payment_status } = req.body;
@@ -457,12 +474,67 @@ router.put(
 );
 
 // ============================================================
+// PUT /api/payroll/payslip/:id/adjustments
+// ============================================================
+router.put(
+  "/payroll/payslip/:id/adjustments",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "HR"),
+  async (req, res) => {
+    try {
+      const { incentives, deductions, tax } = req.body;
+      const { id } = req.params;
+      
+      // Validate inputs
+      const numIncentives = Number(incentives) || 0;
+      const numDeductions = Number(deductions) || 0;
+      const numTax = Number(tax) || 0;
+      
+      // Get current payslip to recalculate net pay
+      const current = await pool.query(
+        "SELECT basic_salary, earned_basic, working_days FROM payslip_records WHERE id = $1",
+        [id]
+      );
+      
+      if (!current.rows.length) {
+        return res.status(404).json({ message: "Payslip not found" });
+      }
+      
+      const basicSalary = Number(current.rows[0].basic_salary);
+      const workingDays = Number(current.rows[0].working_days);
+      const dailyRate = basicSalary / (workingDays || 30);
+      const earnedBasic = dailyRate * workingDays;
+      const netPay = earnedBasic + numIncentives - numDeductions - numTax;
+      
+      // Update the payslip
+      await pool.query(
+        `UPDATE payslip_records 
+         SET incentives = $1, deductions = $2, tax = $3, earned_basic = $4, net_pay = $5, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $6`,
+        [numIncentives, numDeductions, numTax, earnedBasic, netPay, id]
+      );
+      
+      res.json({ 
+        success: true, 
+        incentives: numIncentives,
+        deductions: numDeductions,
+        tax: numTax,
+        net_pay: netPay
+      });
+    } catch (err) {
+      console.error("payslip adjustments error:", err);
+      res.status(500).json({ message: err.message });
+    }
+  }
+);
+
+// ============================================================
 // GET /api/payroll/payslip/:id/download   — PDF
 // ============================================================
 router.get(
   "/payroll/payslip/:id/download",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "EMPLOYEE", "HR"),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -483,7 +555,7 @@ router.get(
 
       const p = parseBreakdown(result.rows[0]);
       if (
-        ["EMPLOYEE", "MANAGER", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role) &&
+        ["EMPLOYEE", "MANAGER", "OPERATIONAL_MANAGER", "SUB_ADMIN", "HR"].includes(req.user.role) &&
         Number(p.user_id) !== Number(req.user.id)
       ) {
         return res.status(403).json({ message: "Access denied" });
@@ -589,8 +661,8 @@ doc.rect(0, 0, doc.page.width, 100).fill("#ff8c00");
         ["Total Days in Month",   bd.calendar?.totalDaysInMonth   ?? "—", "Working Days",     bd.calendar?.workingDaysCount  ?? "—"],
         ["Sundays (Paid)",        bd.sandwich?.paidSundays?.length ?? "—", "Company Holidays",  bd.calendar?.holidayCount     ?? "—"],
         ["Full Days Present",     bd.attendance?.fullDays           ?? "—", "Half Days",         bd.attendance?.halfDays         ?? "—"],
-        ["Absent Days",           bd.attendance?.absentDays         ?? "—", "Approved Leaves",   "0"],
-        ["Paid Leaves Used",      bd.leave?.paidLeaveUsed      ?? "—", "Unpaid Leaves",     bd.leave?.unpaidLeaveDays  ?? "—"],
+        ["Absent Days",           bd.attendance?.absentDays         ?? "—", "Approved Leaves",   bd.attendance?.formalLeaveCount ?? "0"],
+        ["Paid Leaves Used",      "0", "Unpaid Leaves",     bd.leave?.unpaidLeaveDays  ?? "—"],
         ["Late Logins",           bd.attendance?.lateLogins         ?? "—", "Late Half Days",    bd.attendance?.lateLoginHalfDays ?? "—"],
       ];
 
@@ -637,7 +709,7 @@ const salaryRows = [
   ["Unpaid / Absent Days", `${bd.leave?.unpaidLeaveDays || 0} days`, "deduction"],
   ["Leave Deduction", `- ₹ ${fmtINR(0)}`, "deduction"],
   ["─── EARNINGS ───", "", "section"],
-  ["Salary After Leave Deduction", `₹ ${fmtINR(bd.salary?.earnedBasic || 0)}`, "earning"],
+  ["Salary After Leave Deduction", `₹ ${fmtINR(bd.salary?.grossPay || 0)}`, "earning"],
   ["Incentives", `+ ₹ ${fmtINR(bd.salary?.incentives || 0)}`, "earning"],
   ["Gross Pay", `₹ ${fmtINR(bd.salary?.grossPay || 0)}`, "gross"],
   ["─── DEDUCTIONS ───", "", "section"],
@@ -708,6 +780,83 @@ const salaryRows = [
     }
   }
 );
+
+router.post('/migrate-payslip-columns', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Add unpaid leave days column
+    await client.query(`
+      ALTER TABLE payslip_records
+      ADD COLUMN IF NOT EXISTS unpaid_leave_days numeric(5,1) DEFAULT 0
+    `);
+
+    // Add leave deduction column
+    await client.query(`
+      ALTER TABLE payslip_records
+      ADD COLUMN IF NOT EXISTS leave_deduction numeric(10,2) DEFAULT 0
+    `);
+
+    // Add penalty days column
+    await client.query(`
+      ALTER TABLE payslip_records
+      ADD COLUMN IF NOT EXISTS penalty_days numeric(5,1) DEFAULT 0
+    `);
+
+    // Add penalty deduction column
+    await client.query(`
+      ALTER TABLE payslip_records
+      ADD COLUMN IF NOT EXISTS penalty_deduction numeric(10,2) DEFAULT 0
+    `);
+
+    // Add AWI deduction days column
+    await client.query(`
+      ALTER TABLE payslip_records
+      ADD COLUMN IF NOT EXISTS awi_deduction_days numeric(5,1) DEFAULT 0
+    `);
+
+    // Add AWI deduction amount column
+    await client.query(`
+      ALTER TABLE payslip_records
+      ADD COLUMN IF NOT EXISTS awi_deduction numeric(10,2) DEFAULT 0
+    `);
+
+    // Add late login count column
+    await client.query(`
+      ALTER TABLE payslip_records
+      ADD COLUMN IF NOT EXISTS late_login_count integer DEFAULT 0
+    `);
+
+    // Add late login penalty column
+    await client.query(`
+      ALTER TABLE payslip_records
+      ADD COLUMN IF NOT EXISTS late_login_penalty numeric(10,2) DEFAULT 0
+    `);
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: 'Migration executed successfully',
+      columns_added: [
+        'unpaid_leave_days',
+        'leave_deduction',
+        'penalty_days',
+        'penalty_deduction',
+        'awi_deduction_days',
+        'awi_deduction',
+        'late_login_count',
+        'late_login_penalty'
+      ]
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Migration failed:', error);
+    res.status(500).json({ error: 'Migration failed', details: error.message });
+  } finally {
+    client.release();
+  }
+});
 
 export default router;
 

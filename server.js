@@ -42,7 +42,19 @@ import activityRoutes from "./routes/activityRoutes.js";
 import profileRoutes from "./routes/profileRoutes.js";
 import offerLetterRoutes from "./routes/offerLetterRoutes.js";
 import letterRoutes from "./routes/letterRoutes.js";
+import birthdayRoutes from "./routes/birthdayRoutes.js";
+import taskRoutes from "./routes/taskRoutes.js";
+import awiRoutes from "./routes/awiRoutes.js";
+import leaveExtensionRoutes from "./routes/leaveExtensionRoutes.js";
+import regularizationRoutes from "./routes/regularizationRoutes.js";
+import exceptionRoutes from "./routes/exceptionRoutes.js";
+import lifecycleRoutes from "./routes/lifecycleRoutes.js";
+import awiDeductionRoutes from "./routes/awiDeductionRoutes.js";
+import awiDetectionRoutes from "./routes/awiDetectionRoutes.js";
+import checklistRoutes from "./routes/checklistRoutes.js";
 import { initSocket } from "./socketManager.js";
+import { startBirthdayScheduler } from "./services/birthdayService.js";
+import { startTaskReminderScheduler } from "./services/taskReminderService.js";
 
 
 const app = express();
@@ -145,12 +157,22 @@ app.use("/api", employeeLeaveRoutes);
 app.use("/api", holidayRoutes);
 app.use("/api", analysisRoutes);
 app.use("/api", notificationRoutes);
+app.use("/api", taskRoutes);
 app.use("/api", profileRoutes);
 app.use("/api/activity-logs", activityRoutes);
 app.use("/api/offer-letters", offerLetterRoutes);
 app.use("/api/letters", letterRoutes);
+app.use("/api", birthdayRoutes);
 app.use("/api", invoiceSsoRoutes);
 app.use("/api", opsSsoRoutes);
+app.use("/api/awi", awiRoutes);
+app.use("/api/leave-extensions", leaveExtensionRoutes);
+app.use("/api/regularization", regularizationRoutes);
+app.use("/api/exceptions", exceptionRoutes);
+app.use("/api/awi-deductions", awiDeductionRoutes);
+app.use("/api/awi-detection", awiDetectionRoutes);
+app.use("/api", checklistRoutes);
+app.use("/api", lifecycleRoutes);
 
 
 app.use((req, res) => {
@@ -181,6 +203,12 @@ httpServer.requestTimeout = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 95000)
 httpServer.headersTimeout = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 100000);
 httpServer.keepAliveTimeout = Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 65000);
 initSocket(httpServer);
+
+// Start birthday greeting scheduler
+startBirthdayScheduler();
+
+// Start task reminder scheduler (temporarily disabled due to pool error)
+// startTaskReminderScheduler();
 
 const forgottenCheckoutIntervalMs = Number(
   process.env.FORGOTTEN_CHECKOUT_INTERVAL_MS || 60 * 60 * 1000

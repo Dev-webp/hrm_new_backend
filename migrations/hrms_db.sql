@@ -972,7 +972,7 @@ CREATE TABLE public.users (
     aadhar_number character varying(12),
     created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT users_role_check CHECK (((role)::text = ANY ((ARRAY['SUPER_ADMIN'::character varying, 'MANAGER'::character varying, 'EMPLOYEE'::character varying])::text[]))),
+    CONSTRAINT users_role_check CHECK (((role)::text = ANY ((ARRAY['SUPER_ADMIN'::character varying, 'OPERATIONAL_MANAGER'::character varying, 'MANAGER'::character varying, 'SUB_ADMIN'::character varying, 'HR'::character varying, 'EMPLOYEE'::character varying])::text[]))),
     CONSTRAINT users_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'inactive'::character varying])::text[])))
 );
 
@@ -1006,6 +1006,7 @@ CREATE MATERIALIZED VIEW public.mv_monthly_attendance AS
    FROM (public.attendance_records a
      JOIN public.users u ON ((u.id = a.user_id)))
   WHERE ((u.role)::text <> 'SUPER_ADMIN'::text)
+    AND (u.employment_status = 'ACTIVE' OR u.employment_status IS NULL)
   GROUP BY u.id, u.full_name, u.department, u.branch, ((date_trunc('month'::text, (a.date)::timestamp without time zone))::date)
   WITH NO DATA;
 

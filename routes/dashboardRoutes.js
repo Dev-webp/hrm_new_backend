@@ -9,7 +9,7 @@ const router = express.Router();
 router.get(
   "/admin/dashboard/attendance",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "HR", "OPERATIONAL_MANAGER", "MANAGER"),
   async (req, res) => {
     try {
       const { start, end, today, branch = "all" } = req.query;
@@ -195,7 +195,7 @@ SUPER ADMIN DASHBOARD
 router.get(
   "/admin-dashboard",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR"),
   (req, res) => {
     res.json({
       message: "Welcome Super Admin",
@@ -227,7 +227,7 @@ router.get(
   "/dashboard/summary",
   verifyToken,
   authorizeRoles(
-    "SUPER_ADMIN",
+    "SUPER_ADMIN", "HR",
     "OPERATIONAL_MANAGER",
     "MANAGER"
   ),

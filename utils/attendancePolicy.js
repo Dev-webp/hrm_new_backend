@@ -5,9 +5,9 @@ import { calculateBreakMinutes } from "./breakMinutes.js";
 
 export const OFFICE_START = "10:00:00";
 export const OFFICE_END = "19:00:00";
-export const ON_TIME_GRACE_END = "10:14:59";
-export const LATE_LOGIN_START = "10:15:00";
-export const HALF_DAY_LOGIN_START = "10:30:00";
+export const ON_TIME_GRACE_END = "10:15:00"; // Changed from 10:14:59 to include 10:15 as per policy
+export const LATE_LOGIN_START = "10:16:00"; // Changed from 10:15:00 to 10:16:00 as per policy
+export const HALF_DAY_LOGIN_START = "10:31:00"; // Changed from 10:30:00 to 10:31:00 as per policy
 export const LATE_GRACE_LIMIT = ON_TIME_GRACE_END;
 
 export const HALF_SLOT_A_START = "10:00:00";
@@ -22,8 +22,56 @@ export function calculateLateMinutes(checkInTime) {
   if (!checkInTime) return 0;
   const [h, m] = String(checkInTime).split(":").map(Number);
   const minutes = h * 60 + m;
-  if (minutes < 10 * 60 + 15 || minutes >= 10 * 60 + 30) return 0;
-  return minutes - (10 * 60 + 15);
+  // Late minutes calculated from 10:16 (start of late window)
+  if (minutes < 10 * 60 + 16 || minutes >= 10 * 60 + 31) return 0;
+  return minutes - (10 * 60 + 16);
+}
+
+// Calculate expected logout time based on login time
+export function calculateExpectedLogout(checkInTime) {
+  if (!checkInTime) return null;
+  const [h, m] = String(checkInTime).split(":").map(Number);
+  const minutes = h * 60 + m;
+  if (minutes < 10 * 60) return null; // Before office start
+  
+  // Expected logout = 7:00 PM (19:00) + (minutes after 10:00 AM)
+  const minutesAfter10 = minutes - (10 * 60);
+  const officeEndMinutes = 19 * 60; // 7:00 PM
+  const expectedLogoutMinutes = officeEndMinutes + minutesAfter10;
+  
+  const expectedHours = Math.floor(expectedLogoutMinutes / 60);
+  const expectedMins = expectedLogoutMinutes % 60;
+  return `${String(expectedHours).padStart(2, "0")}:${String(expectedMins).padStart(2, "0")}`;
+}
+
+// Check for unauthorized early departure (after 10:30 + early exit without approval)
+export function checkUnauthorizedEarlyDeparture(log) {
+  const inSec = timeToSeconds(log?.office_in);
+  const outSec = timeToSeconds(log?.office_out);
+  
+  if (inSec === null || outSec === null) return null;
+  
+  // Only check if login was at or after 10:30 (half-day late)
+  if (inSec < T_HALF_DAY_LOGIN_START) return null;
+  
+  // Critical early departure times: 2:30 PM (14:30), 3:00 PM (15:00), 3:30 PM (15:30), 4:00 PM (16:00)
+  const earlyDepartureTimes = [
+    timeToSeconds("14:30:00"), // 2:30 PM
+    timeToSeconds("15:00:00"), // 3:00 PM
+    timeToSeconds("15:30:00"), // 3:30 PM
+    timeToSeconds("16:00:00"), // 4:00 PM
+  ];
+  
+  if (earlyDepartureTimes.includes(outSec)) {
+    return {
+      is_unauthorized_early_departure: true,
+      login_time: log.office_in,
+      logout_time: log.office_out,
+      requires_hr_review: true
+    };
+  }
+  
+  return null;
 }
 
 const MIN_HALF_DAY_HOURS = 4;
@@ -52,6 +100,7 @@ const T_HALF_A_END = timeToSeconds(HALF_SLOT_A_END);
 const T_HALF_B_START = timeToSeconds(HALF_SLOT_B_START);
 const T_HALF_B_END = timeToSeconds(HALF_SLOT_B_END);
 const T_AFTERNOON_HALF_DAY_START = timeToSeconds(AFTERNOON_HALF_DAY_START);
+const T_LATE_WINDOW_END = timeToSeconds("10:30:00"); // End of late window
 
 export function parseDateStr(str) {
   const [y, m, d] = str.slice(0, 10).split("-").map(Number);
@@ -104,6 +153,7 @@ export function evaluateLateLogin(log) {
     is_beyond_grace: false,
     is_on_time_grace: false,
     is_late_window: false,
+    is_half_day_late: false,
   };
 
   const inSec = timeToSeconds(log?.office_in);
@@ -112,22 +162,24 @@ export function evaluateLateLogin(log) {
     return result;
   }
 
+  // 10:00 through 10:15 inclusive: flexible arrival (on-time grace)
   if (inSec <= T_ON_TIME_GRACE_END) {
     result.is_on_time_grace = true;
     return result;
   }
 
-  if (inSec < T_LATE_LOGIN_START || inSec >= T_AFTERNOON_HALF_DAY_START) {
+  // 10:16 through 10:30 inclusive: late window (16-30 minute band)
+  if (inSec >= T_LATE_LOGIN_START && inSec <= T_LATE_WINDOW_END) {
+    result.is_late = true;
+    result.is_late_window = true;
+    result.is_within_grace = true;
     return result;
   }
 
-  result.is_late = true;
-
-  if (inSec < T_HALF_DAY_LOGIN_START) {
-    result.is_late_window = true;
-    result.is_within_grace = true;
-  } else {
-    result.is_beyond_grace = true;
+  // 10:31 AM or later: half-day late
+  if (inSec >= T_HALF_DAY_LOGIN_START) {
+    result.is_half_day_late = true;
+    return result;
   }
 
   return result;

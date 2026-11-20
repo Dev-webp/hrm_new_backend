@@ -5,10 +5,11 @@ export const ROLES = Object.freeze({
   OPERATIONAL_MANAGER: "OPERATIONAL_MANAGER",
   MANAGER: "MANAGER",
   SUB_ADMIN: "SUB_ADMIN",
+  HR: "HR",
   EMPLOYEE: "EMPLOYEE",
 });
 
-export const OPERATIONAL_ROLES = [ROLES.SUPER_ADMIN, ROLES.OPERATIONAL_MANAGER];
+export const OPERATIONAL_ROLES = [ROLES.SUPER_ADMIN, ROLES.OPERATIONAL_MANAGER, ROLES.HR];
 
 export function isOperationalManager(user = {}) {
   return user.role === ROLES.OPERATIONAL_MANAGER;
@@ -32,6 +33,7 @@ export function isBranchRestrictedOperationalRole(user = {}) {
 export function canEditAttendance(user = {}, targetEmployee = {}) {
   if (user.role === ROLES.SUPER_ADMIN) return true;
   if (user.role === ROLES.OPERATIONAL_MANAGER) return true;
+  if (user.role === ROLES.HR) return true;
   if (isBranchRestrictedOperationalRole(user) && user.branch === targetEmployee.branch) return true;
   return false;
 }
@@ -39,6 +41,7 @@ export function canEditAttendance(user = {}, targetEmployee = {}) {
 export function canAccessUserAttendance(user = {}, targetEmployee = {}) {
   if (user.role === ROLES.SUPER_ADMIN) return true;
   if (user.role === ROLES.OPERATIONAL_MANAGER) return true;
+  if (user.role === ROLES.HR) return true;
   if (Number(user.id) === Number(targetEmployee.id)) return true;
   if (isBranchRestrictedOperationalRole(user) && user.branch === targetEmployee.branch) return true;
   return false;
@@ -47,13 +50,14 @@ export function canAccessUserAttendance(user = {}, targetEmployee = {}) {
 export function canAccessAuditLog(user = {}, auditLog = {}) {
   if (user.role === ROLES.SUPER_ADMIN) return true;
   if (user.role === ROLES.OPERATIONAL_MANAGER) return true;
+  if (user.role === ROLES.HR) return true;
   if (user.role === ROLES.EMPLOYEE) return Number(auditLog.user_id) === Number(user.id);
   if (isBranchRestrictedOperationalRole(user)) return auditLog.branch === user.branch;
   return false;
 }
 
 export function canCreateClientAuditLog(user = {}) {
-  return [ROLES.SUPER_ADMIN, ROLES.OPERATIONAL_MANAGER, ROLES.MANAGER].includes(user.role);
+  return [ROLES.SUPER_ADMIN, ROLES.OPERATIONAL_MANAGER, ROLES.MANAGER, ROLES.HR].includes(user.role);
 }
 
 export function canEditBreaks(user = {}, targetEmployee = {}) {

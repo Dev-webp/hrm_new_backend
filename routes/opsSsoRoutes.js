@@ -13,7 +13,7 @@ const router = express.Router();
 router.patch(
   "/admin/employees/:id/ops-access",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "MANAGER", "HR"),
   async (req, res) => {
     try {
       const id = Number(req.params.id);

@@ -306,15 +306,23 @@ summary.absent +
 summary.paidLeave +
 summary.unpaidLeave;
 
-return {
-workingDays: records.filter(
+// Calculate working days as days that could have attendance (excluding Sundays and holidays)
+const workingDays = records.filter(
 (record) =>
 ![
 "holiday",
 "sunday",
 ].includes(record.attendance_status)
-).length,
+).length;
 
+// Calculate percentage based on working days (not just present + absent)
+// This ensures 13.5 present out of 13.5 working days = 100%
+const attendancePercentage = workingDays > 0
+  ? Math.round((effectivePresent / workingDays) * 100)
+  : 0;
+
+return {
+workingDays,
 
 fullDays: summary.present,
 
@@ -332,12 +340,7 @@ unpaidLeave: summary.unpaidLeave,
 
 late: summary.late,
 
-attendancePercentage: denominator
-  ? Math.round(
-      (effectivePresent / denominator) * 100
-    )
-  : 0,
-
+attendancePercentage,
 
 };
 }
@@ -390,7 +393,7 @@ const branchClause = branch
 ? "AND u.branch = $3"
 : "";
 
-const statusClause = "AND COALESCE(u.status, 'active') = 'active'";
+const statusClause = "AND (COALESCE(u.status, 'active') = 'active' AND (u.employment_status = 'ACTIVE' OR u.employment_status IS NULL))";
 
 const singleBranchClause = branch
 ? "AND u.branch = $1"
@@ -421,6 +424,7 @@ pool.query(
       WHERE
         u.role <> 'SUPER_ADMIN'
         AND COALESCE(u.status, 'active') = 'active'
+        AND (u.employment_status = 'ACTIVE' OR u.employment_status IS NULL)
         ${singleBranchClause}
       ORDER BY u.full_name
       `,

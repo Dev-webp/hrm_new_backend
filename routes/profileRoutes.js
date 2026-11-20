@@ -47,7 +47,7 @@ function signToken(user) {
 router.get(
   "/profile",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR"),
   async (req, res) => {
     try {
       const result = await pool.query(
@@ -72,7 +72,7 @@ router.get(
 router.put(
   "/profile",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "HR"),
   async (req, res) => {
     try {
       const email = cleanEmail(req.body.email);

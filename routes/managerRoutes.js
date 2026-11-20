@@ -54,7 +54,7 @@ router.get("/manager/employees", verifyToken, authorizeRoles("OPERATIONAL_MANAGE
       idx++;
     }
     if (status && status !== "all") {
-      query += ` AND COALESCE(u.status, 'active') = $${idx}`;
+      query += ` AND COALESCE(u.status, 'active') = $${idx} AND (u.employment_status = 'ACTIVE' OR u.employment_status IS NULL)`;
       params.push(status);
       idx++;
     }

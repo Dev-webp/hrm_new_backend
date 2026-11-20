@@ -26,6 +26,7 @@
 import { getComputedAttendanceStatus } from "../utils/computedAttendanceStatus.js";
 import { calculateBreakMinutesFromRows } from "../utils/breakMinutes.js";
 import { computeMonthSandwich } from "../utils/sandwichEngine.js";
+import * as awiDeductionService from "../services/awiDeductionService.js";
 
 // ─── Constants ────────────────────────────────────────────────
 const PAID_LEAVE_ELIGIBILITY_DAYS = 90;
@@ -35,6 +36,7 @@ const LATE_LOGIN_START_MINUTES      = 10 * 60 + 15;
 const HALF_DAY_LOGIN_START_MINUTES  = 10 * 60 + 30;
 const AFTERNOON_HALF_DAY_START_MINUTES = 14 * 60 + 30;
 const REQUIRED_FULL_DAY_MINUTES     = 9 * 60;
+const LATE_LOGIN_PENALTY_AMOUNT    = 100; // ₹100 per late login
 
 // ─── Utilities ────────────────────────────────────────────────
 function daysInMonth(year, month) {
@@ -188,7 +190,7 @@ async function fetchPayrollData(pool, userId, year, month) {
   const joiningDate = safeDateString(userRes.rows[0].joining_date, monthStart);
   const effectiveStartDate = joiningDate > monthStart ? joiningDate : monthStart;
 
-  const [holidayRes, attRes, breakRes, leaveRes] = await Promise.all([
+  const [holidayRes, attRes, breakRes, leaveRes, awiRes] = await Promise.all([
     pool.query(
       `SELECT TO_CHAR(date,'YYYY-MM-DD') AS date, name, type
        FROM company_holidays
@@ -237,6 +239,13 @@ WHERE user_id = $1
   AND to_date >= $2`,
       [userId, effectiveStartDate, monthEnd]
     ),
+    pool.query(
+      `SELECT user_id, TO_CHAR(date,'YYYY-MM-DD') AS date, final_status
+       FROM awi_cases
+       WHERE user_id = $1 AND date BETWEEN $2 AND $3
+       AND final_status IN ('authorized_absence', 'unauthorized_absence')`,
+      [userId, contextStartStr, contextEndStr]
+    ),
   ]);
 
   const breakRowsByDate = new Map();
@@ -276,6 +285,7 @@ WHERE user_id = $1
     attendance,
     attendanceWithContext, // All attendance including context for sandwich
     leaves          : leaveRes.rows,
+    awiCases        : awiRes.rows,
     year, month,
     monthStart, monthEnd,
     effectiveStartDate,
@@ -289,11 +299,13 @@ WHERE user_id = $1
 // STEP 2: Build calendar maps
 // ============================================================
 function buildCalendarMaps(data) {
-  const { holidays, holidaysWithContext, attendance, attendanceWithContext, leaves, year, month, effectiveStartDate } = data;
+  const { holidays, holidaysWithContext, attendance, attendanceWithContext, leaves, awiCases, year, month, effectiveStartDate } = data;
 
   const holidayMap = new Map(holidaysWithContext.map(h => [h.date, h]));
   const attMap     = new Map(attendance.map(a => [a.date, a]));
   const attMapWithContext = new Map(attendanceWithContext.map(a => [a.date, a]));
+  const awiMap = new Map(awiCases.map(a => [a.date, a.final_status]));
+  const leaveMap = new Map();
 
   const approvedLeaveSet = new Set();
   for (const leave of leaves) {
@@ -303,7 +315,9 @@ function buildCalendarMaps(data) {
       const year = d.getFullYear();
       const month = String(d.getMonth() + 1).padStart(2, "0");
       const day = String(d.getDate()).padStart(2, "0");
-      approvedLeaveSet.add(`${year}-${month}-${day}`);
+      const dateStr = `${year}-${month}-${day}`;
+      approvedLeaveSet.add(dateStr);
+      leaveMap.set(dateStr, { status: leave.status, leave_type: leave.leave_type });
     }
   }
 
@@ -320,83 +334,188 @@ function buildCalendarMaps(data) {
     else                         workingDays.push(ds);
   }
 
-  return { holidayMap, attMap, attMapWithContext, approvedLeaveSet, allDates, activeDates, sundayDates, holidayDates, workingDays };
+  return { holidayMap, attMap, attMapWithContext, approvedLeaveSet, awiMap, leaveMap, allDates, activeDates, sundayDates, holidayDates, workingDays };
 }
 
 // ============================================================
 // STEP 2.5: Sandwich rule analysis
 // ============================================================
-function analyzeSandwich(sundayDates, holidayDates, attMap, holidayMap, joiningDate, year, month) {
+function analyzeSandwich(sundayDates, holidayDates, attMap, holidayMap, joiningDate, year, month, awiMap, leaveMap) {
+  console.log(`[SANDWICH DEBUG] Function called with parameters:`, {
+    sundayDatesCount: sundayDates?.length,
+    awiMapSize: awiMap?.size,
+    leaveMapSize: leaveMap?.size,
+  });
+
   const monthStr = `${year}-${String(month).padStart(2, "0")}`;
   const todayStr = new Date().toISOString().slice(0, 10);
 
-  // Convert joiningDate to proper date string format if it exists
-  const joiningDateStr = joiningDate ? safeDateString(joiningDate, monthStr) : null;
-
-  console.log(`[Sandwich] Month: ${monthStr}, Joining date: ${joiningDateStr}, Today: ${todayStr}`);
+  console.log(`[Sandwich] Month: ${monthStr}, Joining date: ${joiningDate}, Today: ${todayStr}`);
   console.log(`[Sandwich] Sunday dates: ${sundayDates.join(', ')}`);
   console.log(`[Sandwich] Holiday dates: ${holidayDates.join(', ')}`);
 
-  const sandwichResults = computeMonthSandwich({
-    month: monthStr,
-    attMap,
-    holidayMap,
-    joiningDate: joiningDateStr,
-    todayStr,
-    freePerMonth: 1,
-  });
+  // NEW SANDWICH POLICY IMPLEMENTATION (same as analysisRoutes.js)
+  const unpaidSundays = new Set();
+  const qualifyingLeaves = [];
 
-  console.log(`[Sandwich] Sandwich results:`, sandwichResults.map(r => ({ date: r.date, payable: r.payable, reason: r.reason })));
+  // Helper function to format date string
+  function formatDateStr(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
 
-  // Separate Sundays/holidays into paid vs unpaid (sandwiched)
-  const paidSundays = [];
-  const unpaidSundays = [];
-  const paidHolidays = [];
-  const unpaidHolidays = [];
+  // Build complete attendance map with AWI days included (like analysisRoutes.js)
+  const completeAttMap = new Map(attMap);
+  for (const [date, awiStatus] of awiMap.entries()) {
+    if (!completeAttMap.has(date)) {
+      completeAttMap.set(date, {
+        date,
+        status: awiStatus,
+        check_in_time: null,
+        check_out_time: null,
+      });
+    }
+  }
 
-  for (const result of sandwichResults) {
-    if (result.payable === 0) {
-      // Sandwiched - unpaid
-      if (result.anchorType === "SUNDAY") {
-        unpaidSundays.push(result.date);
-      } else {
-        unpaidHolidays.push(result.date);
+  // Collect all qualifying leaves (Saturday/Monday leaves + AWI + Absent + No Record)
+  for (const dateStr of sundayDates) {
+    const date = new Date(dateStr + "T00:00:00");
+    const saturdayDate = new Date(date);
+    saturdayDate.setDate(date.getDate() - 1);
+    const saturdayStr = formatDateStr(saturdayDate);
+
+    const mondayDate = new Date(date);
+    mondayDate.setDate(date.getDate() + 1);
+    const mondayStr = formatDateStr(mondayDate);
+
+    const satDow = 6;
+    const monDow = 1;
+
+    // Check Saturday (day before Sunday) - only if within current month
+    if (saturdayStr.startsWith(monthStr)) {
+      if (awiMap.has(saturdayStr)) {
+        qualifyingLeaves.push({ date: saturdayStr, dow: satDow, type: 'AWI' });
+      } else if (leaveMap.has(saturdayStr)) {
+        qualifyingLeaves.push({ date: saturdayStr, dow: satDow, type: 'LEAVE' });
+      } else if (completeAttMap.has(saturdayStr)) {
+        const attRec = completeAttMap.get(saturdayStr);
+        if (attRec.status === 'absent') {
+          qualifyingLeaves.push({ date: saturdayStr, dow: satDow, type: 'ABSENCE' });
+        }
+      } else if (!completeAttMap.has(saturdayStr) && !holidayMap.has(saturdayStr)) {
+        qualifyingLeaves.push({ date: saturdayStr, dow: satDow, type: 'NO_RECORD' });
       }
-    } else {
-      // Non-sandwiched - paid
-      if (result.anchorType === "SUNDAY") {
-        paidSundays.push(result.date);
-      } else {
-        paidHolidays.push(result.date);
+    }
+
+    // Check Monday (day after Sunday) - only if within current month
+    if (mondayStr.startsWith(monthStr)) {
+      // Don't count holidays as qualifying events
+      if (holidayMap.has(mondayStr)) {
+        // Skip - holidays don't affect sandwich policy
+      } else if (awiMap.has(mondayStr)) {
+        qualifyingLeaves.push({ date: mondayStr, dow: monDow, type: 'AWI' });
+      } else if (leaveMap.has(mondayStr)) {
+        qualifyingLeaves.push({ date: mondayStr, dow: monDow, type: 'LEAVE' });
+      } else if (completeAttMap.has(mondayStr)) {
+        const attRec = completeAttMap.get(mondayStr);
+        if (attRec.status === 'absent') {
+          qualifyingLeaves.push({ date: mondayStr, dow: monDow, type: 'ABSENCE' });
+        }
+      } else if (!completeAttMap.has(mondayStr)) {
+        qualifyingLeaves.push({ date: mondayStr, dow: monDow, type: 'NO_RECORD' });
       }
     }
   }
 
-  console.log(`[Sandwich] Paid Sundays: ${paidSundays.length}, Unpaid Sundays: ${unpaidSundays.length}`);
+  // Sort qualifying leaves by date
+  qualifyingLeaves.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  // Also include Sundays/holidays that weren't analyzed (e.g., outside sandwich scope)
-  // These are treated as paid by default
-  const allSundaysSet = new Set(sundayDates);
-  const allHolidaysSet = new Set(holidayDates);
+  // Track Sundays affected by each qualifying leave
+  const affectedSundays = new Map(); // Sunday date -> count of qualifying occurrences
+
+  for (const leave of qualifyingLeaves) {
+    const leaveDate = new Date(leave.date + "T00:00:00");
+    const leaveDow = leaveDate.getDay();
+
+    // If leave is on Saturday (day 6), check Sunday (day 0, which is leaveDate + 1)
+    if (leaveDow === 6) {
+      const sundayDate = new Date(leaveDate);
+      sundayDate.setDate(sundayDate.getDate() + 1);
+      const sundayStr = formatDateStr(sundayDate);
+      if (sundayStr.startsWith(monthStr)) {
+        affectedSundays.set(sundayStr, (affectedSundays.get(sundayStr) || 0) + 1);
+      }
+    }
+    // If leave is on Monday (day 1), check Sunday (day 0, which is leaveDate - 1)
+    else if (leaveDow === 1) {
+      const sundayDate = new Date(leaveDate);
+      sundayDate.setDate(sundayDate.getDate() - 1);
+      const sundayStr = formatDateStr(sundayDate);
+      if (sundayStr.startsWith(monthStr)) {
+        affectedSundays.set(sundayStr, (affectedSundays.get(sundayStr) || 0) + 1);
+      }
+    }
+  }
+
+  // Mark Sundays as unpaid using allowance pool system (same as frontend)
+  // - First Sunday with 1 qualifying event = Paid (allowance)
+  // - Subsequent Sundays with 1 qualifying event = Unpaid (no allowance)
+  // - Sundays with 2+ qualifying events = Unpaid
+  let firstOneEventSundayPaid = false;
+  
+  // Sort Sundays by date to identify the first one
+  const sortedSundays = Array.from(affectedSundays.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  
+  for (const [sundayStr, count] of sortedSundays) {
+    if (count >= 2) {
+      // 2+ qualifying events = unpaid
+      unpaidSundays.add(sundayStr);
+    } else if (count === 1) {
+      // 1 qualifying event
+      if (!firstOneEventSundayPaid) {
+        // First Sunday with 1 event = paid (allowance)
+        firstOneEventSundayPaid = true;
+      } else {
+        // Subsequent Sundays with 1 event = unpaid (no allowance)
+        unpaidSundays.add(sundayStr);
+      }
+    }
+    // count === 0 = paid (no action needed)
+  }
+
+  console.log(`[Sandwich] Qualifying Leaves:`, qualifyingLeaves);
+  console.log(`[Sandwich] Affected Sundays:`, Array.from(affectedSundays.entries()));
+  console.log(`[Sandwich] Unpaid Sundays:`, Array.from(unpaidSundays));
+  console.log(`[Sandwich] Total Sundays: ${sundayDates.length}`);
+  console.log(`[Sandwich] AWI Map:`, Array.from(awiMap.entries()));
+  console.log(`[Sandwich] Leave Map:`, Array.from(leaveMap.entries()));
+
+  // Separate Sundays into paid vs unpaid
+  const paidSundays = [];
+  const unpaidSundaysArr = [];
 
   for (const ds of sundayDates) {
-    if (!unpaidSundays.includes(ds) && !paidSundays.includes(ds)) {
+    if (unpaidSundays.has(ds)) {
+      unpaidSundaysArr.push(ds);
+    } else {
       paidSundays.push(ds);
     }
   }
 
-  for (const ds of holidayDates) {
-    if (!unpaidHolidays.includes(ds) && !paidHolidays.includes(ds)) {
-      paidHolidays.push(ds);
-    }
-  }
+  // Holidays are always paid
+  const paidHolidays = [...holidayDates];
+  const unpaidHolidays = [];
+
+  console.log(`[Sandwich] Paid Sundays: ${paidSundays.length}, Unpaid Sundays: ${unpaidSundaysArr.length}`);
 
   return {
     paidSundays,
-    unpaidSundays,
+    unpaidSundays: unpaidSundaysArr,
     paidHolidays,
     unpaidHolidays,
-    sandwichResults,
+    sandwichResults: [],
   };
 }
 
@@ -441,7 +560,8 @@ function tallyAttendance(workingDays, attMap, approvedLeaveSet, holidayMap = new
       continue;
     }
 
-    if (isGraceLateLogin(rec)) {
+    // Use late_minutes from database (same as attendance analysis API)
+    if (rec.late_minutes && rec.late_minutes > 0) {
       lateLogins++;
       lateDates.push({ date: ds, minutes: rec.late_minutes });
     }
@@ -545,40 +665,99 @@ function computeSalary(params) {
     totalDaysInMonth,
     payableDays,
     penaltyDays = 0,
+    awiDeductionDays = 0,
+    lateLoginCount = 0,
     incentives,
     manualDeductions,
     tax,
+    unauthorizedDays = 0, // Total unauthorized days to subtract
+    lateLoginDays = 0, // Total late login days to subtract
   } = params;
 
   const dailyRate = round2(monthlySalary / totalDaysInMonth);
 
   const earnedBasic = round2(dailyRate * Number(payableDays || 0));
 
+  // NEW FORMULA: Final Payable Days = Total Payable Days - Total Unauthorized Days - Total Late Login Days
+  const finalPayableDays = Math.max(0, 
+    Number(payableDays || 0) - 
+    Number(unauthorizedDays || 0) - 
+    Number(lateLoginDays || 0)
+  );
+  
+  // Net Pay = Final Payable Days × Daily Rate
+  const netPay = round2(dailyRate * finalPayableDays);
+
+  // AWI deduction calculation (for reference, but not subtracted from net pay)
+  const awiDeduction = round2(dailyRate * Number(awiDeductionDays || 0));
+  
+  // Penalty deduction (from leave violations) (for reference)
+  const penaltyDeduction = round2(dailyRate * Number(penaltyDays || 0));
+
+  // Late login penalty calculation (₹100 per late login) (for reference)
+  const lateLoginPenalty = round2(LATE_LOGIN_PENALTY_AMOUNT * Number(lateLoginCount || 0));
+
   const grossPay = round2(
     earnedBasic + Number(incentives || 0)
   );
 
+  // Total deductions only include manual deductions and tax
+  // AWI deductions and late login penalties are handled by reducing payable days, not by deducting from net pay
   const totalDeductions = round2(
     Number(manualDeductions || 0) +
     Number(tax || 0)
   );
 
-  const netPay = round2(
-    grossPay -
-    Number(manualDeductions || 0) -
-    Number(tax || 0)
-  );
+  console.log(`[SALARY] Calculation:`, {
+    dailyRate,
+    payableDays,
+    unauthorizedDays,
+    lateLoginDays,
+    finalPayableDays,
+    netPay,
+    incentives,
+    manualDeductions,
+    tax
+  });
 
   return {
     dailyRate,
     payableDays,
     earnedBasic,
     absentDeduction: 0,
-    penaltyDeduction: 0,
+    penaltyDeduction,
+    awiDeductionDays,
+    awiDeduction,
+    lateLoginCount,
+    lateLoginPenalty,
     totalDeductions,
     grossPay,
     netPay,
   };
+}
+
+// ============================================================
+// Fetch AWI Deductions for Payroll
+// ============================================================
+async function fetchAWIDeductions(pool, userId, year, month) {
+  try {
+    const monthStr = `${year}-${String(month).padStart(2, "0")}`;
+    
+    // Count only unauthorized AWI cases (not authorized AWI)
+    const result = await pool.query(
+      `SELECT COUNT(*) as unauthorized_count
+       FROM awi_cases
+       WHERE user_id = $1
+         AND TO_CHAR(date, 'YYYY-MM') = $2
+         AND final_status = 'unauthorized_absence'`,
+      [userId, monthStr]
+    );
+    
+    return Number(result.rows[0].unauthorized_count || 0);
+  } catch (error) {
+    console.error('Error fetching AWI deductions:', error);
+    return 0;
+  }
 }
 
 
@@ -595,10 +774,11 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
   const monthlySalary = finiteNumber(employee.monthly_salary, 0);
   if (monthlySalary <= 0) throw new Error("Employee has no salary configured");
 
+  // Get Sunday dates from analysis
   const maps = buildCalendarMaps(data);
-  const { sundayDates, holidayDates, workingDays, attMap, attMapWithContext, approvedLeaveSet, holidayMap, activeDates } = maps;
+  const { sundayDates, holidayDates, workingDays, attMap, attMapWithContext, approvedLeaveSet, holidayMap, activeDates, awiMap, leaveMap } = maps;
 
-  // Sandwich rule analysis - use attMapWithContext to check neighbors (day before/after)
+  // Use sandwich calculation to classify Sundays (backend calculation)
   const sandwich = analyzeSandwich(
     sundayDates,
     holidayDates,
@@ -606,8 +786,23 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
     holidayMap,
     employee.joining_date,
     year,
-    month
+    month,
+    awiMap,
+    leaveMap
   );
+
+  // Use the dynamic sandwich calculation from analyzeSandwich
+  const finalSandwich = {
+    paidSundays: sandwich.paidSundays,
+    unpaidSundays: sandwich.unpaidSundays,
+    paidHolidays: holidayDates,
+    unpaidHolidays: [],
+    sandwichResults: sandwich.sandwichResults || [],
+  };
+
+  console.log(`[PAYROLL] Using dynamic Sunday classification from analyzeSandwich`);
+  console.log(`[PAYROLL] Paid Sundays:`, finalSandwich.paidSundays);
+  console.log(`[PAYROLL] Unpaid Sundays:`, finalSandwich.unpaidSundays);
 
   const tally = tallyAttendance(workingDays, attMap, approvedLeaveSet, holidayMap);
 
@@ -627,20 +822,24 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
 
   console.log(`[Payroll] User: ${employee.full_name}, Month: ${year}-${month}`);
   console.log(`[Payroll] Tally - Full: ${tally.fullDays}, Half: ${tally.halfDays}, Absent: ${tally.absentDays}`);
-  console.log(`[Payroll] Sandwich - Paid Sundays: ${sandwich.paidSundays.length}, Paid Holidays: ${sandwich.paidHolidays.length}`);
+  console.log(`[Payroll] Sandwich - Paid Sundays: ${finalSandwich.paidSundays.length}, Paid Holidays: ${finalSandwich.paidHolidays.length}`);
   console.log(`[Payroll] Leave - Paid Used: ${leaveCalc.paidLeaveUsed}, Unpaid: ${leaveCalc.unpaidLeaveDays}`);
-  console.log(`[Payroll] Paid Sundays dates:`, sandwich.paidSundays);
-  console.log(`[Payroll] Paid Holidays dates:`, sandwich.paidHolidays);
+  console.log(`[Payroll] Paid Sundays dates:`, finalSandwich.paidSundays);
+  console.log(`[Payroll] Paid Holidays dates:`, finalSandwich.paidHolidays);
+
+  // Fetch AWI deductions
+  const awiDeductionDays = await fetchAWIDeductions(pool, userId, year, month);
+  console.log(`[Payroll] AWI Deduction Days: ${awiDeductionDays}`);
 
   const payableDays = round2(
     // Present days
     Number(tally.fullDays || 0) +
+    // Eligible absences covered by the monthly paid-leave quota
+    Number(leaveCalc.paidLeaveUsed || 0) +
     // Paid Sundays (not affected by sandwich policy)
-    Number(sandwich.paidSundays.length || 0) +
+    Number(finalSandwich.paidSundays.length || 0) +
     // All holidays (holidays are no longer subject to sandwich policy)
     Number(holidayDates.length || 0) +
-    // Paid leaves (from quota)
-    Number(leaveCalc.paidLeaveUsed || 0) +
     // Half days count as 0.5 each
     Number(tally.halfDays || 0) * 0.5
   );
@@ -652,12 +851,16 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
     totalDaysInMonth,
     payableDays,
     penaltyDays: leaveCalc.penaltyDays || 0,
+    awiDeductionDays,
+    lateLoginCount: tally.lateLogins || 0,
     incentives,
     manualDeductions,
     tax,
+    unauthorizedDays: awiDeductionDays, // Unauthorized AWI days reduce payable days
+    lateLoginDays: tally.lateLogins || 0, // Late login days reduce payable days
   });
 
-  console.log(`[Payroll] Salary Calculation - Monthly: ${monthlySalary}, Daily: ${salary.dailyRate}, Payable: ${payableDays}, Net Pay: ${salary.netPay}`);
+  console.log(`[Payroll] Salary Calculation - Monthly: ${monthlySalary}, Daily: ${salary.dailyRate}, Payable: ${payableDays}, Late Logins: ${tally.lateLogins}, Late Penalty: ${salary.lateLoginPenalty}, Net Pay: ${salary.netPay}`);
 
 
   return {
@@ -683,11 +886,11 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
       workingDaysCount : workingDays.length,
     },
     sandwich: {
-      paidSundays: sandwich.paidSundays,
-      unpaidSundays: sandwich.unpaidSundays,
-      paidHolidays: sandwich.paidHolidays,
-      unpaidHolidays: sandwich.unpaidHolidays,
-      sandwichResults: sandwich.sandwichResults,
+      paidSundays: finalSandwich.paidSundays,
+      unpaidSundays: finalSandwich.unpaidSundays,
+      paidHolidays: finalSandwich.paidHolidays,
+      unpaidHolidays: finalSandwich.unpaidHolidays,
+      sandwichResults: finalSandwich.sandwichResults,
     },
     attendance: {
       fullDays           : tally.fullDays,
@@ -724,6 +927,8 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
   grossPay: salary.grossPay,
   absenceDeduction: salary.absentDeduction,
   penaltyDeduction: salary.penaltyDeduction,
+  lateLoginCount: salary.lateLoginCount,
+  lateLoginPenalty: salary.lateLoginPenalty,
   manualDeductions: Number(manualDeductions),
   totalDeductions: salary.totalDeductions,
   tax: Number(tax),
@@ -738,7 +943,7 @@ async function calculatePayroll(pool, userId, year, month, overrides = {}) {
 async function batchCalculatePayroll(pool, year, month, filters = {}) {
   const { branch, department } = filters;
   const maxBatchEmployees = Number(process.env.MAX_PAYROLL_BATCH_EMPLOYEES || 100);
-  let query = `SELECT id FROM users WHERE role IN ('EMPLOYEE','MANAGER','OPERATIONAL_MANAGER','SUB_ADMIN') AND salary > 0`;
+  let query = `SELECT id FROM users WHERE role IN ('EMPLOYEE','MANAGER','OPERATIONAL_MANAGER','SUB_ADMIN','HR') AND salary > 0 AND (employment_status = 'ACTIVE' OR employment_status IS NULL)`;
   const params = [];
   let idx = 1;
   if (branch && branch !== "all")         { query += ` AND branch     = $${idx}`; params.push(branch);     idx++; }
@@ -775,6 +980,22 @@ async function persistPayslip(pool, calc, overrides = {}) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    
+    // Add late login penalty columns if they don't exist
+    try {
+      await client.query(`
+        ALTER TABLE payslip_records 
+        ADD COLUMN IF NOT EXISTS late_login_count INTEGER DEFAULT 0
+      `);
+      await client.query(`
+        ALTER TABLE payslip_records 
+        ADD COLUMN IF NOT EXISTS late_login_penalty DECIMAL(10,2) DEFAULT 0.00
+      `);
+    } catch (alterError) {
+      // Ignore if columns already exist or other alter errors
+      console.log('Late login penalty columns may already exist:', alterError.message);
+    }
+    
   const { employee, period, attendance, leave, salary, calendar } = calc;
 
   const existingRes = await client.query(
@@ -820,8 +1041,17 @@ async function persistPayslip(pool, calc, overrides = {}) {
     hasNonZeroOverride("deductions") ||
     hasNonZeroOverride("tax");
   const effectiveNetPay = round2(
-    Number(salary.earnedSalary || 0) + effectiveIncentives - effectiveDeductions
+    Number(salary.netPay || 0) + effectiveIncentives - effectiveDeductions
   );
+
+  console.log(`[PERSIST PAYSLIP] Effective values:`, {
+    effectiveIncentives,
+    effectiveDeductions,
+    effectiveTax,
+    effectiveNetPay,
+    forceManualUpdate,
+    manualOverrideApplied
+  });
 
   const breakdown = JSON.stringify({
     autoCalculated: {
@@ -836,6 +1066,7 @@ async function persistPayslip(pool, calc, overrides = {}) {
   approvedLeaveCount: attendance.formalLeaveCount,   // UI alias
   lateLogins        : attendance.lateLogins,
   lateLoginHalfDays : attendance.lateLoginHalfDays,
+  lateLoginPenalty  : salary.lateLoginPenalty,
   monthsCompleted   : leave.monthsCompleted,
   eligible          : leave.eligible,
   allowedPaidLeave  : leave.allowedPaidLeave,
@@ -844,6 +1075,8 @@ async function persistPayslip(pool, calc, overrides = {}) {
       totalAbsences     : leave.totalAbsences,
       totalAbsenceDays  : leave.totalAbsenceDays || leave.totalAbsences,
       dailyRate         : salary.dailyRate,
+      awiDeductionDays  : salary.awiDeductionDays,
+      awiDeduction     : salary.awiDeduction,
 
       earnedSalary      : salary.earnedSalary,
       grossPay          : salary.grossPay,
@@ -879,13 +1112,24 @@ async function persistPayslip(pool, calc, overrides = {}) {
 });
 
 
+  // Debug: check actual database schema
+  const schemaCheck = await client.query(
+    `SELECT column_name, data_type FROM information_schema.columns
+     WHERE table_name = 'payslip_records'
+     ORDER BY ordinal_position`
+  );
+  console.log(`[DEBUG] payslip_records schema:`, schemaCheck.rows.map(r => r.column_name));
+
 const result = await client.query(
   `INSERT INTO payslip_records
      (user_id, month, basic_salary, earned_basic,
       incentives, deductions, tax, net_pay,
       working_days, present_days, payment_status, breakdown,
-      unpaid_leave_days, leave_deduction, penalty_days, penalty_deduction)
-   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'unpaid',$11,$12,$13,$14,$15)
+      unpaid_leave_days, leave_deduction, penalty_days, penalty_deduction,
+      awi_deduction_days, awi_deduction, late_login_count, late_login_penalty,
+      half_days, paid_sundays, unpaid_sundays, holidays,
+      auth_awi, unauth_awi, full_days, absent_days, paid_leave, total_paid_days)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'unpaid',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
    ON CONFLICT (user_id, month) DO UPDATE SET
      basic_salary = EXCLUDED.basic_salary,
      earned_basic = EXCLUDED.earned_basic,
@@ -900,13 +1144,27 @@ const result = await client.query(
      leave_deduction = EXCLUDED.leave_deduction,
      penalty_days = EXCLUDED.penalty_days,
      penalty_deduction = EXCLUDED.penalty_deduction,
+     awi_deduction_days = EXCLUDED.awi_deduction_days,
+     awi_deduction = EXCLUDED.awi_deduction,
+     late_login_count = EXCLUDED.late_login_count,
+     late_login_penalty = EXCLUDED.late_login_penalty,
+     half_days = EXCLUDED.half_days,
+     paid_sundays = EXCLUDED.paid_sundays,
+     unpaid_sundays = EXCLUDED.unpaid_sundays,
+     holidays = EXCLUDED.holidays,
+     auth_awi = EXCLUDED.auth_awi,
+     unauth_awi = EXCLUDED.unauth_awi,
+     full_days = EXCLUDED.full_days,
+     absent_days = EXCLUDED.absent_days,
+     paid_leave = EXCLUDED.paid_leave,
+     total_paid_days = EXCLUDED.total_paid_days,
      updated_at = CURRENT_TIMESTAMP
    RETURNING *`,
 [
   employee.id,
   period.monthStart,
   salary.monthlyCTC,
-  salary.earnedSalary,
+  salary.netPay,
   effectiveIncentives,
   effectiveDeductions,
   effectiveTax,
@@ -914,14 +1172,27 @@ const result = await client.query(
   calendar.workingDaysCount,
   round2(
     attendance.fullDays +
-    attendance.halfDays * 0.5 +
-    leave.paidLeaveUsed
+    attendance.halfDays * 0.5
   ),
   breakdown,
-  round2(leave.unpaidLeaveDays), // ✅ pure unpaid leave only
+  round2(leave.unpaidLeaveDays),
   leaveDeduction,
   leave.penaltyDays || 0,
   penaltyDeduction,
+  salary.awiDeductionDays || 0,
+  salary.awiDeduction || 0,
+  salary.lateLoginCount || 0,
+  salary.lateLoginPenalty || 0,
+  attendance.halfDays || 0,
+  calc.sandwich?.paidSundays?.length || 0,
+  calc.sandwich?.unpaidSundays?.length || 0,
+  calendar.holidayCount || 0,
+  attendance.authorizedAWI || 0, // auth_awi
+  attendance.unauthorizedAWI || 0, // unauth_awi
+  attendance.fullDays || 0,
+  Math.max(0, attendance.absentDays - (leave.paidLeaveUsed || 0)),
+  leave.paidLeaveUsed || 0,
+  salary.payableDays || 0,
 ]
 );
 
@@ -936,6 +1207,8 @@ const result = await client.query(
     client.release();
   }
 }
+
+console.log("✅✅✅ payrollService.js LOADED - NEW VERSION WITH SANDWICH FIXES ✅✅✅");
 
 export {
   calculatePayroll,
