@@ -513,12 +513,16 @@ router.get("/lifecycle/employee/:id/details", verifyToken, async (req, res) => {
     // Only return manually added system access from database - no defaults, no auto-detection
     // Invoice and OPS permissions should be granted at their respective admin pages
     const emp = employeeData.rows[0];
+    // System-access passwords are plaintext by design for the HR workflow,
+    // but only privileged roles may read them back.
+    const canViewPasswords = ["SUPER_ADMIN", "HR", "MANAGER", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role);
     const finalSystemAccess = systemAccess.rows.map(access => ({
       id: access.id,
       employee_id: access.employee_id,
       system_name: access.system_name,
       email: access.email || emp.email,
-      password: access.password || '',
+      password: canViewPasswords ? (access.password || '') : '',
+      password_visible: canViewPasswords && !!access.password,
       role: access.role || 'User',
       status: access.status || 'not_granted',
       notes: access.notes || ''
@@ -585,8 +589,8 @@ router.post("/lifecycle/assets", verifyToken, authorizeRoles("SUPER_ADMIN", "HR"
     }
 
     await client.query(
-      `INSERT INTO employee_assets (employee_id, asset_name, asset_type, tag_number, imei, phone_number, condition, status, notes, created_by, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)`,
+      `INSERT INTO employee_assets (employee_id, asset_name, asset_type, tag_number, imei, phone_number, condition, status, notes, created_by, assigned_by, assigned_date, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, CURRENT_DATE, CURRENT_TIMESTAMP)`,
       [employee_id, asset_name, asset_type, tag_number, imei, phone_number, condition, status || 'assigned', notes, req.user.id]
     );
 
@@ -831,18 +835,23 @@ router.post("/lifecycle/asset-return", verifyToken, authorizeRoles("SUPER_ADMIN"
     const { employee_id, asset_id, condition, notes, deduct_cost } = req.body;
     
     // Update asset status to returned
-    await client.query(
+    const updated = await client.query(
       `UPDATE employee_assets 
        SET status = 'returned', 
            condition = $1, 
            notes = $2, 
-           deduct_cost = $3, 
+           deduct_cost = COALESCE($3, FALSE),
            returned_date = CURRENT_TIMESTAMP, 
            returned_by = $4,
            updated_at = CURRENT_TIMESTAMP 
        WHERE id = $5 AND employee_id = $6`,
-      [condition, notes, deduct_cost, req.user.id, asset_id, employee_id]
+      [condition, notes, deduct_cost === undefined ? null : deduct_cost, req.user.id, asset_id, employee_id]
     );
+
+    if (updated.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: "Asset not found for this employee" });
+    }
     
     await client.query('COMMIT');
     
@@ -1037,7 +1046,7 @@ router.post("/lifecycle/reonboard-employee", verifyToken, authorizeRoles("SUPER_
     // Create new onboarding case
     await client.query(
       `INSERT INTO lifecycle_cases (employee_id, type, status, anchor_date, created_at)
-       VALUES ($1, 'ONBOARDING', 'IN_PROGRESS', CURRENT_DATE, CURRENT_TIMESTAMP)`,
+       VALUES ($1, 'ONBOARDING', 'OPEN', CURRENT_DATE, CURRENT_TIMESTAMP)`,
       [employee_id]
     );
 

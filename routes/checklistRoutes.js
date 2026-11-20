@@ -534,17 +534,17 @@ router.get("/checklists/assets/:employeeId", verifyToken, async (req, res) => {
 // Add asset for employee
 router.post("/checklists/assets", verifyToken, hasHrOrAdminRole, async (req, res) => {
   try {
-    const { employee_id, asset_name, asset_type, serial_number, asset_id, condition_notes, checklist_item_id } = req.body;
+    const { employee_id, asset_name, asset_type, serial_number, asset_id, tag_number, imei, phone_number, condition, condition_notes, notes, checklist_item_id } = req.body;
 
     if (!employee_id || !asset_name || !asset_type) {
       return res.status(400).json({ message: "Employee ID, asset name, and asset type are required" });
     }
 
     const result = await pool.query(
-      `INSERT INTO employee_assets (employee_id, asset_name, asset_type, serial_number, asset_id, condition_notes, assigned_by, checklist_item_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO employee_assets (employee_id, asset_name, asset_type, serial_number, asset_id, tag_number, imei, phone_number, condition, condition_notes, notes, status, assigned_by, created_by, assigned_date, checklist_item_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'assigned', $12, $12, CURRENT_DATE, $13)
        RETURNING *`,
-      [employee_id, asset_name, asset_type, serial_number, asset_id, condition_notes, req.user.id, checklist_item_id]
+      [employee_id, asset_name, asset_type, serial_number, asset_id, tag_number, imei, phone_number, condition, condition_notes, notes, req.user.id, checklist_item_id]
     );
 
     res.status(201).json(result.rows[0]);
@@ -558,17 +558,26 @@ router.post("/checklists/assets", verifyToken, hasHrOrAdminRole, async (req, res
 router.put("/checklists/assets/:id", verifyToken, hasHrOrAdminRole, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, returned_date, condition_notes } = req.body;
+    const { status, returned_date, condition_notes, condition, notes, deduct_cost, tag_number, imei, phone_number, asset_type, serial_number, asset_id } = req.body;
 
     const result = await pool.query(
       `UPDATE employee_assets
        SET status = COALESCE($1, status),
            returned_date = COALESCE($2, returned_date),
            condition_notes = COALESCE($3, condition_notes),
-           returned_by = $4
-       WHERE id = $5
+           condition = COALESCE($4, condition),
+           notes = COALESCE($5, notes),
+           deduct_cost = COALESCE($6, deduct_cost),
+           tag_number = COALESCE($7, tag_number),
+           imei = COALESCE($8, imei),
+           phone_number = COALESCE($9, phone_number),
+           asset_type = COALESCE($10, asset_type),
+           serial_number = COALESCE($11, serial_number),
+           asset_id = COALESCE($12, asset_id),
+           returned_by = CASE WHEN $1 = 'returned' THEN $13 ELSE returned_by END
+       WHERE id = $14
        RETURNING *`,
-      [status, returned_date, condition_notes, req.user.id, id]
+      [status, returned_date, condition_notes, condition, notes, deduct_cost, tag_number, imei, phone_number, asset_type, serial_number, asset_id, req.user.id, id]
     );
 
     if (result.rows.length === 0) {
