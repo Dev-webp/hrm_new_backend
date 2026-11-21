@@ -1,0 +1,127 @@
+diff --git a/routes/checklistRoutes.js b/routes/checklistRoutes.js
+index feb90dc..601ff17 100644
+--- a/routes/checklistRoutes.js
++++ b/routes/checklistRoutes.js
+@@ -534,17 +534,17 @@ router.get("/checklists/assets/:employeeId", verifyToken, async (req, res) => {
+ // Add asset for employee
+ router.post("/checklists/assets", verifyToken, hasHrOrAdminRole, async (req, res) => {
+   try {
+-    const { employee_id, asset_name, asset_type, serial_number, asset_id, condition_notes, checklist_item_id } = req.body;
++    const { employee_id, asset_name, asset_type, serial_number, asset_id, tag_number, imei, phone_number, condition, condition_notes, notes, checklist_item_id } = req.body;
+ 
+     if (!employee_id || !asset_name || !asset_type) {
+       return res.status(400).json({ message: "Employee ID, asset name, and asset type are required" });
+     }
+ 
+     const result = await pool.query(
+-      `INSERT INTO employee_assets (employee_id, asset_name, asset_type, serial_number, asset_id, condition_notes, assigned_by, checklist_item_id)
+-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
++      `INSERT INTO employee_assets (employee_id, asset_name, asset_type, serial_number, asset_id, tag_number, imei, phone_number, condition, condition_notes, notes, status, assigned_by, created_by, assigned_date, checklist_item_id)
++       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'assigned', $12, $12, CURRENT_DATE, $13)
+        RETURNING *`,
+-      [employee_id, asset_name, asset_type, serial_number, asset_id, condition_notes, req.user.id, checklist_item_id]
++      [employee_id, asset_name, asset_type, serial_number, asset_id, tag_number, imei, phone_number, condition, condition_notes, notes, req.user.id, checklist_item_id]
+     );
+ 
+     res.status(201).json(result.rows[0]);
+@@ -558,17 +558,26 @@ router.post("/checklists/assets", verifyToken, hasHrOrAdminRole, async (req, res
+ router.put("/checklists/assets/:id", verifyToken, hasHrOrAdminRole, async (req, res) => {
+   try {
+     const { id } = req.params;
+-    const { status, returned_date, condition_notes } = req.body;
++    const { status, returned_date, condition_notes, condition, notes, deduct_cost, tag_number, imei, phone_number, asset_type, serial_number, asset_id } = req.body;
+ 
+     const result = await pool.query(
+       `UPDATE employee_assets
+        SET status = COALESCE($1, status),
+            returned_date = COALESCE($2, returned_date),
+            condition_notes = COALESCE($3, condition_notes),
+-           returned_by = $4
+-       WHERE id = $5
++           condition = COALESCE($4, condition),
++           notes = COALESCE($5, notes),
++           deduct_cost = COALESCE($6, deduct_cost),
++           tag_number = COALESCE($7, tag_number),
++           imei = COALESCE($8, imei),
++           phone_number = COALESCE($9, phone_number),
++           asset_type = COALESCE($10, asset_type),
++           serial_number = COALESCE($11, serial_number),
++           asset_id = COALESCE($12, asset_id),
++           returned_by = $13
++       WHERE id = $14
+        RETURNING *`,
+-      [status, returned_date, condition_notes, req.user.id, id]
++      [status, returned_date, condition_notes, condition, notes, deduct_cost, tag_number, imei, phone_number, asset_type, serial_number, asset_id, req.user.id, id]
+     );
+ 
+     if (result.rows.length === 0) {
+diff --git a/routes/lifecycleRoutes.js b/routes/lifecycleRoutes.js
+index d9077a1..e3960b4 100644
+--- a/routes/lifecycleRoutes.js
++++ b/routes/lifecycleRoutes.js
+@@ -513,12 +513,16 @@ router.get("/lifecycle/employee/:id/details", verifyToken, async (req, res) => {
+     // Only return manually added system access from database - no defaults, no auto-detection
+     // Invoice and OPS permissions should be granted at their respective admin pages
+     const emp = employeeData.rows[0];
++    // System-access passwords are plaintext by design for the HR workflow,
++    // but only privileged roles may read them back.
++    const canViewPasswords = ["SUPER_ADMIN", "HR", "MANAGER", "OPERATIONAL_MANAGER", "SUB_ADMIN"].includes(req.user.role);
+     const finalSystemAccess = systemAccess.rows.map(access => ({
+       id: access.id,
+       employee_id: access.employee_id,
+       system_name: access.system_name,
+       email: access.email || emp.email,
+-      password: access.password || '',
++      password: canViewPasswords ? (access.password || '') : '',
++      password_visible: canViewPasswords && !!access.password,
+       role: access.role || 'User',
+       status: access.status || 'not_granted',
+       notes: access.notes || ''
+@@ -585,8 +589,8 @@ router.post("/lifecycle/assets", verifyToken, authorizeRoles("SUPER_ADMIN", "HR"
+     }
+ 
+     await client.query(
+-      `INSERT INTO employee_assets (employee_id, asset_name, asset_type, tag_number, imei, phone_number, condition, status, notes, created_by, created_at)
+-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)`,
++      `INSERT INTO employee_assets (employee_id, asset_name, asset_type, tag_number, imei, phone_number, condition, status, notes, created_by, assigned_by, assigned_date, created_at)
++       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, CURRENT_DATE, CURRENT_TIMESTAMP)`,
+       [employee_id, asset_name, asset_type, tag_number, imei, phone_number, condition, status || 'assigned', notes, req.user.id]
+     );
+ 
+@@ -831,18 +835,24 @@ router.post("/lifecycle/asset-return", verifyToken, authorizeRoles("SUPER_ADMIN"
+     const { employee_id, asset_id, condition, notes, deduct_cost } = req.body;
+     
+     // Update asset status to returned
+-    await client.query(
++    const updated = await client.query(
+       `UPDATE employee_assets 
+        SET status = 'returned', 
+            condition = $1, 
++           condition_notes = COALESCE($2, condition_notes),
+            notes = $2, 
+-           deduct_cost = $3, 
++           deduct_cost = COALESCE($3, FALSE), 
+            returned_date = CURRENT_TIMESTAMP, 
+            returned_by = $4,
+            updated_at = CURRENT_TIMESTAMP 
+        WHERE id = $5 AND employee_id = $6`,
+-      [condition, notes, deduct_cost, req.user.id, asset_id, employee_id]
++      [condition, notes, deduct_cost === undefined ? null : deduct_cost, req.user.id, asset_id, employee_id]
+     );
++
++    if (updated.rowCount === 0) {
++      await client.query('ROLLBACK');
++      return res.status(404).json({ message: "Asset not found for this employee" });
++    }
+     
+     await client.query('COMMIT');
+     
+@@ -1037,7 +1047,7 @@ router.post("/lifecycle/reonboard-employee", verifyToken, authorizeRoles("SUPER_
+     // Create new onboarding case
+     await client.query(
+       `INSERT INTO lifecycle_cases (employee_id, type, status, anchor_date, created_at)
+-       VALUES ($1, 'ONBOARDING', 'IN_PROGRESS', CURRENT_DATE, CURRENT_TIMESTAMP)`,
++       VALUES ($1, 'ONBOARDING', 'OPEN', CURRENT_DATE, CURRENT_TIMESTAMP)`,
+       [employee_id]
+     );
+ 

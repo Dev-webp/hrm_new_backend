@@ -51,7 +51,7 @@ import exceptionRoutes from "./routes/exceptionRoutes.js";
 import lifecycleRoutes from "./routes/lifecycleRoutes.js";
 import awiDeductionRoutes from "./routes/awiDeductionRoutes.js";
 import awiDetectionRoutes from "./routes/awiDetectionRoutes.js";
-import checklistRoutes from "./routes/checklistRoutes.js";
+import screenTimeRoutes from "./routes/screenTimeRoutes.js";
 import { initSocket } from "./socketManager.js";
 import { startBirthdayScheduler } from "./services/birthdayService.js";
 import { startTaskReminderScheduler } from "./services/taskReminderService.js";
@@ -171,8 +171,8 @@ app.use("/api/regularization", regularizationRoutes);
 app.use("/api/exceptions", exceptionRoutes);
 app.use("/api/awi-deductions", awiDeductionRoutes);
 app.use("/api/awi-detection", awiDetectionRoutes);
-app.use("/api", checklistRoutes);
 app.use("/api", lifecycleRoutes);
+app.use("/api", screenTimeRoutes);
 
 
 app.use((req, res) => {
