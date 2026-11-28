@@ -65,7 +65,7 @@ export async function createEmployee(client, data, actor, options = {}) {
       designation, bank_name, bank_account, bank_ifsc,
       aadhar_number, visible_password, invoice_access, invoice_permissions, ops_access, ops_permissions,
       employment_status, offer_letter_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
      RETURNING id`,
     [full_name, email, hashedPassword, role.toUpperCase(), department, branch, finalCode,
      salary, joining_date, date_of_birth || null, 'active', profile_initials,
