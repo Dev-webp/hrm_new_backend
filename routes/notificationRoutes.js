@@ -3,8 +3,35 @@ import express from "express";
 import { pool } from "../middleware/db.js";
 import { verifyToken, authorizeRoles } from "../middleware/auth.js";
 import { getIO } from "../socketManager.js";
+import { LEAVE_NOTIFICATION_ACTIONS } from "../utils/notificationPolicy.js";
 
 const router = express.Router();
+const LEAVE_ACTIONS_SQL = LEAVE_NOTIFICATION_ACTIONS.map((action) => `'${action}'`).join(", ");
+
+function addNotificationRoleFilter(conditions, params, role, branch) {
+  const actionPlaceholder = `$${params.length + 1}`;
+
+  if (role === "MANAGER") {
+    params.push(LEAVE_NOTIFICATION_ACTIONS, branch);
+    conditions.push(
+      "n.target_role IN ('MANAGER', 'BOTH')",
+      `n.action_type <> ALL(${actionPlaceholder}::text[])`,
+      `u.branch = $${params.length}`
+    );
+  } else if (role === "OPERATIONAL_MANAGER") {
+    params.push(LEAVE_NOTIFICATION_ACTIONS);
+    conditions.push(`n.action_type <> ALL(${actionPlaceholder}::text[])`);
+  } else if (role === "HR") {
+    params.push(LEAVE_NOTIFICATION_ACTIONS);
+    conditions.push(`n.action_type = ANY(${actionPlaceholder}::text[])`);
+  } else if (role === "SUB_ADMIN") {
+    params.push(LEAVE_NOTIFICATION_ACTIONS, branch);
+    conditions.push(
+      `n.action_type = ANY(${actionPlaceholder}::text[])`,
+      `u.branch = $${params.length}`
+    );
+  }
+}
 
 function parseIds(value) {
   if (!Array.isArray(value)) return [];
@@ -17,14 +44,12 @@ function isDateOnly(value) {
 
 async function unreadCountFor(user) {
   const params = [];
-  const managerScope = user.role === "MANAGER"
-    ? "AND n.target_role IN ('MANAGER', 'BOTH') AND u.branch = $1"
-    : "";
-  if (user.role === "MANAGER") params.push(user.branch);
+  const conditions = ["n.is_read = false"];
+  addNotificationRoleFilter(conditions, params, user.role, user.branch);
   const result = await pool.query(
     `SELECT COUNT(*) AS count FROM notifications n
      JOIN users u ON u.id = n.user_id
-     WHERE n.is_read = false ${managerScope}`,
+     WHERE ${conditions.join(" AND ")}`,
     params
   );
   return Number(result.rows[0]?.count || 0);
@@ -69,7 +94,7 @@ export async function createNotification({
 router.get(
   "/notifications",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "HR"),
   async (req, res) => {
     try {
       const { limit = 50, fromDate, toDate } = req.query;
@@ -83,10 +108,7 @@ router.get(
       }
       const params = [];
       const conditions = [];
-      if (role === "MANAGER") {
-        params.push(req.user.branch);
-        conditions.push(`n.target_role IN ('MANAGER', 'BOTH')`, `u.branch = $${params.length}`);
-      }
+      addNotificationRoleFilter(conditions, params, role, req.user.branch);
       if (fromDate) {
         params.push(fromDate);
         conditions.push(`n.created_at >= $${params.length}::date`);
@@ -120,7 +142,7 @@ router.get(
 router.get(
   "/notifications/unread-count",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "HR"),
   async (req, res) => {
     try {
       res.json({ count: await unreadCountFor(req.user) });
@@ -152,6 +174,7 @@ router.get(
          FROM notifications
          WHERE user_id = $1
            AND target_role = 'EMPLOYEE'
+           AND action_type NOT IN (${LEAVE_ACTIONS_SQL})
          ORDER BY created_at DESC
          LIMIT $2`,
         [req.user.id, Math.min(Number(limit) || 100, 200)]
@@ -176,6 +199,7 @@ router.get(
          FROM notifications
          WHERE user_id = $1
            AND target_role = 'EMPLOYEE'
+           AND action_type NOT IN (${LEAVE_ACTIONS_SQL})
            AND is_read = false`,
         [req.user.id]
       );
@@ -200,6 +224,7 @@ router.put(
          WHERE id = $1
            AND user_id = $2
            AND target_role = 'EMPLOYEE'
+           AND action_type NOT IN (${LEAVE_ACTIONS_SQL})
          RETURNING id`,
         [req.params.id, req.user.id]
       );
@@ -231,6 +256,7 @@ router.delete(
          WHERE id = $1
            AND user_id = $2
            AND target_role = 'EMPLOYEE'
+           AND action_type NOT IN (${LEAVE_ACTIONS_SQL})
          RETURNING id`,
         [req.params.id, req.user.id]
       );
@@ -250,16 +276,31 @@ router.delete(
 router.put(
   "/notifications/:id/read",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "HR"),
   async (req, res) => {
     try {
       const params = [req.params.id];
-      const scope = req.user.role === "MANAGER"
-        ? `AND target_role IN ('MANAGER', 'BOTH') AND EXISTS (
-             SELECT 1 FROM users u WHERE u.id = notifications.user_id AND u.branch = $2
-           )`
-        : "";
-      if (req.user.role === "MANAGER") params.push(req.user.branch);
+      let scope = "";
+      if (req.user.role === "MANAGER") {
+        params.push(LEAVE_NOTIFICATION_ACTIONS, req.user.branch);
+        scope = `AND target_role IN ('MANAGER', 'BOTH')
+          AND action_type <> ALL($2::text[])
+          AND EXISTS (
+            SELECT 1 FROM users u WHERE u.id = notifications.user_id AND u.branch = $3
+          )`;
+      } else if (req.user.role === "OPERATIONAL_MANAGER") {
+        params.push(LEAVE_NOTIFICATION_ACTIONS);
+        scope = "AND action_type <> ALL($2::text[])";
+      } else if (req.user.role === "HR") {
+        params.push(LEAVE_NOTIFICATION_ACTIONS);
+        scope = "AND action_type = ANY($2::text[])";
+      } else if (req.user.role === "SUB_ADMIN") {
+        params.push(LEAVE_NOTIFICATION_ACTIONS, req.user.branch);
+        scope = `AND action_type = ANY($2::text[])
+          AND EXISTS (
+            SELECT 1 FROM users u WHERE u.id = notifications.user_id AND u.branch = $3
+          )`;
+      }
       const result = await pool.query(
         `UPDATE notifications SET is_read = true WHERE id = $1 ${scope} RETURNING id`,
         params
@@ -279,23 +320,20 @@ router.put(
 router.put(
   "/notifications/mark-all-read",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "OPERATIONAL_MANAGER", "MANAGER", "SUB_ADMIN", "HR"),
   async (req, res) => {
     try {
       const role = req.user.role;
+      const params = [];
+      const conditions = ["n.user_id = u.id", "n.is_read = false"];
+      addNotificationRoleFilter(conditions, params, role, req.user.branch);
 
       await pool.query(
         `UPDATE notifications n
          SET is_read = true
          FROM users u
-         WHERE n.user_id = u.id
-         AND n.is_read = false
-         AND ${
-           ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(role)
-             ? "TRUE"
-             : "n.target_role IN ('MANAGER', 'BOTH') AND u.branch = $1"
-         }`,
-        ["SUPER_ADMIN", "OPERATIONAL_MANAGER"].includes(role) ? [] : [req.user.branch]
+         WHERE ${conditions.join(" AND ")}`,
+        params
       );
 
       res.json({ success: true });

@@ -341,7 +341,7 @@ router.put(
       const { id } = req.params;
       let { full_name, email, role, department, branch, salary, password,
             designation, bank_name, bank_account, bank_ifsc, aadhar_number, department_code,
-            invoice_access, invoice_permissions, joining_date, date_of_birth, ops_access, ops_permissions, phone_number } = req.body;
+            invoice_access, invoice_permissions, joining_date, date_of_birth, ops_access, ops_permissions } = req.body;
 
       console.log("[UPDATE EMPLOYEE] Received data:", { 
         invoice_access, 
@@ -386,25 +386,24 @@ router.put(
             designation = $8, bank_name = $9, bank_account = $10, bank_ifsc = $11,
             aadhar_number = $12, invoice_access = $13, invoice_permissions = $14,
             joining_date = $15, date_of_birth = $16,
-            ops_access = $17, ops_permissions = $18, phone_number = $19
+            ops_access = $17, ops_permissions = $18
       `;
       let params = [full_name, email, role.toUpperCase(), department, branch, salary,
                     getInitials(full_name), designation || null, bank_name || null,
                     bank_account || null, bank_ifsc || null, aadhar_number || null,
                     invoice_access === true, JSON.stringify(invoice_permissions || {}),
                     joining_date || null, date_of_birth || null,
-                    ops_access === true, JSON.stringify(ops_permissions || {}),
-                    phone_number || null];
+                    ops_access === true, JSON.stringify(ops_permissions || {})];
 
       // If password is provided, update both hashed and visible password
       if (password && password.trim() !== "") {
         const hashedPassword = await bcrypt.hash(password, 10);
-        updateQuery += `, password = $20, visible_password = $21`;
+        updateQuery += `, password = $19, visible_password = $20`;
         params.push(hashedPassword, password);
-        updateQuery += ` WHERE id = $22 RETURNING id`;
+        updateQuery += ` WHERE id = $21 RETURNING id`;
         params.push(id);
       } else {
-        updateQuery += ` WHERE id = $20 RETURNING id`;
+        updateQuery += ` WHERE id = $19 RETURNING id`;
         params.push(id);
       }
 

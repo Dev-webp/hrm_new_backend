@@ -10,6 +10,7 @@
 // Then call them AFTER the DB operation succeeds.
 
 import { emitNotification } from "../socketManager.js";
+import { LEAVE_NOTIFICATION_TARGET_ROLE } from "../utils/notificationPolicy.js";
 import {
   formatProductionHours,
   formatTime12Hour,
@@ -81,7 +82,7 @@ export async function notifyLeaveApply(user, leave) {
     actionType: "leave_request",
     description: `📋 Leave Request: ${user.full_name} applied for ${leave.leave_type} leave (${requestedDays} day${requestedDays > 1 ? "s" : ""}) — ${leave.from_date} to ${leave.to_date}`,
     relatedId: leave.id,
-    targetRole: "BOTH",
+    targetRole: LEAVE_NOTIFICATION_TARGET_ROLE,
     branch: user.branch,
   });
 }
@@ -99,7 +100,7 @@ export async function notifyLeaveStatus(updatedBy, leave, newStatus) {
     actionType: "leave_status",
     description: `${emoji} Leave ${newStatus.toUpperCase()}: ${leave.user_name}'s ${leave.leave_type} leave was ${newStatus} by ${updatedBy.full_name}`,
     relatedId: leave.id,
-    targetRole: "BOTH",
+    targetRole: LEAVE_NOTIFICATION_TARGET_ROLE,
     branch: leave.branch,
   });
 }
@@ -183,7 +184,7 @@ export async function notifyLeaveDeleted(deletedBy, leave, selfDeleted = false) 
       ? "Your leave request has been deleted successfully."
       : `Your leave request has been deleted by ${deletedBy.role || "Admin"}.`,
     relatedId: leave.id,
-    targetRole: "EMPLOYEE",
+    targetRole: LEAVE_NOTIFICATION_TARGET_ROLE,
     branch: leave.branch,
   });
 }

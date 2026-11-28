@@ -8,6 +8,10 @@
 import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
 import { pool } from "./middleware/db.js";
+import {
+  LEAVE_NOTIFICATION_ACTIONS,
+  getLeaveNotificationRooms,
+} from "./utils/notificationPolicy.js";
 
 let io;
 
@@ -53,6 +57,7 @@ export function initSocket(server) {
     // Join role & branch rooms
     socket.join(`role:${role}`);
     if (branch) socket.join(`branch:${branch}`);
+    if (role === "SUB_ADMIN" && branch) socket.join(`role:SUB_ADMIN:branch:${branch}`);
     if (userId) socket.join(`user:${userId}`);
 
     // Track online
@@ -83,13 +88,27 @@ export function initSocket(server) {
         let idx = 1;
 
         if (role === "MANAGER") {
-          query += ` AND (n.target_role='MANAGER' OR n.target_role='BOTH') AND u.branch=$${idx}`;
+          query += ` AND (n.target_role='MANAGER' OR n.target_role='BOTH')
+            AND n.action_type <> ALL($${idx}::text[]) AND u.branch=$${idx + 1}`;
+          params.push(LEAVE_NOTIFICATION_ACTIONS); idx++;
           params.push(branch); idx++;
         } else if (role === "SUPER_ADMIN") {
           query += ` AND (n.target_role='SUPER_ADMIN' OR n.target_role='BOTH')`;
+        } else if (role === "HR") {
+          query += ` AND n.action_type = ANY($${idx}::text[])`;
+          params.push(LEAVE_NOTIFICATION_ACTIONS); idx++;
+        } else if (role === "SUB_ADMIN") {
+          query += ` AND n.action_type = ANY($${idx}::text[]) AND u.branch=$${idx + 1}`;
+          params.push(LEAVE_NOTIFICATION_ACTIONS); idx++;
+          params.push(branch); idx++;
+        } else if (role === "OPERATIONAL_MANAGER") {
+          query += ` AND n.action_type <> ALL($${idx}::text[])`;
+          params.push(LEAVE_NOTIFICATION_ACTIONS); idx++;
         } else if (role === "EMPLOYEE") {
-          query += ` AND n.target_role='EMPLOYEE' AND n.user_id=$${idx}`;
+          query += ` AND n.target_role='EMPLOYEE' AND n.user_id=$${idx}
+            AND n.action_type <> ALL($${idx + 1}::text[])`;
           params.push(userId); idx++;
+          params.push(LEAVE_NOTIFICATION_ACTIONS); idx++;
         }
 
         const countResult = await pool.query(
@@ -175,10 +194,18 @@ export async function emitNotification({
       [userId, actionType, description, relatedId, targetRole]
     );
     const notif = { ...result.rows[0], user_name: "", branch };
+    const isLeaveNotification = LEAVE_NOTIFICATION_ACTIONS.includes(actionType);
 
     if (targetRole === "SUPER_ADMIN" || targetRole === "BOTH") {
       io?.to("role:SUPER_ADMIN").emit("new_notification", notif);
-      io?.to("role:OPERATIONAL_MANAGER").emit("new_notification", notif);
+      if (!isLeaveNotification) {
+        io?.to("role:OPERATIONAL_MANAGER").emit("new_notification", notif);
+      }
+    }
+    if (isLeaveNotification) {
+      for (const room of getLeaveNotificationRooms(branch)) {
+        io?.to(room).emit("new_notification", notif);
+      }
     }
     if ((targetRole === "MANAGER" || targetRole === "BOTH") && branch) {
       io?.to(`branch:${branch}`).emit("new_notification", notif);

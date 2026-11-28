@@ -22,6 +22,39 @@ import {
 
 const router = express.Router();
 
+// Minimal attendance feed for Walk-In consultant assignment. This stays on the
+// existing server-to-server integration surface and never returns credentials.
+router.get("/walk-in/checked-in", verifyUnifiedIntegration, async (_req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT u.id, u.employee_code, u.full_name, u.email,
+             u.department, u.branch, a.check_in_time,
+             active_break.break_type AS active_break_type,
+             (active_break.user_id IS NOT NULL) AS is_on_break
+      FROM attendance_records a
+      JOIN users u ON u.id = a.user_id
+      LEFT JOIN LATERAL (
+        SELECT b.user_id, b.break_type
+        FROM employee_breaks b
+        WHERE b.user_id = u.id
+          AND b.date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          AND b.start_time IS NOT NULL AND b.end_time IS NULL
+        ORDER BY b.start_time DESC
+        LIMIT 1
+      ) active_break ON TRUE
+      WHERE a.date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+        AND a.check_in_time IS NOT NULL
+        AND a.check_out_time IS NULL
+        AND LOWER(COALESCE(u.status, 'active')) = 'active'
+      ORDER BY u.full_name ASC
+    `);
+    return res.json({ success: true, employees: result.rows });
+  } catch (error) {
+    console.error("[WALK_IN_CHECKED_IN_EMPLOYEES_FAILED]", error);
+    return res.status(500).json({ success: false, message: "Failed to load checked-in employees" });
+  }
+});
+
 
 function monthRange(yearMonth) {
   const [year, month] = yearMonth.split("-").map(Number);

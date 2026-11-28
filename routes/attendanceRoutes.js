@@ -1385,7 +1385,8 @@ router.get("/attendance", verifyToken, async (req, res) => {
             FROM employee_breaks b
             WHERE b.user_id = ar.user_id
               AND b.date = $1::date
-          ), ar.total_break_minutes, 0) AS total_break_minutes
+          ), ar.total_break_minutes, 0) AS total_break_minutes,
+          COALESCE(st.total_seconds, 0) AS screen_time_seconds
        FROM attendance_records ar
        LEFT JOIN employee_breaks b1
          ON b1.user_id = ar.user_id
@@ -1403,6 +1404,9 @@ router.get("/attendance", verifyToken, async (req, res) => {
          ON b3.user_id = ar.user_id
         AND b3.date = ar.date
         AND b3.break_type = 'break3'
+       LEFT JOIN screen_time_records st
+         ON st.user_id = ar.user_id
+        AND st.date = ar.date
        WHERE ar.date = $1::date`,
       [date]
     );
